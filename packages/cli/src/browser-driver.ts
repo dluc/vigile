@@ -35,6 +35,15 @@ export interface Box {
   height: number;
 }
 
+/**
+ * Chromium inherits most of the test process's environment, but not a desktop session bus. A stale or remote
+ * D-Bus address can make every navigation to a plain local page wait for seconds, turning the suite into a hang.
+ */
+export function browserEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const { DBUS_SESSION_BUS_ADDRESS: _desktopSession, ...clean } = environment;
+  return clean;
+}
+
 export class Page {
   /** Uncaught errors the page threw. */
   readonly errors: string[] = [];
@@ -66,6 +75,7 @@ export class Page {
     const profile = mkdtempSync(join(tmpdir(), "vigile-browser-"));
     const child = spawn(binary, ["--headless=new", "--no-sandbox", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"], {
       stdio: ["ignore", "ignore", "pipe"],
+      env: browserEnvironment(),
     });
     // The browser picks a free port and prints it.
     const port = await new Promise<number>((resolve, reject) => {
