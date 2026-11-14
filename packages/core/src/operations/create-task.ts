@@ -5,7 +5,7 @@ import { refText, taskId, taskPrefix } from "../ids.js";
 import { ASSIGNED_TO, CONTAINS, DEPENDS_ON } from "../link-types.js";
 import { LIMITS, type Node, type TaskNode } from "../model.js";
 import { defineWrite } from "../operation.js";
-import { describe, errorItem, loopPath, requireLive, resolveRef } from "../rules.js";
+import { checkContainerAcceptsWork, describe, errorItem, loopPath, requireLive, resolveRef } from "../rules.js";
 import { taskSummary } from "../views.js";
 import { linkView } from "./links.js";
 import { newLink, parentTask, priority, requiredText, size, statusEntry, taskType, title, unique, value, why } from "./shared.js";
@@ -13,7 +13,7 @@ import { newLink, parentTask, priority, requiredText, size, statusEntry, taskTyp
 export const createTask = defineWrite({
   name: "create_task",
   description:
-    "Create a task. It starts as open, ready to be worked on, unless created as a draft. Say why the work matters when you know. Give the project to place it in, and the tasks or projects it depends on, in the same call. When the work has several steps, consider grouping them: create one task for the feature or epic, then create each step with parent set to it. Grouping is optional. Set type to bug, issue or incident for a problem, so it stands out from planned work. The ID is assigned by the service: the project's prefix followed by a number.",
+    "Create a task. It starts as open, ready to be worked on, unless created as a draft. Say why the work matters when you know. Give the project to place it in, and the tasks or projects it depends on, in the same call. A completed parent must be reopened first: new work is never put behind a done task container implicitly. When the work has several steps, consider grouping them: create one task for the feature or epic, then create each step with parent set to it. Grouping is optional. Set type to bug, issue or incident for a problem, so it stands out from planned work. The ID is assigned by the service: the project's prefix followed by a number.",
   access: "all",
   input: z.strictObject({
     title,
@@ -42,6 +42,7 @@ export const createTask = defineWrite({
       requireLive(holder);
       holders.push(holder);
     }
+    if (parent) checkContainerAcceptsWork(ctx.graph, parent);
     const dependencies = unique((input.depends_on ?? []).map((ref) => resolveRef(ctx.graph, ref, ["task", "project"])));
     dependencies.forEach(requireLive);
     const users = unique((input.assigned_to ?? []).map((ref) => resolveRef(ctx.graph, ref, ["user"])));

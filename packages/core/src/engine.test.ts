@@ -623,7 +623,7 @@ describe("containers and projects", () => {
     await agent("set_task_status", { id: group.id, version: 1, status: "done" });
   });
 
-  it("flags a group that is done but has come to hold unfinished tasks, however that came about", async () => {
+  it("flags a group that is done when existing work inside is reopened or restored", async () => {
     const problems = async (all: Awaited<ReturnType<typeof setup>>, id: string) => ((await all.agent("get", { id })).problems ?? []).map((p: any) => p.code);
     const flagged = async (all: Awaited<ReturnType<typeof setup>>) => (await all.agent("list_tasks", { has_problems: true })).tasks.map((t: any) => t.title);
     /** A group with one task inside, both done. */
@@ -649,20 +649,6 @@ describe("containers and projects", () => {
     await reopened.agent("set_task_status", { id: reopened.inner, version: 3, status: "cancelled" });
     assert.deepEqual(await problems(reopened, reopened.group), []);
 
-    // A task is created inside the done group.
-    const added = await finished();
-    await added.agent("create_task", task("Added later", { parent: added.group }));
-    assert.deepEqual(await problems(added, added.group), ["done_with_unfinished_contents"]);
-
-    // A task is taken out, the group is marked done, and the task is put back.
-    const moved = await setup();
-    const outer = await moved.agent("create_task", task("Group"));
-    const inside = await moved.agent("create_task", task("Inner", { parent: outer.id }));
-    await moved.agent("remove_link", { from: outer.id, type: "contains", to: inside.id });
-    await moved.agent("set_task_status", { id: outer.id, version: 1, status: "done" });
-    await moved.agent("add_link", { from: outer.id, type: "contains", to: inside.id });
-    assert.deepEqual(await problems(moved, outer.id), ["done_with_unfinished_contents"]);
-
     // A task is deleted, the group is marked done, and the task is restored.
     const restored = await setup();
     const holder = await restored.agent("create_task", task("Group"));
@@ -671,6 +657,36 @@ describe("containers and projects", () => {
     await restored.agent("set_task_status", { id: holder.id, version: 1, status: "done" });
     await restored.agent("restore", { id: gone.id });
     assert.deepEqual(await problems(restored, holder.id), ["done_with_unfinished_contents"]);
+  });
+
+  it("refuses new containment through a completed task and says to reopen it first", async () => {
+    const { agent } = await setup();
+    const outer = await agent("create_task", task("Completed epic"));
+    const inner = await agent("create_task", task("Open feature", { parent: outer.id }));
+    const deletedMiddle = await agent("create_task", task("Deleted middle", { parent: outer.id }));
+    const belowDeleted = await agent("create_task", task("Below deleted", { parent: deletedMiddle.id }));
+    const loose = await agent("create_task", task("Loose task"));
+    await agent("set_task_status", { id: inner.id, version: 1, status: "done" });
+    await agent("set_task_status", { id: belowDeleted.id, version: 1, status: "done" });
+    await agent("set_task_status", { id: deletedMiddle.id, version: 1, status: "done" });
+    await agent("set_task_status", { id: outer.id, version: 1, status: "done" });
+    await agent("set_task_status", { id: inner.id, version: 2, status: "open" });
+    await agent("delete", { id: deletedMiddle.id, version: 2 });
+    await agent("set_task_status", { id: belowDeleted.id, version: 2, status: "open" });
+
+    for (const [what, call] of [
+      ["direct creation", () => agent("create_task", task("Added directly", { parent: outer.id }))],
+      ["nested creation", () => agent("create_task", task("Added below", { parent: inner.id }))],
+      ["direct link", () => agent("add_link", { from: outer.id, type: "contains", to: loose.id })],
+      ["nested link", () => agent("add_link", { from: inner.id, type: "contains", to: loose.id })],
+      ["creation through a deleted group", () => agent("create_task", task("Added through deleted", { parent: belowDeleted.id }))],
+    ] as const) {
+      const error = await refusal(call());
+      assert.equal(error.rule, "completed_container", what);
+      assert.deepEqual(error.blocking?.map((item) => item.id), [outer.id], what);
+      assert.match(error.actions?.[0] ?? "", new RegExp(`set_task_status.*${outer.id}.*version 2.*status "open"`), what);
+    }
+    assert.equal((await agent("list_tasks", {})).tasks.length, 4, "no refused creation or link changed the plan");
   });
 
   it("looks below sub-groups, also cancelled ones, before a group is marked done", async () => {

@@ -86,6 +86,31 @@ export function requireVersion(node: Node, version: number, current: () => Summa
 export const describe = (node: Node): string =>
   node.kind === "user" ? `User ${node.username}` : `${node.kind === "task" ? "Task" : "Project"} ${refText(node)}`;
 
+/** Refuses putting work behind a completed task container; reopening stored status must be an explicit change. */
+export function checkContainerAcceptsWork(graph: GraphView, holder: Node): void {
+  if (holder.kind !== "task") return;
+  const completed: TaskNode[] = [];
+  const seen = new Set<string>();
+  const queue: TaskNode[] = [holder];
+  for (let next = 0; next < queue.length; next++) {
+    const current = queue[next]!;
+    if (seen.has(current.id)) continue;
+    seen.add(current.id);
+    if (current.status === "done" && isLive(current)) completed.push(current);
+    for (const link of graph.in(current, CONTAINS)) {
+      const parent = graph.node(link.from);
+      // Deleted groups are transparent to containment: walk through them to the live ancestors above.
+      if (parent?.kind === "task") queue.push(parent);
+    }
+  }
+  if (!completed.length) return;
+  const first = completed[0]!;
+  throw refused("completed_container", `${describe(holder)} cannot receive work because ${completed.length === 1 ? describe(first) : `${completed.length} task containers on its path`} ${completed.length === 1 ? "is" : "are"} done.`, {
+    ...blockedBy(completed),
+    actions: [`Reopen ${describe(first)} first: call set_task_status with id "${refText(first)}", version ${first.version} and status "open".`],
+  });
+}
+
 /** Refuses a status change the rules do not allow, saying what is in the way and what can be done. */
 export function checkTaskMove(graph: GraphView, task: TaskNode, to: TaskStatus): void {
   if (task.status === to) {
@@ -180,6 +205,7 @@ export function checkNewLink(graph: GraphView, linkType: LinkType, from: Node, t
     );
   }
   if (sameRef(from, to)) throw refused("self_link", `${describe(from)} cannot be linked to itself.`);
+  if (linkType.type === CONTAINS) checkContainerAcceptsWork(graph, from);
   if (linkType.effect === "groups" || linkType.effect === "holds_back") {
     const path = loopPath(graph, from, to);
     if (path) {
