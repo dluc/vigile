@@ -4999,6 +4999,1358 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
   });
 
   /**
+   * Zooming the board, on a service of its own with a small plan made for it: two groups at the top; a group that
+   * sits inside both of them and holds a group which holds another; a task in two groups; a task that one group
+   * holds directly and also through its sub-group; tasks in no group; and a second project in which nothing holds
+   * anything. Eighteen tasks, five levels deep.
+   */
+  describe("zoom", () => {
+    let zooDirectory: string;
+    let zooConfig: string;
+    let zoo: Service;
+    const z: Record<string, string> = {};
+    const plan = (operation: string, input: Record<string, unknown>) => zoo.engine.execute(operation, "agent1", input) as Promise<any>;
+    const add = async (key: string, title: string, extra: Record<string, unknown> = {}) => (z[key] = (await plan("create_task", { title, description: "d", project: "ZOO", ...extra })).id as string);
+    const to = async (id: string, ...statuses: string[]) => {
+      let version = (await plan("get", { id })).version;
+      for (const status of statuses) version = (await plan("set_task_status", { id, version, status })).version;
+    };
+    const open = async (path = "/") => {
+      await page.open("about:blank");
+      await page.open(`${zoo.urls.base}${path}`);
+      await page.until("return /^(Updated|Live)/.test(document.getElementById('sync').textContent)", "the page to show its data");
+    };
+    const hash = () => page.run<string>("return location.hash");
+    /** What the control above the board says, or nothing when it has stepped aside. */
+    const level = () => page.run<string | null>("return document.getElementById('levels').hidden ? null : document.getElementById('level').textContent");
+    /** Whether each end of the control says there is nothing further: out, in. */
+    const ends = () => page.run<string[]>("return ['level-out', 'level-in'].map((id) => document.getElementById(id).getAttribute('aria-disabled'))");
+    /** The cards on the board by their task, in order of ID, a closed group marked with a star. */
+    const cards = () => page.run<string[]>("return [...document.querySelectorAll('#board .card')].map((c) => c.dataset.id + (c.matches('.closed') ? '*' : '')).sort()");
+    const these = (...keys: string[]) => keys.map((key) => (key.endsWith("*") ? `${z[key.slice(0, -1)]}*` : z[key]!)).sort();
+    const card = (key: string) => `document.querySelector('#board .card[data-id="${z[key]}"]')`;
+    /** What a card says: its column, what it calls itself, its tags, its bar, and the button beside it that zooms in. */
+    const says = (key: string) =>
+      page.run<{ column: string; kind: string | null; tags: string[]; bar: string | null; button: string | null; name: string | null }>(
+        `const card = ${card(key)}; const beside = card.nextElementSibling?.matches('.zoom-into') ? card.nextElementSibling : null;
+         return { column: card.closest('.column').dataset.key, kind: card.querySelector('.kind')?.textContent ?? null, tags: [...card.querySelectorAll('.tag')].map((t) => t.textContent), bar: card.querySelector('.bar')?.getAttribute('aria-label') ?? null, button: beside ? [...beside.children].map((part) => part.textContent).join(' / ') : null, name: beside?.getAttribute('aria-label') ?? null }`,
+      );
+    const into = (key: string) => page.click(`#board .zoom-into[data-id="${z[key]}"]`);
+    const trail = () => text("#scope");
+    /** Which control has the keyboard: the task of a card or of a button beside one, with the button's class, or else its id or its class. */
+    const focused = () => page.run<string>("const at = document.activeElement; return at.dataset?.id ? at.dataset.id + (at.matches('.zoom-into') ? ' zoom-into' : '') : at.id || at.className || at.tagName");
+    /** Where the keyboard is, and whether that is something a person can see: never the page itself, never a hidden control. */
+    const keyboard = () =>
+      page.run<string>(
+        "const at = document.activeElement; const seen = at !== document.body && at.getClientRects().length > 0 && getComputedStyle(at).visibility !== 'hidden'; const name = at.dataset?.id ? at.dataset.id + (at.matches('.zoom-into') ? ' zoom-into' : '') : at.id || at.className || at.tagName; return name + (seen ? '' : ' (not in sight)')",
+      );
+    const focusOn = (selector: string) => page.run(`document.querySelector(${JSON.stringify(selector)}).focus({ preventScroll: true })`);
+    const on = (key: string) => `#board .card[data-id="${z[key]}"]`;
+    const zoomOf = (key: string) => `#board .zoom-into[data-id="${z[key]}"]`;
+    /** Goes back or forward in the browser's history, and waits for the address that is expected there. */
+    const travel = async (direction: "back" | "forward", address: string) => {
+      await page.run(`history.${direction}()`);
+      await page.until(`return location.hash === ${JSON.stringify(address)}`, `${direction} to ${address}`);
+    };
+    /** Changes an item at its present version, as another client would. */
+    const alter = async (operation: string, input: { id: string } & Record<string, unknown>) => plan(operation, { ...input, version: (await plan("get", { id: input.id })).version });
+    const live = () => page.until("return document.getElementById('sync').textContent.startsWith('Live')", "the page to say it is live");
+    const TOP = ["alpha*", "beta*", "loose", "free", "f1", "f2"];
+    const TWO = ["alpha", "beta", "loose", "free", "f1", "f2", "a1", "a2", "sub*", "both", "near", "b1"];
+    const THREE = ["alpha", "beta", "loose", "free", "f1", "f2", "a1", "a2", "sub", "both", "near", "b1", "s1", "s2", "s3", "deep*"];
+    const FOUR = ["alpha", "beta", "loose", "free", "f1", "f2", "a1", "a2", "sub", "both", "near", "b1", "s1", "s2", "s3", "deep", "pit*"];
+    const ALL = ["alpha", "beta", "loose", "free", "f1", "f2", "a1", "a2", "sub", "both", "near", "b1", "s1", "s2", "s3", "deep", "pit", "d1"];
+
+    before(async () => {
+      zooDirectory = mkdtempSync(join(tmpdir(), "vigile-browser-test-zoom-"));
+      zooConfig = join(zooDirectory, "config.toml");
+      initConfig(zooConfig, { name: "zoom", port: await freePort() });
+      zoo = await startService({ loaded: loadConfig(zooConfig, {}), log: () => {}, warn: () => {} });
+      await plan("create_project", { title: "Zoo", prefix: "ZOO" });
+      await plan("create_project", { title: "Flat", prefix: "FLAT" });
+      await add("alpha", "Alpha", { priority: 3 });
+      await add("a1", "First of alpha", { parent: z.alpha });
+      await add("a2", "Second of alpha", { parent: z.alpha });
+      await add("sub", "Shared sub-group", { parent: z.alpha });
+      await add("s1", "Sub one", { parent: z.sub });
+      await add("s2", "Sub two", { parent: z.sub, depends_on: [z.s1] });
+      await add("s3", "Sub bug", { parent: z.sub, type: "bug" });
+      await add("deep", "Deep group", { parent: z.sub });
+      await add("pit", "Pit group", { parent: z.deep });
+      await add("d1", "Deepest task", { parent: z.pit });
+      await add("both", "In two groups", { parent: z.alpha });
+      await add("near", "Near and far", { parent: z.alpha });
+      await add("beta", "Beta");
+      await add("b1", "Only of beta", { parent: z.beta });
+      await add("loose", "In no group");
+      z.free = (await plan("create_task", { title: "In no project", description: "d" })).id;
+      await add("f1", "Flat one", { project: "FLAT" });
+      await add("f2", "Flat two", { project: "FLAT" });
+      // The task in two groups, the group in two groups, and the task that its group holds both directly and through the sub-group.
+      await plan("add_link", { from: z.beta, type: "contains", to: z.both });
+      await plan("add_link", { from: z.beta, type: "contains", to: z.sub });
+      await plan("add_link", { from: z.sub, type: "contains", to: z.near });
+      await to(z.a1!, "in_progress", "done");
+      await to(z.a2!, "in_progress");
+      await to(z.s3!, "in_progress");
+    });
+
+    after(async () => {
+      await zoo?.stop();
+      if (zooDirectory) rmSync(zooDirectory, { recursive: true, force: true });
+    });
+
+    it("shows everything unless zoomed out; each step out closes one more level of groups, whose cards then stand for what they hold, and each step in opens it again", async () => {
+      await page.size(1440, 900);
+      await open();
+      // As the page opens, nothing is closed: every task has its card, as before there was a zoom.
+      assert.deepEqual([await hash(), await level(), await ends()], ["", "Everything", ["false", "true"]]);
+      assert.deepEqual(await cards(), these(...ALL));
+      assert.equal(await count("#board .zoom-into, #board .kind, #board .holder"), 0);
+      assert.match(await text("#summary"), /^18 tasks\s*2 in progress\s*14 next\s*1 waiting\s*1 done\s*1 open bug, issue or incident$/);
+      assert.deepEqual((await says("alpha")).tags, ["1/11 done", "ZOO"], "an open group's card is the one it always had");
+      await layout("on the board with everything shown and the zoom above it");
+
+      // One step out closes the deepest groups, and only those.
+      await page.click("#level-out");
+      assert.deepEqual([await hash(), await level(), await ends()], ["#board?zoom=4", "4 levels", ["false", "false"]]);
+      assert.deepEqual(await cards(), these(...FOUR));
+      assert.deepEqual(await says("pit"), { column: "next", kind: "group", tags: ["0/1 done", `in ${z.deep}`, "ZOO"], bar: "0% finished", button: "Zoom in / holds 1 task", name: `Zoom into ${z.pit}: show only the 1 task it holds` });
+      assert.match(await text("#summary"), /^17 cards for 18 tasks\s*2 in progress\s*13 next\s*1 waiting\s*1 done/);
+      await page.click("#level-out");
+      assert.deepEqual([await hash(), await level()], ["#board?zoom=3", "3 levels"]);
+      assert.deepEqual(await cards(), these(...THREE));
+      assert.equal((await says("deep")).button, "Zoom in / holds 2 tasks", "a closed group counts what it holds at any depth");
+
+      // At two levels the task that Alpha holds directly, and also through its sub-group, is still there: it
+      // shows as soon as one way to it is open. The sub-group stands for the rest of what it holds.
+      await page.click("#level-out");
+      assert.deepEqual([await hash(), await level()], ["#board?zoom=2", "2 levels"]);
+      assert.deepEqual(await cards(), these(...TWO));
+      assert.deepEqual((await says("sub")).tags, ["0/7 done", "1 in progress", "1 waiting", "1 open bug or issue", `in ${z.alpha}`, `in ${z.beta}`, "ZOO"]);
+      assert.deepEqual((await says("near")).tags, [`in ${z.alpha}`, `in ${z.sub}`, "ZOO"]);
+      assert.match(await text("#summary"), /^12 cards for 18 tasks\s*1 in progress\s*10 next\s*0 waiting\s*1 done$/, "the counts are of the cards, and the bug inside the closed group is not among them");
+
+      // All the way out: the groups that are in nothing, and the tasks that are in no group.
+      await page.click("#level-out");
+      assert.deepEqual([await hash(), await level(), await ends()], ["#board?zoom=1", "Top level", ["true", "false"]]);
+      assert.deepEqual(await cards(), these(...TOP));
+      assert.deepEqual(await says("alpha"), {
+        // A group's card stands in the column of the group's own state, at every zoom.
+        column: "next",
+        kind: "group",
+        tags: ["1/11 done", "2 in progress", "1 waiting", "1 open bug or issue", "ZOO"],
+        bar: "9% finished",
+        button: "Zoom in / holds 11 tasks",
+        name: `Zoom into ${z.alpha}: show only the 11 tasks it holds`,
+      });
+      // The group and the task that are in both groups are counted in each, and once in the total.
+      assert.deepEqual((await says("beta")).tags, ["0/10 done", "1 in progress", "1 waiting", "1 open bug or issue", "ZOO"]);
+      assert.match(await text("#summary"), /^6 cards for 18 tasks\s*0 in progress\s*6 next\s*0 waiting\s*0 done$/);
+      assert.deepEqual(await columns(), { "In progress": 0, Next: 6, Done: 0 });
+      assert.deepEqual(await page.run<string[]>("return [...document.querySelectorAll('.column[data-key=\"next\"] .card')].slice(0, 2).map((c) => c.dataset.id)"), [z.alpha, z.beta], "the closed groups come first in their column");
+      await layout("on the board zoomed out to the top level");
+      // There is nothing further out: the button says so and does nothing.
+      assert.match(await page.run<string>("return document.getElementById('level-out').title"), /nothing further to zoom out to/);
+      await page.click("#level-out");
+      assert.deepEqual([await hash(), await level(), await cards()], ["#board?zoom=1", "Top level", these(...TOP)]);
+
+      // And in again, a level at a time, back to every task.
+      await page.click("#level-in");
+      assert.deepEqual([await hash(), await cards()], ["#board?zoom=2", these(...TWO)]);
+      for (const step of [3, 4]) {
+        await page.click("#level-in");
+        assert.equal(await hash(), `#board?zoom=${step}`);
+      }
+      await page.click("#level-in");
+      assert.deepEqual([await hash(), await level(), await ends(), await cards()], ["#board", "Everything", ["false", "true"], these(...ALL)]);
+      await page.click("#level-in");
+      assert.equal(await hash(), "#board", "nothing further in");
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("zooms into one group from the button on its card, shows where it is as a trail that leads back out, and treats the panel's button as the same thing", async () => {
+      await page.size(1440, 900);
+      await open("/#board?zoom=1");
+      // A click on the card itself opens its panel, as on any card.
+      await page.click(`#board .card[data-id="${z.alpha}"]`);
+      await page.until("return document.querySelector('.detail-title')?.textContent === 'Alpha'", "the group's panel");
+      assert.equal(await hash(), `#board/${z.alpha}?zoom=1`);
+      assert.deepEqual(await cards(), these(...TOP), "and the board behind it stays as it was");
+      await page.key("Escape");
+      assert.equal(await hash(), "#board?zoom=1");
+
+      // The button beside it zooms into the group: what it holds, with as many levels open as before.
+      await into("alpha");
+      assert.deepEqual([await hash(), await level(), await panelOpen()], [`#board?in=${z.alpha}&zoom=1`, "Top level", false]);
+      assert.deepEqual(await cards(), these("a1", "a2", "sub*", "both", "near"));
+      assert.match(await text("#summary"), /^5 cards for 11 tasks/);
+      assert.equal(await trail(), `in all projects › ${z.alpha} · Alpha✕ leave group`);
+      await layout("inside a group at its top level");
+      await into("sub");
+      assert.equal(await hash(), `#board?in=${z.alpha}/${z.sub}&zoom=1`);
+      assert.deepEqual(await cards(), these("s1", "s2", "s3", "deep*", "near"));
+      assert.equal(await trail(), `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group✕ leave group`);
+      await into("deep");
+      await into("pit");
+      // Four groups in: the trail shows the last three, and the board holds one task with nothing to zoom.
+      assert.equal(await hash(), `#board?in=${z.alpha}/${z.sub}/${z.deep}/${z.pit}&zoom=1`);
+      assert.equal(await trail(), `in all projects › … › ${z.sub} › ${z.deep} › ${z.pit} · Pit group✕ leave group`);
+      assert.deepEqual([await cards(), await level()], [these("d1"), null]);
+      assert.match(await text("#summary"), /^1 tasks/);
+      await layout("four groups in");
+
+      // The browser's Back zooms out a step at a time, and Forward in again.
+      await page.run("history.back()");
+      await page.until(`return location.hash === '#board?in=${z.alpha}/${z.sub}/${z.deep}&zoom=1'`, "one step back");
+      assert.deepEqual([await cards(), await level()], [these("pit*"), "Top level"]);
+      await page.run("history.back()");
+      await page.until(`return location.hash === '#board?in=${z.alpha}/${z.sub}&zoom=1'`, "two steps back");
+      assert.deepEqual(await cards(), these("s1", "s2", "s3", "deep*", "near"));
+      await page.run("history.forward()");
+      await page.until(`return location.hash === '#board?in=${z.alpha}/${z.sub}/${z.deep}&zoom=1'`, "one step forward");
+      assert.deepEqual(await cards(), these("pit*"));
+
+      // A step of the trail leads back out to that group, and "leave group" one step out.
+      await page.click(`#scope .crumb[data-step="1"]`);
+      assert.deepEqual([await hash(), await cards()], [`#board?in=${z.alpha}&zoom=1`, these("a1", "a2", "sub*", "both", "near")]);
+      await into("sub");
+      await page.click("#scope .leave");
+      assert.equal(await hash(), `#board?in=${z.alpha}&zoom=1`);
+      await into("sub");
+      await page.click(`#scope .crumb[data-step="0"]`);
+      assert.deepEqual([await hash(), await cards(), await trail()], ["#board?zoom=1", these(...TOP), "in all projects"]);
+
+      // The level and the group are two halves of one thing: inside a group, the control opens the levels of that group.
+      await into("alpha");
+      await page.click("#level-in");
+      assert.deepEqual([await hash(), await level()], [`#board?in=${z.alpha}&zoom=2`, "2 levels"]);
+      assert.deepEqual(await cards(), these("a1", "a2", "sub", "both", "near", "s1", "s2", "s3", "deep*"));
+      await page.click("#scope .leave");
+      assert.deepEqual([await hash(), await cards()], ["#board?zoom=2", these(...TWO)], "and the level stays when the group is left");
+
+      // With everything shown, the button in a group's panel does what it always did, and is now in the address.
+      await open();
+      await page.click(`#board .card[data-id="${z.beta}"]`);
+      await page.until("return Boolean(document.querySelector('.open-group'))", "the group's panel");
+      assert.equal(await text(".open-group"), "Show only this group (10 tasks)");
+      await page.click(".open-group");
+      assert.deepEqual([await hash(), await panelOpen(), await level()], [`#board?in=${z.beta}`, false, "Everything"]);
+      assert.match(await text("#summary"), /^10 tasks/);
+      // The task and the group that are in both groups are under this one too, and are one card each on the whole board.
+      assert.deepEqual(await cards(), these("b1", "both", "sub", "s1", "s2", "s3", "deep", "pit", "d1", "near"));
+      await page.click("#scope .leave");
+      assert.deepEqual([await hash(), await cards()], ["#board", these(...ALL)]);
+      assert.match(await text("#summary"), /^18 tasks/);
+      // Opened from the panel of a group that is inside the one in view, the trail goes on; from elsewhere it starts anew.
+      await open(`/#board/${z.sub}?in=${z.alpha}`);
+      await page.until("return Boolean(document.querySelector('.open-group'))", "the panel of the sub-group");
+      await page.click(".open-group");
+      assert.equal(await hash(), `#board?in=${z.alpha}/${z.sub}`);
+      await open(`/#board/${z.beta}?in=${z.alpha}`);
+      await page.until("return Boolean(document.querySelector('.open-group'))", "the panel of another group");
+      await page.click(".open-group");
+      assert.equal(await hash(), `#board?in=${z.beta}`);
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("keeps the level and the group in the address: a reload and a shared link show the same board, the graph the same group, and an address that names what is not there is put right", async () => {
+      await page.size(1280, 900);
+      const inside = `#board?in=${z.alpha}/${z.sub}&zoom=1`;
+      await open(`/${inside}`);
+      assert.deepEqual([await hash(), await level(), await cards()], [inside, "Top level", these("s1", "s2", "s3", "deep*", "near")]);
+      assert.equal(await trail(), `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group✕ leave group`);
+      // An item opened over a zoomed board has the zoom in its address too, and closing it leaves the zoom alone.
+      await page.click(`#board .card[data-id="${z.s1}"]`);
+      await page.until("return document.querySelector('.detail-title')?.textContent === 'Sub one'", "a task's panel");
+      assert.equal(await hash(), `#board/${z.s1}?in=${z.alpha}/${z.sub}&zoom=1`);
+      await open(`/#board/${z.s1}?in=${z.alpha}/${z.sub}&zoom=1`);
+      await page.until("return document.querySelector('.detail-title')?.textContent === 'Sub one'", "the task named in the address, after a reload");
+      assert.deepEqual(await cards(), these("s1", "s2", "s3", "deep*", "near"));
+      await page.key("Escape");
+      assert.equal(await hash(), inside);
+
+      // The graph shows the same group. The level is the board's alone, and is still there on the way back.
+      assert.deepEqual(await page.run<string[]>("return ['view-board', 'view-graph'].map((id) => document.getElementById(id).getAttribute('href'))"), [inside, inside.replace("#board", "#graph")]);
+      await page.click("#view-graph");
+      await graphReady();
+      assert.equal(await hash(), inside.replace("#board", "#graph"));
+      assert.equal(await page.run<boolean>("return document.getElementById('levels').hidden"), true, "the board's zoom is not offered over the graph");
+      assert.deepEqual(await page.run<string[]>("return window.vigileGraph.nodes('[kind = \"task\"]').map((n) => n.data('ref')).sort()"), these("s1", "s2", "s3", "deep", "near"), "the graph draws the group's tasks its own way: its groups closed");
+      assert.match(await text("#summary"), /^7 tasks/, "and counts every task in the group");
+      await page.click("#view-board");
+      await page.until("return document.getElementById('board').getBoundingClientRect().height > 0", "the board");
+      assert.deepEqual([await hash(), await level(), await cards()], [inside, "Top level", these("s1", "s2", "s3", "deep*", "near")]);
+
+      // A group that is not there is left out of the address, and the board shows what the rest of it says.
+      await open("/#board?in=NOPE-9&zoom=1");
+      assert.deepEqual([await hash(), await cards(), await trail()], ["#board?zoom=1", these(...TOP), "in all projects"]);
+      // A trail whose steps do not hold one another starts at the last one that does.
+      await open(`/#board?in=${z.loose}/${z.alpha}/${z.sub}`);
+      assert.equal(await hash(), `#board?in=${z.alpha}/${z.sub}`);
+      await open(`/#board?in=${z.alpha}/${z.alpha}/NOPE-9`);
+      assert.equal(await hash(), `#board?in=${z.alpha}`);
+      // A step may hold the next through a group in between.
+      await open(`/#board?in=${z.beta}/${z.deep}`);
+      assert.deepEqual([await hash(), await cards()], [`#board?in=${z.beta}/${z.deep}`, these("pit", "d1")]);
+      // A task that holds nothing can be named: the page says so, and there is a way out.
+      await open(`/#board?in=${z.loose}`);
+      assert.deepEqual([await text("#empty"), await count("#board .card"), await level()], [`${z.loose} holds no tasks.`, 0, null]);
+      await layout("inside a task that holds nothing");
+      await page.click("#scope .leave");
+      assert.deepEqual([await hash(), await cards()], ["#board", these(...ALL)]);
+      // More levels than the plan has is everything; what is not a number, or is cut off, is no zoom at all.
+      for (const address of ["/#board?zoom=99", "/#board?zoom=0", "/#board?zoom=two&in=%E0%A4%A", "/#board?zoom", "/#board?&&=&in="]) {
+        await open(address);
+        assert.deepEqual([await level(), await cards(), await trail()], ["Everything", these(...ALL), "in all projects"], address);
+      }
+      await open("/#board?zoom=99");
+      await page.click("#level-out");
+      assert.equal(await hash(), "#board?zoom=4", "one step out of everything, whatever the address said before");
+      // An address from before there was a zoom means what it meant.
+      await open(`/#board/${z.a1}`);
+      await page.until("return document.querySelector('.detail-title')?.textContent === 'First of alpha'", "a task named the old way");
+      assert.deepEqual(await cards(), these(...ALL));
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("keeps a closed group in sight under the filter when something it holds matches, and says how many do", async () => {
+      await page.size(1280, 900);
+      await open("/#board?zoom=1");
+      const filter = async (words: string) => {
+        await page.click("#filter");
+        await page.run("document.getElementById('filter').select()");
+        if (words) await page.type(words);
+        else await page.key("Backspace");
+      };
+      // Four tasks match, all of them inside both groups: each group stays, and says so.
+      await filter("sub");
+      assert.deepEqual(await cards(), these("alpha*", "beta*"));
+      assert.deepEqual((await says("alpha")).tags, ["1/11 done", "4 inside match", "2 in progress", "1 waiting", "1 open bug or issue", "ZOO"]);
+      assert.deepEqual((await says("beta")).tags.slice(0, 2), ["0/10 done", "4 inside match"]);
+      assert.match(await text("#summary"), /^2 cards for 4 tasks\s*0 in progress\s*2 next/, "the cards stand for the four tasks that match, each counted once");
+      await layout("zoomed out with a filter that matches inside closed groups");
+      // One match inside one group: the other group goes.
+      await filter("only of beta");
+      assert.deepEqual(await cards(), these("beta*"));
+      assert.equal((await says("beta")).tags[1], "1 inside matches");
+      assert.match(await text("#summary"), /^1 card for 1 task\s*0 in progress/);
+      // A group that matches by its own title says what matches inside it as well; a task in no group is found as ever.
+      await filter("alpha");
+      assert.deepEqual(await cards(), these("alpha*"));
+      assert.equal((await says("alpha")).tags[1], "2 inside match");
+      assert.match(await text("#summary"), /^1 card for 3 tasks/);
+      await filter("in no");
+      assert.deepEqual(await cards(), these("loose", "free"));
+      // A level further in, the groups that are open are filtered like any card, and the closed one below stands for its matches.
+      await filter("sub");
+      await page.click("#level-in");
+      assert.deepEqual(await cards(), these("sub*"));
+      assert.equal((await says("sub")).tags[1], "3 inside match");
+      await page.click("#level-out");
+      await filter("zzz no such task");
+      assert.deepEqual([await count("#board .card"), await text("#empty"), await level()], [0, 'No task matches "zzz no such task".', "Top level"], "the control stays when nothing matches: the levels are those of the plan");
+      await filter("");
+      assert.deepEqual(await cards(), these(...TOP));
+      assert.match(await text("#summary"), /^6 cards for 18 tasks/);
+    });
+
+    it("goes by what is shown for the column of bugs, the line that says what is in view, and a project in which nothing holds anything", async () => {
+      await page.size(1280, 900);
+      await open("/#board?zoom=1");
+      const bugs = () => page.run<string[]>("return [...document.querySelectorAll('.column[data-tone=\"bug\"] .card')].map((c) => c.dataset.id)");
+      try {
+        // The one unfinished bug is inside a closed group: the column for bugs has nothing to show, and the group says what it holds.
+        await setting("bugs-apart");
+        assert.deepEqual([await bugs(), await count(".column[data-tone='bug']")], [[], 0]);
+        assert.equal(await count("#summary .tag.trouble"), 0);
+        assert.ok((await says("alpha")).tags.includes("1 open bug or issue"));
+        await page.click("#level-in");
+        assert.deepEqual(await bugs(), [], "two levels: the bug is one level further down");
+        await page.click("#level-in");
+        assert.deepEqual([await bugs(), await text("#summary .tag.trouble")], [[z.s3], "1 open bug, issue or incident"]);
+        await layout("at three levels with a column for bugs");
+        await setting("bugs-apart");
+
+        // With everything above the board folded away, the line that stays says how far the board is zoomed out.
+        await open(`/#board?in=${z.alpha}&zoom=1`);
+        await page.click("#focus");
+        assert.equal(await text("#scope .scope-text"), `in all projects › ${z.alpha} · Alpha, top level only`);
+        await page.click("#scope .leave");
+        assert.equal(await text("#scope .scope-text"), "in all projects, top level only");
+        assert.ok(await page.run<boolean>("return document.querySelector('.board-head').getBoundingClientRect().height > 0"), "the line is there for the zoom alone");
+        await layout("zoomed out with everything above the board folded away");
+        await open("/#board?zoom=3");
+        assert.equal(await text("#scope .scope-text"), "in all projects, 3 levels deep");
+        await open("/");
+        assert.equal(await page.run<number>("return Math.round(document.querySelector('.board-head').getBoundingClientRect().height)"), 0, "with everything shown there is nothing to say");
+        await page.click("#focus");
+        assert.equal(await text("#scope .scope-text"), "in all projects");
+
+        // In a project where nothing holds anything there is one level only: the control steps aside, and a level
+        // asked for in the address shows every task.
+        await open("/#board?zoom=1");
+        const choose = (project: string) => page.run(`[...document.querySelectorAll('#projects .project-main')].find((main) => main.querySelector('.project-id').textContent === ${JSON.stringify(project)}).click()`);
+        await choose("FLAT");
+        assert.deepEqual([await level(), await cards(), await hash()], [null, these("f1", "f2"), "#board?zoom=1"]);
+        assert.match(await text("#summary"), /^2 tasks/);
+        await layout("in a project with nothing to zoom");
+        // The levels are those of what is in view: in the other project the groups are back, closed as the address says.
+        await choose("ZOO");
+        assert.deepEqual([await level(), await cards()], ["Top level", these("alpha*", "beta*", "loose")]);
+        assert.match(await text("#summary"), /^3 cards for 15 tasks/);
+        assert.equal(await trail(), "in ZOO · Zoo");
+        await into("alpha");
+        assert.equal(await trail(), `in ZOO › ${z.alpha} · Alpha✕ leave group`, "inside a group the project is named by its ID, to leave room for the trail");
+        await choose("ZOO");
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await page.run("for (const name of ['vigile.bugs-apart', 'vigile.focus']) localStorage.removeItem(name)");
+      }
+    });
+
+    it("can be zoomed with the keyboard alone: the control and the button on a card are reached with Tab, show where the keyboard is, are named for a screen reader, and keep the keyboard as the board is drawn again", async () => {
+      await page.size(1280, 900);
+      await open();
+      assert.deepEqual(
+        await page.run("const group = document.getElementById('levels'); return [group.getAttribute('role'), group.getAttribute('aria-label'), document.getElementById('level-out').getAttribute('aria-label'), document.getElementById('level-in').getAttribute('aria-label')]"),
+        ["group", "Zoom of the board: how many levels of groups are open", "Zoom out", "Zoom in"],
+      );
+      const ring = () => page.run<string>("const style = getComputedStyle(document.activeElement); return style.outlineStyle + ' ' + style.outlineWidth");
+      // From the filter, Tab reaches the control; Enter and Space work it, and the keyboard stays on the button.
+      await page.click("#filter");
+      await page.key("Tab");
+      assert.deepEqual([await focused(), await ring()], ["level-out", "solid 2px"]);
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await focused()], ["#board?zoom=4", "level-out"]);
+      for (let step = 0; step < 3; step++) await page.key("Enter");
+      // At the end the button says there is nothing further, and is still where the keyboard is.
+      assert.deepEqual([await hash(), await focused(), await ends()], ["#board?zoom=1", "level-out", ["true", "false"]]);
+      await page.key("Enter");
+      assert.equal(await hash(), "#board?zoom=1");
+      await page.key("Tab");
+      assert.deepEqual([await focused(), await ring()], ["level-in", "solid 2px"]);
+      await page.key("Space");
+      assert.deepEqual([await hash(), await focused()], ["#board?zoom=2", "level-in"]);
+      await page.key("Tab", true);
+      await page.key("Enter");
+      assert.equal(await hash(), "#board?zoom=1");
+
+      // On a closed group's card, Enter opens the panel; the next Tab is on the button that zooms in.
+      await page.run(`${card("alpha")}.focus()`);
+      await page.key("Enter");
+      await page.until("return !document.getElementById('panel').hidden", "the panel, opened with Enter");
+      await page.key("Escape");
+      assert.equal(await focused(), z.alpha, "the keyboard is back on the card");
+      await page.key("Tab");
+      assert.deepEqual([await focused(), await ring()], [`${z.alpha} zoom-into`, "solid 2px"]);
+      // Zoomed in, the keyboard is on the way back out; taking it, on the button it came from.
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await focused()], [`#board?in=${z.alpha}&zoom=1`, "tag-button leave"]);
+      assert.equal(await ring(), "solid 2px");
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await focused()], ["#board?zoom=1", `${z.alpha} zoom-into`]);
+      // A step of the trail is reached and shown the same way.
+      await page.key("Enter");
+      await page.run(`document.querySelector('#board .zoom-into[data-id="${z.sub}"]').focus()`);
+      await page.key("Enter");
+      // Back changes the leave button from Sub to Alpha. It is not the same control: the keyboard returns to the
+      // button that represents Sub, so Enter would re-enter it rather than unexpectedly leave Alpha.
+      await page.run("document.querySelector('#scope .leave').focus({ preventScroll: true }); history.back()");
+      await page.until(`return location.hash === '#board?in=${z.alpha}&zoom=1'`, "Back from Sub to Alpha");
+      assert.equal(await focused(), `${z.sub} zoom-into`);
+      await page.key("Enter");
+      await page.key("Tab", true);
+      assert.deepEqual([await page.run<string>("return document.activeElement.textContent"), await ring()], [z.alpha, "solid 2px"]);
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await focused()], [`#board?in=${z.alpha}&zoom=1`, `${z.sub} zoom-into`]);
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("reveals the closed group that represents a focused child beyond a column's card limit", async () => {
+      await page.size(1280, 900);
+      const made: string[] = [];
+      try {
+        for (let n = 0; n < 13; n++) {
+          const group = (await plan("create_task", { title: `Focus holder ${n}`, description: "d", project: "ZOO" })).id as string;
+          const child = (await plan("create_task", { title: `Focus child ${n}`, description: "d", parent: group })).id as string;
+          made.push(child, group);
+        }
+        const target = made.at(-2)!;
+        const holder = made.at(-1)!;
+        await to(target, "in_progress", "in_review");
+        await open();
+        await page.run("localStorage.setItem('vigile.scroll', 'page')");
+        await open();
+        await page.run("const more = document.querySelector('.column[data-key=\"next\"] .more[aria-expanded=\"true\"]'); more?.click()");
+        // Keep the keyboard on the child while the board closes to its top level. Its holder is after the first
+        // twelve cards in Next, so restoring focus must open that column and render the holder first.
+        await page.run(`document.querySelector('#board .card[data-id="${target}"]').focus({ preventScroll: true }); for (let n = 0; n < 4; n++) document.getElementById('level-out').click()`);
+        await page.until("return location.hash === '#board?zoom=1'", "the top level with the child represented by its group");
+        assert.deepEqual([await focused(), await page.run("return document.querySelector('.column[data-key=\"next\"] .more')?.getAttribute('aria-expanded')")], [holder, "true"]);
+      } finally {
+        await page.run("localStorage.removeItem('vigile.scroll')");
+        for (const id of made) {
+          const item = await plan("get", { id });
+          if (!item.deleted_at) await plan("delete", { id, version: item.version });
+        }
+        await open();
+      }
+    });
+
+    it("shows a change inside a closed group on the group's card, in place and ringed, plays the sounds as ever, and moves the card when the group itself changes state", async () => {
+      await page.size(1280, 900);
+      await open("/#board?zoom=1");
+      const COUNT = "window.notes = 0; const start = OscillatorNode.prototype.start; OscillatorNode.prototype.start = function (...args) { window.notes++; return start.apply(this, args); };";
+      const ringed = () => page.run<string[]>("return [...document.querySelectorAll('#board .card.changed')].map((c) => c.dataset.id).sort()");
+      const calm = () => page.until("return document.querySelectorAll('#board .card.changed, .card-ghost').length === 0", "the rings to fade", 12_000);
+      try {
+        await page.run(COUNT);
+        await setting("sound-started");
+        assert.equal(await page.run<number>("return window.notes"), 2, "turning the sound on plays it once");
+        await setting("auto");
+        await page.until("return document.getElementById('sync').textContent.startsWith('Live')", "the page to say it is live");
+        await page.run("window.ghosts = 0; new MutationObserver((changes) => { for (const c of changes) for (const n of c.addedNodes) if (n.classList?.contains('card-ghost')) window.ghosts++; }).observe(document.body, { childList: true });");
+        // The keyboard is on the button of a group that is about to change.
+        await page.run(`document.querySelector('#board .zoom-into[data-id="${z.alpha}"]').focus({ preventScroll: true })`);
+
+        // A task two groups down is started. It has no card; the two groups that hold it say so, where they stand.
+        await to(z.s1!, "in_progress");
+        await page.until(`return ${card("alpha")}.querySelector('.tag.inside').textContent === '3 in progress'`, "the change to show on the group's card", 3000);
+        assert.deepEqual(await ringed(), these("alpha", "beta"), "both groups that hold the task are ringed");
+        assert.deepEqual([(await says("alpha")).column, (await says("beta")).tags[1], await cards()], ["next", "2 in progress", these(...TOP)]);
+        assert.equal(await page.run<number>("return window.ghosts"), 0, "nothing travels: no card changed column");
+        assert.equal(await focused(), `${z.alpha} zoom-into`, "the keyboard is still on the same button");
+        assert.match(await text("#summary"), /^6 cards for 18 tasks\s*0 in progress\s*6 next/, "the counts above the board are still those of its cards");
+        await page.until("return window.notes === 4", "the sound for a started task, though the task has no card", 2500);
+        await calm();
+
+        // A task inside is finished: the group's progress moves, and the card is ringed again.
+        await to(z.s1!, "done");
+        await page.until(`return ${card("alpha")}.querySelector('.tag.group').textContent === '2/11 done'`, "the progress to show on the group's card", 3000);
+        assert.deepEqual([await ringed(), (await says("alpha")).bar, (await says("alpha")).tags.slice(0, 3)], [these("alpha", "beta"), "18% finished", ["2/11 done", "2 in progress", "1 open bug or issue"]]);
+        assert.equal(await page.run<number>("return window.notes"), 4, "only the sound that is switched on is played");
+        await calm();
+
+        // A change that leaves what the card says as it was does not ring it: a task inside gets another title.
+        await plan("update_task", { id: z.b1, version: (await plan("get", { id: z.b1 })).version, title: "Only one of beta" });
+        await page.wait(900);
+        assert.deepEqual(await ringed(), []);
+
+        // Under reduced motion the ring is there all the same, around the whole card.
+        await page.motion("reduce");
+        await to(z.a2!, "in_review");
+        await page.until(`return ${card("alpha")}.querySelector('.tag.inside').textContent === '1 in progress'`, "the change to show under reduced motion", 3000);
+        assert.deepEqual(await ringed(), these("alpha"));
+        assert.match(await page.run<string>(`return getComputedStyle(${card("alpha")}).boxShadow`), /^[a-z]+\([^)]*\) 0px 0px 0px 3px$/);
+        await page.motion("no-preference");
+        await calm();
+
+        // The group itself is started: its card travels to the column of its new state, and is a closed group there too.
+        await to(z.beta!, "in_progress");
+        await page.until(`return ${card("beta")}?.closest('.column').dataset.key === 'in_progress'`, "the group's card in its new column", 3000);
+        assert.ok((await page.run<number>("return window.ghosts")) >= 1, "the card travels");
+        assert.deepEqual(await page.run<string[]>(`const card = ${card("beta")}; return [card.style.visibility, card.nextElementSibling.style.visibility]`), ["hidden", "hidden"], "while the copy travels, the button waits unseen with its card");
+        await calm();
+        assert.deepEqual([await cards(), (await says("beta")).button], [these(...TOP), "Zoom in / holds 10 tasks"]);
+        assert.deepEqual(await page.run<string[]>(`const card = ${card("beta")}; return [card.style.visibility, card.nextElementSibling.style.visibility]`), ["", ""]);
+
+        // A group in view is deleted while the board is in it: the board is then in the group before it.
+        await open(`/#board?in=${z.alpha}/${z.sub}/${z.deep}/${z.pit}&zoom=1`);
+        await page.until("return document.getElementById('sync').textContent.startsWith('Live')", "the page to say it is live");
+        await plan("delete", { id: z.pit, version: (await plan("get", { id: z.pit })).version });
+        await page.until(`return location.hash === '#board?in=${z.alpha}/${z.sub}/${z.deep}&zoom=1'`, "the board to step out of the group that is gone", 3000);
+        assert.equal(await count("#board .card.changed"), 0, "the cards that are there now did not change");
+        await plan("restore", { id: z.pit });
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await page.motion("no-preference");
+        await to(z.s1!, "open").catch(() => {});
+        await to(z.a2!, "in_progress").catch(() => {});
+        await to(z.beta!, "open").catch(() => {});
+        await plan("update_task", { id: z.b1, version: (await plan("get", { id: z.b1 })).version, title: "Only of beta" }).catch(() => {});
+        await page.run("for (const name of ['vigile.auto-refresh', 'vigile.sound-started']) localStorage.removeItem(name)");
+      }
+    });
+
+    it("rings the card of a closed group when the plan changes anything the card shows, and not when the filter or the zoom the person works themselves changes it", async () => {
+      await page.size(1280, 900);
+      const ringed = () => page.run<string[]>("return [...document.querySelectorAll('#board .card.changed')].map((c) => c.dataset.id).sort()");
+      /** Opens the board afresh at its top level, so that no card is ringed from before, and waits until it follows the plan. */
+      const afresh = async () => {
+        await open("/#board?zoom=1");
+        await page.until("return document.getElementById('sync').textContent.startsWith('Live')", "the page to say it is live");
+        assert.deepEqual(await ringed(), []);
+      };
+      const type = async (words: string) => {
+        await page.click("#filter");
+        await page.run("document.getElementById('filter').select()");
+        if (words) await page.type(words);
+        else await page.key("Backspace");
+      };
+      const change = alter;
+      /** Waits until the board shows a change made in the plan, and says which cards are ringed for it. */
+      const shows = async (what: string, script: string) => {
+        await page.until(script, what, 3000);
+        return ringed();
+      };
+      const undo: Array<() => Promise<unknown>> = [];
+      try {
+        await open("/#board?zoom=1");
+        await setting("auto");
+        await afresh();
+
+        // What the person changes themselves rings nothing, though the cards say something else after it: the filter,
+        // letter by letter, the level, a group entered and left.
+        for (const words of ["a", "al", "alp", "alpha", "alph", ""]) {
+          await type(words);
+          assert.deepEqual(await ringed(), [], `after typing "${words}"`);
+        }
+        await type("sub");
+        assert.equal((await says("alpha")).tags[1], "4 inside match");
+        await type("");
+        for (const control of ["#level-in", "#level-in", "#level-out", "#level-out"]) {
+          await page.click(control);
+          assert.deepEqual(await ringed(), [], `after ${control}`);
+        }
+        await into("alpha");
+        await page.click("#scope .leave");
+        assert.deepEqual([await ringed(), await cards()], [[], these(...TOP)]);
+
+        // How many inside match the filter: a task inside is renamed and now matches. The group that already showed
+        // says one more, and is ringed; the other group comes into sight for it.
+        await type("alpha");
+        assert.deepEqual([await cards(), (await says("alpha")).tags[1]], [these("alpha*"), "2 inside match"]);
+        await change("update_task", { id: z.near!, title: "Alpha child" });
+        undo.push(() => change("update_task", { id: z.near!, title: "Near and far" }));
+        assert.deepEqual(await shows("one more match inside", `return ${card("alpha")}.querySelector('.tag.match').textContent === '3 inside match'`), these("alpha", "beta"));
+        // Under the same filter, a change inside that leaves every count as it was rings nothing.
+        await afresh();
+        await type("alpha");
+        await change("update_task", { id: z.b1!, title: "Only one of beta" });
+        undo.push(() => change("update_task", { id: z.b1!, title: "Only of beta" }));
+        await page.wait(900);
+        assert.deepEqual([await ringed(), (await says("alpha")).tags[1]], [[], "3 inside match"]);
+        await undo.pop()!();
+        await undo.pop()!();
+
+        // The group's own title.
+        await afresh();
+        await change("update_task", { id: z.alpha!, title: "Alpha, renamed" });
+        undo.push(() => change("update_task", { id: z.alpha!, title: "Alpha" }));
+        assert.deepEqual(await shows("the new title", `return ${card("alpha")}.querySelector('.card-title').textContent === 'Alpha, renamed'`), these("alpha"));
+        await undo.pop()!();
+        // Its priority, which is also its place among the closed groups of its column: it was first, and comes second.
+        await afresh();
+        assert.deepEqual(await page.run<string[]>("return [...document.querySelectorAll('.column[data-key=\"next\"] .card.closed')].map((c) => c.dataset.id)"), [z.alpha, z.beta]);
+        await change("update_task", { id: z.beta!, priority: 7 });
+        undo.push(() => change("update_task", { id: z.beta!, priority: 0 }));
+        assert.deepEqual(await shows("the new priority", `return ${card("beta")}.querySelector('.priority')?.textContent === 'P7'`), these("beta"));
+        assert.deepEqual(await page.run<string[]>("return [...document.querySelectorAll('.column[data-key=\"next\"] .card.closed')].map((c) => c.dataset.id)"), [z.beta, z.alpha], "the group that slid down for it is not ringed");
+        await undo.pop()!();
+        // Its kind: the group becomes an issue, and its card carries the mark.
+        await afresh();
+        await change("update_task", { id: z.alpha!, type: "issue" });
+        undo.push(() => change("update_task", { id: z.alpha!, type: "task" }));
+        assert.deepEqual(await shows("the mark of its kind", `return ${card("alpha")}.querySelector('.type')?.textContent === 'issue'`), these("alpha"));
+        await undo.pop()!();
+
+        // A problem inside: a task that is in progress comes to depend on one that is not finished.
+        await afresh();
+        await plan("add_link", { from: z.a2, type: "depends on", to: z.loose });
+        undo.push(() => plan("remove_link", { from: z.a2, type: "depends on", to: z.loose }));
+        assert.deepEqual(await shows("the problem inside", `return ${card("alpha")}.querySelector('.tag.warn')?.textContent === '⚠ 1 problem inside'`), these("alpha"));
+        await undo.pop()!();
+        // An unfinished bug inside: the task in both groups becomes one, and both groups say two.
+        await afresh();
+        await change("update_task", { id: z.both!, type: "bug" });
+        undo.push(() => change("update_task", { id: z.both!, type: "task" }));
+        assert.deepEqual(await shows("one more open bug inside", `return ${card("beta")}.querySelector('.tag.trouble')?.textContent === '2 open bugs and issues'`), these("alpha", "beta"));
+        await undo.pop()!();
+        // How many it holds: a task is created four groups down.
+        await afresh();
+        const extra = (await plan("create_task", { title: "One more, far down", description: "d", project: "ZOO", parent: z.pit })).id as string;
+        undo.push(() => change("delete", { id: extra }));
+        assert.deepEqual(await shows("one more task inside", `return ${card("alpha")}.nextElementSibling.querySelector('.holds').textContent === 'holds 12 tasks'`), these("alpha", "beta"));
+        assert.deepEqual([(await says("alpha")).tags[0], (await says("beta")).button], ["1/12 done", "Zoom in / holds 11 tasks"]);
+        await undo.pop()!();
+
+        // Its place among the finished, which goes by when it was completed and is written nowhere on the card: a
+        // finished group's completion is set to an earlier day.
+        const gamma = (await plan("create_task", { title: "Gamma", description: "d", project: "ZOO" })).id as string;
+        const inGamma = (await plan("create_task", { title: "Only of gamma", description: "d", project: "ZOO", parent: gamma })).id as string;
+        undo.push(() => change("delete", { id: gamma }));
+        undo.push(() => change("delete", { id: inGamma }));
+        await to(inGamma, "in_progress", "done");
+        await to(gamma, "in_progress", "done");
+        await afresh();
+        assert.deepEqual(await page.run<string[]>("return [...document.querySelectorAll('.column[data-key=\"done\"] .card')].map((c) => c.dataset.id + (c.matches('.closed') ? '*' : ''))"), [`${gamma}*`]);
+        z.gamma = gamma;
+        const drawn = await says("gamma");
+        const { created_at } = await plan("get", { id: gamma });
+        await change("override_timestamp", { id: gamma, name: "completed_at", value: created_at });
+        await page.until(`return ${card("gamma")}.classList.contains('changed')`, "the finished group to be ringed for its new completion date", 3000);
+        assert.deepEqual(await says("gamma"), drawn, "nothing written on the card changed");
+        assert.deepEqual(page.errors, []);
+      } finally {
+        for (const step of undo.reverse()) await step().catch(() => {});
+        await page.run("localStorage.removeItem('vigile.auto-refresh')");
+      }
+    });
+
+    it("keeps the keyboard on the same item, or on the group that closes over it, when the board is zoomed with Back and Forward, when a group is left, and when the board's zoom steps aside", async () => {
+      await page.size(1280, 900);
+      // Zooming out with the browser's Back while the keyboard is on a card: the group that closes over the card
+      // has the keyboard, and the nearest one that does when two levels close one after the other.
+      await open("/#board?zoom=1");
+      await page.click("#level-in");
+      await page.click("#level-in");
+      await focusOn(on("s1"));
+      await travel("back", "#board?zoom=2");
+      assert.equal(await keyboard(), z.sub, "the closed group that now holds the task");
+      await focusOn(zoomOf("sub"));
+      await travel("back", "#board?zoom=1");
+      assert.equal(await keyboard(), z.alpha, "the closed group that now holds the group");
+      // Zooming in: a closed group opens, and the button that zoomed into it is gone. The group's own card has the keyboard.
+      await focusOn(zoomOf("alpha"));
+      await travel("forward", "#board?zoom=2");
+      assert.equal(await keyboard(), z.alpha);
+      // Into a group and back out with Back and Forward, the keyboard still on what was pressed: the way out of
+      // the group stands for it while the board is in it, and its button when it is back on the board.
+      await travel("back", "#board?zoom=1");
+      await focusOn(zoomOf("alpha"));
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await keyboard()], [`#board?in=${z.alpha}&zoom=1`, "tag-button leave"]);
+      await travel("back", "#board?zoom=1");
+      assert.equal(await keyboard(), `${z.alpha} zoom-into`);
+      await travel("forward", `#board?in=${z.alpha}&zoom=1`);
+      assert.equal(await keyboard(), "tag-button leave");
+
+      // Leaving a group with everything shown: the group's card, which has no button to zoom.
+      await open(`/#board?in=${z.alpha}/${z.sub}`);
+      await focusOn("#scope .leave");
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await keyboard()], [`#board?in=${z.alpha}`, z.sub]);
+
+      // The board's zoom steps aside where nothing holds anything: the keyboard was on it, and is on the way out of the group.
+      await open(`/#board?in=${z.alpha}/${z.sub}/${z.deep}&zoom=1`);
+      await focusOn(zoomOf("pit"));
+      await page.key("Enter");
+      await travel("back", `#board?in=${z.alpha}/${z.sub}/${z.deep}&zoom=1`);
+      await focusOn("#level-in");
+      await travel("forward", `#board?in=${z.alpha}/${z.sub}/${z.deep}/${z.pit}&zoom=1`);
+      assert.deepEqual([await level(), await keyboard()], [null, "tag-button leave"]);
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("leaves a group over the graph, and changes view, with the keyboard on something in sight: the way out of the group that is left, or the line that says what is in view", async () => {
+      await page.size(1280, 900);
+      // The board has drawn its top level and is hidden behind the graph, with its cards still in it. A group is
+      // entered from its panel and left again: the hidden card of that group cannot take the keyboard, and the
+      // line that says what is in view does.
+      await open("/#board?zoom=1");
+      await page.click("#view-graph");
+      await graphReady();
+      assert.equal(await count(zoomOf("alpha")), 1, "the hidden board still holds its cards");
+      await page.run(`location.hash = '#graph/${z.alpha}?zoom=1'`);
+      await page.until("return Boolean(document.querySelector('.open-group'))", "the group's panel over the graph");
+      await page.click(".open-group");
+      assert.deepEqual([await hash(), await keyboard()], [`#graph?in=${z.alpha}&zoom=1`, "tag-button leave"]);
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await keyboard()], ["#graph?zoom=1", "scope-text"]);
+      assert.match(await page.run<string>("const style = getComputedStyle(document.activeElement); return style.outlineStyle + ' ' + style.outlineWidth"), /^solid 2px$/, "and the line shows that the keyboard is there");
+      // The line is written again with every drawing, and keeps the keyboard.
+      await page.run("document.getElementById('hide-finished').click(); document.getElementById('hide-finished').click()");
+      assert.equal(await keyboard(), "scope-text");
+
+      // Two groups in: leaving one, the keyboard is on the way out of the group the graph is still in.
+      await open("/#board?zoom=1");
+      await focusOn(zoomOf("alpha"));
+      await page.key("Enter");
+      await focusOn(zoomOf("sub"));
+      await page.key("Enter");
+      await page.click("#view-graph");
+      await graphReady();
+      await focusOn("#scope .leave");
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await keyboard()], [`#graph?in=${z.alpha}&zoom=1`, "tag-button leave"]);
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await keyboard()], ["#graph?zoom=1", "scope-text"]);
+      // The same from a step of the trail, which leads out of two groups at once.
+      await travel("back", `#graph?in=${z.alpha}&zoom=1`);
+      await travel("back", `#graph?in=${z.alpha}/${z.sub}&zoom=1`);
+      await focusOn(`#scope .crumb[data-step="0"]`);
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await keyboard()], ["#graph?zoom=1", "scope-text"]);
+
+      // A change of view under the keyboard, with Back and Forward: from the graph's tools to the board, the
+      // board's zoom; from a card of the board to the graph, the way out of the group.
+      await travel("back", `#graph?in=${z.alpha}/${z.sub}&zoom=1`);
+      await focusOn("#collapse-groups");
+      await travel("back", `#board?in=${z.alpha}/${z.sub}&zoom=1`);
+      assert.equal(await keyboard(), "level-in");
+      await focusOn(on("s1"));
+      await travel("forward", `#graph?in=${z.alpha}/${z.sub}&zoom=1`);
+      assert.equal(await keyboard(), "tag-button leave");
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("keeps the keyboard in sight when the plan changes under it: on a group's button to zoom while the group changes column, on the group that closes over a card, on a card that lands at once, and on the board's zoom when nothing stands for what is gone", async () => {
+      await page.size(1280, 900);
+      const undo: Array<() => Promise<unknown>> = [];
+      const back = () => page.until(`return document.querySelector(${JSON.stringify(on("b1"))}) !== null && document.querySelector(${JSON.stringify(on("near"))}) !== null`, "the cards to be back", 3000);
+      const gone = (key: string) => page.until(`return document.querySelector(${JSON.stringify(on(key))}) === null`, "the card to go", 3000);
+      try {
+        await open("/#board?zoom=1");
+        await setting("auto");
+        await live();
+        await page.run("window.ghosts = 0; new MutationObserver((changes) => { for (const c of changes) for (const n of c.addedNodes) if (n.classList?.contains('card-ghost')) window.ghosts++; }).observe(document.body, { childList: true });");
+        // A closed group changes column while the keyboard is on its button to zoom: the button stays in sight with
+        // the keyboard on it, nothing travels, and the card is ringed where it now stands.
+        await focusOn(zoomOf("beta"));
+        await to(z.beta!, "in_progress");
+        undo.push(() => to(z.beta!, "open"));
+        await page.until(`return document.querySelector(${JSON.stringify(on("beta"))})?.closest('.column').dataset.key === 'in_progress'`, "the group's card in its new column", 3000);
+        assert.deepEqual([await keyboard(), await page.run<number>("return window.ghosts")], [`${z.beta} zoom-into`, 0]);
+        assert.deepEqual(await page.run(`const card = document.querySelector(${JSON.stringify(on("beta"))}); return [card.style.visibility, card.nextElementSibling.style.visibility, card.classList.contains('changed')]`), ["", "", true]);
+        await page.key("Enter");
+        assert.equal(await hash(), `#board?in=${z.beta}&zoom=1`, "and Enter still zooms into the group");
+        await undo.pop()!();
+
+        // A card with the keyboard goes deeper than the board shows: the task that Alpha held directly is now held
+        // by its sub-group only. The closed sub-group has the keyboard.
+        await open("/#board?zoom=2");
+        await live();
+        await focusOn(on("near"));
+        await plan("remove_link", { from: z.alpha, type: "contains", to: z.near });
+        undo.push(() => plan("add_link", { from: z.alpha, type: "contains", to: z.near }));
+        await gone("near");
+        assert.equal(await keyboard(), z.sub);
+        await undo.pop()!();
+        // A card with the keyboard is gone for good: its task is deleted, and nothing stands for it. The board's zoom has the keyboard.
+        await back();
+        await focusOn(on("b1"));
+        await alter("delete", { id: z.b1! });
+        undo.push(() => plan("restore", { id: z.b1 }));
+        await gone("b1");
+        assert.equal(await keyboard(), "level-in");
+        await undo.pop()!();
+        // The same when the panel was opened from that card and is closed after the card has gone: the panel's own
+        // rule gives the keyboard back to what the panel was opened from, and now to what stands for that.
+        await back();
+        await focusOn(on("b1"));
+        await page.key("Enter");
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Only of beta'", "the panel, opened with Enter");
+        await alter("delete", { id: z.b1! });
+        undo.push(() => plan("restore", { id: z.b1 }));
+        await gone("b1");
+        assert.equal(await page.run<boolean>("return document.getElementById('panel').contains(document.activeElement)"), true, "while the panel is open the keyboard stays in it");
+        await page.key("Escape");
+        assert.deepEqual([await panelOpen(), await keyboard()], [false, "level-in"]);
+        await undo.pop()!();
+        // The filter hides a card with the keyboard: its task is renamed and no longer matches.
+        await back();
+        await page.click("#filter");
+        await page.type("only of");
+        assert.deepEqual(await cards(), these("b1"));
+        await focusOn(on("b1"));
+        await alter("update_task", { id: z.b1!, title: "The one of beta" });
+        undo.push(() => alter("update_task", { id: z.b1!, title: "Only of beta" }));
+        await gone("b1");
+        assert.deepEqual([await count("#board .card"), await keyboard()], [0, "level-in"]);
+        await undo.pop()!();
+
+        // A card is on its way to another column, unseen where it will land while its copy travels, when the keyboard
+        // has to go to it: it lands at once, in sight, with the keyboard on it.
+        await open("/#board?zoom=1");
+        await live();
+        await page.click("#level-in");
+        await focusOn(on("a1"));
+        await to(z.alpha!, "in_progress");
+        undo.push(() => to(z.alpha!, "open"));
+        await page.until(`return document.querySelectorAll('.card-ghost').length === 1 && document.querySelector(${JSON.stringify(on("alpha"))}).style.visibility === 'hidden'`, "the group's card to set off", 3000);
+        await travel("back", "#board?zoom=1");
+        assert.equal(await keyboard(), z.alpha, "the closed group that now holds the task, landed");
+        assert.deepEqual(await page.run(`const card = document.querySelector(${JSON.stringify(on("alpha"))}); return [card.style.visibility, card.nextElementSibling.style.visibility, document.querySelectorAll('.card-ghost').length]`), ["", "", 0]);
+        await undo.pop()!();
+
+        // A step of the trail goes because the group after it is deleted: the keyboard was on the step that named
+        // the group the board is now in, and is on the way out of that group.
+        await open(`/#board?in=${z.alpha}/${z.sub}/${z.deep}&zoom=1`);
+        await live();
+        await focusOn(`#scope .crumb[data-step="2"]`);
+        assert.equal(await page.run<string>("return document.activeElement.textContent"), z.sub);
+        await alter("delete", { id: z.deep! });
+        undo.push(() => plan("restore", { id: z.deep }));
+        await page.until(`return location.hash === '#board?in=${z.alpha}/${z.sub}&zoom=1'`, "the board to step out of the group that is gone", 3000);
+        assert.equal(await keyboard(), "tag-button leave");
+        await undo.pop()!();
+        assert.deepEqual(page.errors, []);
+      } finally {
+        for (const step of undo.reverse()) await step().catch(() => {});
+        await page.run("localStorage.removeItem('vigile.auto-refresh')");
+      }
+    });
+
+    it("says a zoom, a group entered and a group left to a screen reader once and in a few words, and nothing when the board is only filtered or drawn again", async () => {
+      await page.size(1280, 900);
+      await open();
+      // Everything the page says by itself, in the order it was said: the regions a screen reader reads out when
+      // they change. The header's own line, which says when the page was last updated, is left out.
+      const listen = () =>
+        page.run(`window.said = []; new MutationObserver((changes) => {
+          for (const change of changes) {
+            const region = (change.target.nodeType === 1 ? change.target : change.target.parentElement)?.closest('[aria-live], [role="status"], [role="alert"]');
+            if (region && region.id !== 'sync' && region.textContent.trim()) window.said.push(region.id + ': ' + region.textContent.trim());
+          }
+        }).observe(document.body, { subtree: true, childList: true, characterData: true });`);
+      await listen();
+      const said = async () => {
+        await page.wait(80);
+        return page.run<string[]>("const all = window.said; window.said = []; return all");
+      };
+      // Neither the cards nor the counts nor the trail are read out when they change: only what is said on purpose.
+      assert.deepEqual(await page.run("return ['board', 'summary', 'scope', 'level'].map((id) => document.getElementById(id).closest('[aria-live], [role=\"status\"], [role=\"alert\"]') === null)"), [true, true, true, true]);
+      // The level is read with each of the two buttons instead.
+      assert.deepEqual(await page.run("return ['level-out', 'level-in'].map((id) => document.getElementById(id).getAttribute('aria-describedby'))"), ["level", "level"]);
+
+      await page.click("#level-out");
+      assert.deepEqual(await said(), ["zoom-said: 4 levels in all projects: 17 cards for 18 tasks."]);
+      for (let more = 0; more < 3; more++) await page.click("#level-out");
+      assert.deepEqual(await said(), ["zoom-said: 3 levels in all projects: 16 cards for 18 tasks.", "zoom-said: 2 levels in all projects: 12 cards for 18 tasks.", "zoom-said: Top level in all projects: 6 cards for 18 tasks."]);
+      await page.click("#level-out");
+      assert.deepEqual(await said(), [], "nothing further out, and nothing to say");
+      await into("alpha");
+      assert.deepEqual(await said(), [`zoom-said: Top level in ${z.alpha} Alpha: 5 cards for 11 tasks.`]);
+      await page.click("#scope .leave");
+      assert.deepEqual(await said(), ["zoom-said: Top level in all projects: 6 cards for 18 tasks."]);
+      // The filter, the column for bugs and a reading of the plan draw the board again: none of it is read out.
+      await page.click("#filter");
+      await page.type("sub");
+      await setting("bugs-apart");
+      await setting("bugs-apart");
+      await page.click("#refresh");
+      await page.wait(300);
+      assert.deepEqual(await said(), []);
+      await page.run("document.getElementById('filter').select()");
+      await page.key("Backspace");
+      // Back and Forward are a zoom too.
+      await page.run("history.back()");
+      await page.until(`return location.hash === '#board?in=${z.alpha}&zoom=1'`, "back into the group");
+      assert.deepEqual(await said(), [`zoom-said: Top level in ${z.alpha} Alpha: 5 cards for 11 tasks.`]);
+      // Over the graph, a group that is left is said as well.
+      await page.click("#view-graph");
+      await graphReady();
+      assert.deepEqual(await said(), [], "a change of view is not a zoom");
+      await page.click("#scope .leave");
+      assert.deepEqual(await said(), ["zoom-said: Graph of all projects: 18 tasks."]);
+      // What was said is taken off the page a few seconds later, so that it is not found there when it no longer holds.
+      await page.until("return document.getElementById('zoom-said').textContent === ''", "what was said to be taken away", 7000);
+
+      // A group the board is in is deleted: the plan zooms the board out, and that is said once, among all that changed.
+      await page.run("localStorage.setItem('vigile.auto-refresh', 'on')");
+      try {
+        await open(`/#board?in=${z.alpha}/${z.sub}/${z.deep}/${z.pit}&zoom=1`);
+        await page.until("return document.getElementById('sync').textContent.startsWith('Live')", "the page to say it is live");
+        await listen();
+        await plan("delete", { id: z.pit, version: (await plan("get", { id: z.pit })).version });
+        await page.until(`return location.hash === '#board?in=${z.alpha}/${z.sub}/${z.deep}&zoom=1'`, "the board to step out of the group that is gone", 3000);
+        // The task the deleted group held is still inside the group above it, which the board is now in.
+        assert.deepEqual(await said(), [`zoom-said: Everything in ${z.deep} Deep group: 1 tasks.`]);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await plan("restore", { id: z.pit }).catch(() => {});
+        await page.run("localStorage.removeItem('vigile.auto-refresh')");
+      }
+    });
+
+    it("keeps nothing of the plan when its key is refused, not in the page, its title or its address, at once and after every timer has run, and is in the same place when it is let in again", async () => {
+      await page.size(1280, 900);
+      // Every name the plan has: the IDs and titles of its projects and of its tasks. The one task that is in no
+      // project has a bare number for an ID, which says nothing by itself; its title is looked for.
+      const names = ["ZOO-\\d+", "FLAT-\\d+", "\\bZOO\\b", "\\bFLAT\\b", "\\bZoo\\b", "\\bFlat\\b"];
+      for (const { title } of (await plan("list_tasks", {})).tasks as Array<{ title: string }>) names.push(title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+      assert.equal(names.length, 6 + 18);
+      /** Where anything of the plan is left: in the page with all its text and attributes, in what is typed into it, in its title, in its address. */
+      const left = () =>
+        page.run<string[]>(
+          `const names = ${JSON.stringify(names)}; const places = { page: document.documentElement.outerHTML, typed: [...document.querySelectorAll("input, textarea")].map((field) => field.value).join(" "), title: document.title, address: location.href };
+           return Object.entries(places).flatMap(([place, text]) => names.filter((name) => new RegExp(name).test(text)).map((name) => place + ": " + name));`,
+        );
+      const lockedOut = () => page.until("return document.getElementById('main').hidden && !document.getElementById('notice').hidden", "the key form");
+      const refuse = async () => {
+        setValue(zooConfig, "auth.keyless_user", "");
+        await page.run("document.getElementById('refresh').click()");
+        await lockedOut();
+      };
+      const letIn = async () => {
+        setValue(zooConfig, "auth.keyless_user", "agent1");
+        await page.click("#notice button");
+        await page.until("return !document.getElementById('main').hidden && document.querySelectorAll('#board .card, #graph-box canvas').length > 0", "the page, once it is let in again");
+      };
+      const choose = (project: string) => page.run(`[...document.querySelectorAll('#projects .project-main')].find((main) => main.querySelector('.project-id').textContent === ${JSON.stringify(project)}).click()`);
+      const place = `#board?in=${z.alpha}/${z.sub}&zoom=1`;
+      const shown = async () => [await hash(), await level(), await cards(), await trail(), await page.run<string>("return document.title")];
+      const there = [place, "Top level", these("s1", "s2", "s3", "deep*", "near"), `in ZOO › ${z.alpha} › ${z.sub} · Shared sub-group✕ leave group`, "zoom · Vigile"];
+      try {
+        // A refresh whose authorized answers are already on their way cannot put the plan or its route back after
+        // another tab removes that credential and locks this page out.
+        const admin = loadConfig(zooConfig, {}).config.auth.keys.admin!;
+        await open(`/${place}`);
+        await page.run(`localStorage.setItem('vigile.key', ${JSON.stringify(admin)})`);
+        await open(`/${place}`);
+        await page.run(`
+          window.oldRefreshFetch = window.fetch;
+          window.oldRefreshHeld = new Promise((resolve) => (window.releaseOldRefresh = resolve));
+          window.oldRefreshStarted = false;
+          window.fetch = async (url, options) => {
+            const response = await window.oldRefreshFetch(url, options);
+            if (!window.oldRefreshStarted && String(url).endsWith('/api/list-tasks')) {
+              window.oldRefreshStarted = true;
+              await window.oldRefreshHeld;
+            }
+            return response;
+          };
+          document.getElementById('refresh').click();
+        `);
+        await page.until("return window.oldRefreshStarted", "the old authorized refresh to have its final answer");
+        await page.run(`localStorage.removeItem('vigile.key'); window.dispatchEvent(new StorageEvent('storage', { key: 'vigile.key', oldValue: ${JSON.stringify(admin)}, newValue: null, storageArea: localStorage }))`);
+        await lockedOut();
+        assert.deepEqual(await left(), []);
+        await page.run("window.releaseOldRefresh()");
+        await page.wait(200);
+        assert.deepEqual([await left(), await hash()], [[], "#board"], "the stale authorized answer restores neither plan nor route");
+        await page.run("window.fetch = window.oldRefreshFetch; delete window.oldRefreshFetch; delete window.oldRefreshHeld; delete window.releaseOldRefresh; delete window.oldRefreshStarted");
+        await letIn();
+
+        // A project is selected and the board is two groups in, at its top level; the last zoom was a moment ago.
+        await open("/#board?zoom=1");
+        await choose("ZOO");
+        await into("alpha");
+        await into("sub");
+        assert.deepEqual(await shown(), there);
+        assert.match(await text("#zoom-said"), /Shared sub-group/, "what was said of the zoom is still in the page");
+        const before = await left();
+        for (const found of ["page: Sub one", "page: Shared sub-group", "page: \\bZoo\\b", "address: ZOO-\\d+"]) assert.ok(before.includes(found), `the page shows the plan, and the search finds it: ${found} among ${before.join(", ")}`);
+
+        // The key is refused. Nothing of the plan is left, and the address names the view alone.
+        await refuse();
+        assert.deepEqual(await left(), []);
+        assert.deepEqual(await page.run("return [location.hash, document.title, document.getElementById('zoom-said').textContent, document.getElementById('level').textContent, document.getElementById('scope').textContent, document.getElementById('view-graph').getAttribute('href')]"), ["#board", "Vigile", "", "", "in all projects", "#graph"]);
+        // Where the page was is kept with the entry in the browser's history, and nowhere a person or a screen reader comes by.
+        assert.deepEqual(await page.run("return history.state.kept"), { route: place, project: "ZOO" });
+        // Nothing comes back when the timers that were running have run: the one that empties what was said of a
+        // zoom, the ones that take the rings off the cards.
+        await page.wait(6600);
+        assert.deepEqual(await left(), []);
+        // Back and Forward lead to addresses that name a group: they are put away as well, and nothing is shown for them.
+        await travel("back", "#board");
+        assert.deepEqual([await left(), await page.run("return history.state.kept")], [[], { route: `#board?in=${z.alpha}&zoom=1`, project: "ZOO" }]);
+        await travel("forward", "#board");
+        assert.deepEqual([await left(), await page.run("return history.state.kept.route")], [[], place]);
+        // An address typed by hand while the page is locked out is put away too.
+        await page.run(`location.hash = '#graph/${z.s1}?in=${z.alpha}'`);
+        await page.until("return location.hash === '#graph'", "the typed address to be put away");
+        assert.deepEqual(await left(), []);
+        await travel("back", "#board");
+
+        // Let in again, the page is where it was: the same groups, the same level, the same project, and the address says so.
+        await letIn();
+        assert.deepEqual(await shown(), there);
+        assert.equal(await page.run("return history.state.kept"), undefined);
+        assert.equal(await text("#zoom-said"), "", "and nothing is said of a zoom that was not made");
+
+        // Locked out and loaded again, the page still shows nothing of the plan, and is where it was once it is let in.
+        await refuse();
+        await page.run("window.before = true; location.reload()");
+        await page.until("return !window.before && document.readyState === 'complete' && Boolean(document.getElementById('main')?.hidden) && !document.getElementById('notice').hidden", "the key form of the page that was loaded again");
+        assert.deepEqual([await left(), await hash()], [[], "#board"]);
+        await letIn();
+        assert.deepEqual(await shown(), there);
+
+        // A group it was in is deleted while it is locked out: let in, it is as far in as the plan still goes.
+        await refuse();
+        await alter("delete", { id: z.sub! });
+        await letIn();
+        assert.deepEqual([await hash(), await trail()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha✕ leave group`]);
+        await plan("restore", { id: z.sub });
+
+        // The project is selected for the whole page and not for one entry of the history. Locked out two groups
+        // in and gone back one entry, the page comes back in that entry's place, in the same project: the entry is
+        // given the selection the page was locked out with, not the one it was emptied of.
+        await open("/#board?zoom=1");
+        await choose("ZOO");
+        await into("alpha");
+        await into("sub");
+        await refuse();
+        await travel("back", "#board");
+        assert.deepEqual(await page.run("return history.state.kept"), { route: `#board?in=${z.alpha}&zoom=1`, project: "ZOO" });
+        await letIn();
+        assert.deepEqual([await hash(), await trail(), await cards()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha✕ leave group`, these("a1", "a2", "sub*", "both", "near")]);
+        assert.equal(await page.run<string>("return document.querySelector('#projects .project.selected .project-id')?.textContent"), "ZOO");
+        // The entry the page was locked out on still has its address put away. Come back to, it has it again.
+        await travel("forward", place);
+        assert.deepEqual([await shown(), await page.run("return history.state.kept")], [there, undefined]);
+        // The same after the page was loaded again while locked out, when all it knows is what was put away.
+        await refuse();
+        await page.run("window.before = true; location.reload()");
+        await page.until("return !window.before && document.readyState === 'complete' && Boolean(document.getElementById('main')?.hidden) && !document.getElementById('notice').hidden", "the key form of the page that was loaded again");
+        await travel("back", "#board");
+        assert.deepEqual([await left(), await page.run("return history.state.kept")], [[], { route: `#board?in=${z.alpha}&zoom=1`, project: "ZOO" }]);
+        await letIn();
+        assert.deepEqual([await hash(), await trail()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha✕ leave group`]);
+        // And when the other view was gone to while locked out, which is an entry of its own.
+        await refuse();
+        await page.click("#view-graph");
+        await page.until("return location.hash === '#graph'", "the other view");
+        assert.deepEqual(await left(), []);
+        await letIn();
+        assert.deepEqual([await hash(), await trail()], ["#graph", "in ZOO · Zoo"]);
+
+        // What was typed into the filter is often a title. With everything above the board folded away it is also
+        // in the line that says what is in view, and where the page says that nothing matches: all of it goes.
+        await open(`/${place}`);
+        await page.click("#filter");
+        await page.type("Shared sub-group zzz");
+        await page.click("#focus");
+        assert.deepEqual(await page.run("return [document.querySelector('#scope .scope-text').textContent, document.getElementById('empty').textContent]"), [
+          `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group, matching "Shared sub-group zzz", top level only`,
+          'No task matches "Shared sub-group zzz".',
+        ]);
+        await refuse();
+        assert.deepEqual(await left(), []);
+        assert.deepEqual(await page.run("return [document.getElementById('filter').value, document.querySelector('#scope .scope-text').textContent, document.getElementById('empty').textContent]"), ["", "in all projects", "No tasks yet."]);
+        await letIn();
+        assert.deepEqual([await hash(), await cards(), await page.run("return document.getElementById('filter').value")], [place, these("s1", "s2", "s3", "deep*", "near"), ""]);
+        await page.click("#focus");
+        // Over the graph, a drawing waits for the typing to pause: locked out meanwhile, it draws nothing of what was typed.
+        await page.click("#view-graph");
+        await graphReady();
+        await page.click("#filter");
+        await page.type("Sub one");
+        await refuse();
+        await page.wait(600);
+        assert.deepEqual([await left(), await page.run("return document.getElementById('filter').value")], [[], ""]);
+        await letIn();
+
+        // The same with an item open over the graph: its ID leaves the address and its title the tab, and both are back afterwards.
+        await open(`/#graph/${z.s1}?in=${z.alpha}/${z.sub}`);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Sub one'", "the task's panel over the graph");
+        await graphReady();
+        await refuse();
+        assert.deepEqual([await left(), await hash(), await panelOpen()], [[], "#graph", false]);
+        await letIn();
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Sub one' && !document.getElementById('panel').hidden", "the task's panel again");
+        assert.deepEqual([await hash(), await trail()], [`#graph/${z.s1}?in=${z.alpha}/${z.sub}`, `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group✕ leave group`]);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        setValue(zooConfig, "auth.keyless_user", "agent1");
+        await plan("restore", { id: z.sub }).catch(() => {});
+        await open().catch(() => {});
+        await page.run("localStorage.clear()");
+      }
+    });
+
+    it("keeps what a deleted group holds inside the group above it, as the service counts it: on the board at every zoom, under the filter, when the group is entered, in a project and in the graph", async () => {
+      await page.size(1280, 900);
+      const made: string[] = [];
+      try {
+        // Alpha holds a group, which holds a group of its own with one task. The group in between is deleted, and
+        // not for good: what it held is still there, and still inside Alpha.
+        await add("mid", "Middle group", { parent: z.alpha });
+        await add("under", "Under a deleted group", { parent: z.mid });
+        await add("leaf", "Leaf below", { parent: z.under });
+        made.push(z.leaf!, z.under!);
+        await alter("delete", { id: z.mid! });
+        assert.deepEqual((await plan("get", { id: z.alpha })).progress, { finished: 1, total: 13 }, "the service counts both inside Alpha");
+        await open(`/#board/${z.mid}`);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Middle group'", "the deleted group's panel");
+        assert.equal(await count("#detail .open-group"), 0, "a deleted group has no action that would immediately remove it from the route");
+
+        // With everything shown the two have their cards, and say they are in Alpha: the deleted group is not named.
+        await open();
+        assert.deepEqual(await cards(), these(...ALL, "under", "leaf"));
+        assert.deepEqual([(await says("under")).tags, (await says("leaf")).tags], [["0/1 done", `in ${z.alpha}`, "ZOO"], [`in ${z.under}`, "ZOO"]]);
+        assert.match(await text("#summary"), /^20 tasks/);
+        // At the top level they are inside Alpha, whose card holds what the service says it holds.
+        await page.click("#level-out");
+        for (let more = 0; more < 3; more++) await page.click("#level-out");
+        assert.deepEqual([await hash(), await cards()], ["#board?zoom=1", these(...TOP)]);
+        assert.deepEqual([(await says("alpha")).tags[0], (await says("alpha")).button], ["1/13 done", "Zoom in / holds 13 tasks"]);
+        assert.match(await text("#summary"), /^6 cards for 20 tasks/);
+        // One level in, the group that was two levels down is one level down, closed over its task.
+        await page.click("#level-in");
+        assert.deepEqual(await cards(), these(...TWO, "under*"));
+        assert.equal((await says("under")).button, "Zoom in / holds 1 task");
+        // The filter finds the task through the deleted group: at the top level Alpha stays in sight for it.
+        await page.click("#level-out");
+        await page.click("#filter");
+        await page.type("leaf below");
+        assert.deepEqual([await cards(), (await says("alpha")).tags[1]], [these("alpha*"), "1 inside matches"]);
+        await page.run("document.getElementById('filter').select()");
+        await page.key("Backspace");
+        // Entered, Alpha shows the group among what it holds, and the trail goes on through it.
+        await into("alpha");
+        assert.deepEqual(await cards(), these("a1", "a2", "sub*", "both", "near", "under*"));
+        assert.match(await text("#summary"), /^6 cards for 13 tasks/);
+        await into("under");
+        assert.deepEqual([await hash(), await cards(), await trail()], [`#board?in=${z.alpha}/${z.under}&zoom=1`, these("leaf"), `in all projects › ${z.alpha} › ${z.under} · Under a deleted group✕ leave group`]);
+        // A trail that names the deleted group loses that step and keeps the ones around it.
+        await open(`/#board?in=${z.alpha}/${z.mid}/${z.under}`);
+        assert.deepEqual([await hash(), await cards()], [`#board?in=${z.alpha}/${z.under}`, these("leaf")]);
+        // In its project the same: the tasks are in the project through the deleted group and Alpha.
+        await open("/#board?zoom=1");
+        await page.run("[...document.querySelectorAll('#projects .project-main')].find((main) => main.querySelector('.project-id').textContent === 'ZOO').click()");
+        assert.match(await text("#summary"), /^3 cards for 17 tasks/);
+        assert.match(await text("#projects .project.selected .project-foot"), /^1 of 17 finished/, "which is the project's own count");
+
+        // A group is deleted while the board is in a group below it: the board stays where it is, and the trail
+        // keeps the group above, which still holds this one.
+        await page.run("localStorage.setItem('vigile.auto-refresh', 'on')");
+        await open(`/#board?in=${z.alpha}/${z.sub}/${z.deep}`);
+        await live();
+        await alter("delete", { id: z.sub! });
+        await page.until(`return location.hash === '#board?in=${z.alpha}/${z.deep}'`, "the deleted group to leave the trail", 3000);
+        assert.deepEqual([await cards(), await trail()], [these("pit", "d1"), `in all projects › ${z.alpha} › ${z.deep} · Deep group✕ leave group`]);
+        await page.click("#scope .leave");
+        assert.deepEqual(await cards(), these("a1", "a2", "both", "near", "under", "leaf", "s1", "s2", "s3", "deep", "pit", "d1"), "everything the deleted group held is in Alpha");
+        await plan("restore", { id: z.sub });
+        await page.run("localStorage.removeItem('vigile.auto-refresh')");
+
+        // The graph draws them inside Alpha too: closed into Alpha's box, and in it when groups are shown open.
+        await open(`/#graph?in=${z.alpha}`);
+        await graphReady();
+        assert.ok((await page.run<string[]>("return window.vigileGraph.nodes('[kind = \"task\"]').map((n) => n.data('ref'))")).includes(z.under!), "inside Alpha, the group is drawn");
+        await page.click("#scope .leave");
+        await page.click("label:has(#collapse-groups)");
+        await page.until(`return Boolean(window.vigileGraph?.scratch('settled')) && window.vigileGraph.getElementById('task:${z.leaf}').nonempty()`, "the graph with its groups open", 20_000);
+        assert.deepEqual(await page.run(`const cy = window.vigileGraph; const boxes = (id) => cy.getElementById(id).ancestors().map((box) => box.id()); return [boxes('task:${z.under}').includes('task:${z.alpha}'), boxes('task:${z.leaf}').includes('task:${z.under}'), boxes('task:${z.leaf}').includes('task:${z.alpha}')]`), [true, true, true]);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await plan("restore", { id: z.sub }).catch(() => {});
+        for (const id of made) await alter("delete", { id }).catch(() => {});
+        await page.run("localStorage.removeItem('vigile.auto-refresh')");
+      }
+    });
+
+    it("takes any whole number of levels from the address, with no limit of its own: a plan 1,002 groups deep is shown at 1,001 levels, and what is not a whole number that can be counted with is no zoom", async () => {
+      await page.size(1280, 900);
+      // What is not a number of levels: nothing is closed, and the page does not stumble.
+      await open();
+      for (const zoom of ["0", "-1", "+5", "05", "1.0", "1e3", "0x10", "%205", "5x", "Infinity", "NaN", "", "9007199254740992", "99999999999999999999"]) {
+        await page.run(`location.hash = '#board?zoom=${zoom}'`);
+        await page.until(`return location.hash === '#board?zoom=${zoom}'`, "the address");
+        assert.deepEqual([await level(), (await cards()).length], ["Everything", 18], `zoom=${zoom}`);
+      }
+      // The largest whole number there is to count with is a number of levels: more than the plan has, so everything, and one step out from there.
+      await page.run("location.hash = '#board?zoom=9007199254740991'");
+      await page.until("return location.hash === '#board?zoom=9007199254740991'", "the address");
+      assert.deepEqual([await level(), (await cards()).length], ["Everything", 18]);
+      await page.click("#level-out");
+      assert.equal(await hash(), "#board?zoom=4");
+      assert.deepEqual(page.errors, []);
+
+      // A plan of its own: 1,002 groups, each inside the one before.
+      const deepDirectory = mkdtempSync(join(tmpdir(), "vigile-browser-test-deep-"));
+      const deepConfig = join(deepDirectory, "config.toml");
+      initConfig(deepConfig, { name: "deep", port: await freePort() });
+      const deep = await startService({ loaded: loadConfig(deepConfig, {}), log: () => {}, warn: () => {} });
+      try {
+        await deep.engine.execute("create_project", "agent1", { title: "Deep", prefix: "DEEP" });
+        const chain: string[] = [];
+        for (let depth = 1; depth <= 1002; depth++) chain.push(((await deep.engine.execute("create_task", "agent1", { title: `Level ${depth}`, description: "d", project: "DEEP", ...(depth > 1 ? { parent: chain.at(-1) } : {}) })) as { id: string }).id);
+        const at = async (address: string) => {
+          await page.open("about:blank");
+          await page.open(`${deep.urls.base}/${address}`);
+          await page.until("return /^Updated/.test(document.getElementById('sync').textContent)", "the deep plan", 20_000);
+        };
+        const closed = () => page.run<string[]>("return [...document.querySelectorAll('#board .card.closed')].map((card) => card.dataset.id + ' ' + card.nextElementSibling.querySelector('.holds').textContent)");
+        await at("#board?zoom=1001");
+        assert.deepEqual([await hash(), await level(), await closed()], ["#board?zoom=1001", "1001 levels", [`${chain[1000]} holds 1 task`]]);
+        assert.match(await text("#summary"), /^1001 cards for 1002 tasks/);
+        // In and out again with the control, each a drawing of the whole board, and neither slow.
+        const timed = (step: string) => page.run<number>(`const start = performance.now(); ${step}; return performance.now() - start;`);
+        const inward = await timed("document.getElementById('level-in').click()");
+        assert.deepEqual([await hash(), await level(), await closed()], ["#board", "Everything", []]);
+        const outward = await timed("document.getElementById('level-out').click()");
+        assert.deepEqual([await hash(), await level()], ["#board?zoom=1001", "1001 levels"]);
+        // More levels than there are is everything; one level is the first group, which stands for all the others.
+        await at("#board?zoom=1002");
+        assert.deepEqual([await level(), await closed()], ["Everything", []]);
+        await at("#board?zoom=1");
+        assert.deepEqual([await level(), await closed()], ["Top level", [`${chain[0]} holds 1,001 tasks`]]);
+        // Half-way down, entered: the board is in the group at level 500, and shows the level under it.
+        const entered = await timed(`location.hash = '#board?in=${chain[499]}&zoom=1'; window.dispatchEvent(new HashChangeEvent('hashchange'))`);
+        assert.deepEqual([await closed(), await trail()], [[`${chain[500]} holds 501 tasks`], `in all projects › ${chain[499]} · Level 500✕ leave group`]);
+        assert.match(await text("#summary"), /^1 card for 502 tasks/);
+        // The last group but one, entered from its card: one task, and nothing further to zoom.
+        await at("#board?zoom=1001");
+        await page.run(`for (const more of document.querySelectorAll('.more[aria-expanded="false"]')) more.click()`);
+        await page.click(`#board .zoom-into[data-id="${chain[1000]}"]`);
+        assert.deepEqual([await hash(), await level(), await page.run<string[]>("return [...document.querySelectorAll('#board .card')].map((card) => card.dataset.id)")], [`#board?in=${chain[1000]}&zoom=1001`, null, [chain[1001]]]);
+        // The whole way down as a trail, a thousand groups one in the other: the address is taken as it is, the
+        // board is in the last of them, and each step out is one group.
+        await at(`#board?in=${chain.slice(0, 1001).join("/")}`);
+        assert.deepEqual([await trail(), await page.run<string[]>("return [...document.querySelectorAll('#board .card')].map((card) => card.dataset.id)")], [`in all projects › … › ${chain[998]} › ${chain[999]} › ${chain[1000]} · Level 1001✕ leave group`, [chain[1001]]]);
+        assert.ok((await page.run<string>("return document.querySelector('#scope .scope-text').title")).length < 200, "the line's full text names the steps it shows, not a thousand");
+        const left = await timed("document.querySelector('#scope .leave').click()");
+        assert.equal(await hash(), `#board?in=${chain.slice(0, 1000).join("/")}`);
+        // A trail of as many steps that do not hold one another is cut to the last one that does.
+        await at(`#board?in=${Array.from({ length: 5000 }, () => chain[5]).join("/")}/${chain[0]}/${chain[3]}`);
+        assert.equal(await hash(), `#board?in=${chain[0]}/${chain[3]}`);
+        assert.ok(inward < 2000 && outward < 2000 && entered < 2000 && left < 2000, `zooming in took ${Math.round(inward)} ms, out ${Math.round(outward)} ms, entering a group ${Math.round(entered)} ms`);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await deep.stop();
+        rmSync(deepDirectory, { recursive: true, force: true });
+      }
+    });
+
+    it("cannot be asked for a loop of groups: the service refuses one, so the levels always end", async () => {
+      await assert.rejects(plan("add_link", { from: z.d1, type: "contains", to: z.alpha }), (error: any) => error.details?.rule === "loop");
+      await assert.rejects(plan("add_link", { from: z.sub, type: "contains", to: z.beta }), (error: any) => error.details?.rule === "loop");
+      await assert.rejects(plan("add_link", { from: z.alpha, type: "contains", to: z.alpha }), (error: any) => error.details?.rule === "self_link");
+      // A group may be in two groups, and a task reached two ways: that is a graph, not a loop, and it is five levels deep.
+      await page.size(1280, 900);
+      await open("/#board?zoom=4");
+      assert.deepEqual([await level(), await cards()], ["4 levels", these(...FOUR)]);
+    });
+
+    it("keeps its layout zoomed out and inside a group, in every theme, in light and dark, on a wide window and on a phone", async () => {
+      try {
+        for (const [width, height, touch] of [[1440, 900, false], [360, 780, true]] as const) {
+          await page.size(width, height, touch);
+          for (const scheme of ["light", "dark"] as const) {
+            await page.scheme(scheme);
+            for (const name of ["vigile", "dado", "jeev", "gito"]) {
+              await open("/#board?zoom=1");
+              await page.run(`localStorage.setItem('vigile.theme', ${JSON.stringify(name)})`);
+              await open("/#board?zoom=1");
+              assert.deepEqual([await page.run<string>("return document.documentElement.dataset.theme"), await cards()], [name, these(...TOP)]);
+              // The button that zooms in lies within its card, under everything the card says, and is large enough to press.
+              const fit = await page.run<{ inside: boolean; below: boolean; height: number }>(
+                `const card = ${card("alpha")}; const button = card.nextElementSibling; const c = card.getBoundingClientRect(), b = button.getBoundingClientRect(), last = card.lastElementChild.getBoundingClientRect();
+                 return { inside: b.left >= c.left && b.right <= c.right && b.bottom <= c.bottom, below: b.top >= last.bottom, height: Math.round(b.height) }`,
+              );
+              assert.deepEqual(fit, { inside: true, below: true, height: 28 }, `${name}, ${scheme}, ${width}px`);
+              await layout(`zoomed out in ${name}, ${scheme}, at ${width}px`);
+              await open(`/#board?in=${z.alpha}/${z.sub}/${z.deep}&zoom=1`);
+              await layout(`inside three groups in ${name}, ${scheme}, at ${width}px`);
+            }
+          }
+        }
+        // On a phone the trail takes a second line before the group in view is cut off.
+        assert.ok(await page.run<boolean>("const line = document.querySelector('#scope .scope-text'); return line.scrollWidth <= line.clientWidth + 1 && line.getBoundingClientRect().height < 50"));
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await page.scheme("light");
+        await page.run("localStorage.removeItem('vigile.theme')");
+        await page.size(1280, 900);
+      }
+    });
+  });
+
+  /**
    * The graph of a plan of 2,000 tasks, on a service of its own. Working out where that many items go takes many
    * seconds, during which the page must go on answering, and it is work the page does not start by itself.
    */
@@ -5109,6 +6461,39 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     after(async () => {
       await large?.stop();
       if (largeDirectory) rmSync(largeDirectory, { recursive: true, force: true });
+    });
+
+    it("zooms the board of 2,000 tasks out to its groups and in again at once, and filters it zoomed out letter by letter", async () => {
+      await page.size(1440, 900);
+      await open("/");
+      /** Runs a step in the page and says how long the page was busy with it, in milliseconds. */
+      const timed = (step: string) => page.run<number>(`const start = performance.now(); ${step}; return performance.now() - start;`);
+      const summary = () => text("#summary");
+      assert.match(await summary(), /^2000 tasks/);
+      // Out: the tasks inside a group give way to their group's card. No task is deeper than one level.
+      const out = await timed("document.getElementById('level-out').click()");
+      assert.equal(await page.run<string>("return location.hash + ' ' + document.getElementById('level').textContent"), "#board?zoom=1 Top level");
+      assert.match(await summary(), new RegExp(`^${2000 - inGroups} cards for 2000 tasks`));
+      await page.run(`for (const more of document.querySelectorAll('.more[aria-expanded="false"]')) more.click()`);
+      const closed = await page.run<Array<{ id: string; holds: string }>>("return [...document.querySelectorAll('#board .card.closed')].map((card) => ({ id: card.dataset.id, holds: card.nextElementSibling.querySelector('.holds').textContent }))");
+      assert.ok(closed.length > 0 && closed.length <= 50, `of the fifty groups, those that hold something are closed: ${closed.length}`);
+      let held = 0;
+      for (const group of closed) held += Number(/^holds (\d+) tasks?$/.exec(group.holds)![1]);
+      assert.equal(held, inGroups, "between them the closed groups hold every task that is not on the board, each task being in one group");
+      const { progress } = await plan("get", { id: closed[0]!.id });
+      assert.equal(closed[0]!.holds, `holds ${progress.total} tasks`, "a group's count is the service's own");
+      await page.run(`for (const more of document.querySelectorAll('.more[aria-expanded="true"]')) more.click()`);
+      // The filter, zoomed out: each letter is one drawing of the board, with the closed groups looked into.
+      const typed = await timed(`const filter = document.getElementById('filter'); for (const word of ["z", "zy", "zyx", "zyxw"]) { filter.value = word; filter.dispatchEvent(new Event("input", { bubbles: true })); }`);
+      assert.match(await summary(), /^\d+ cards for 1400 tasks/, "seven tasks in ten carry the four letters");
+      assert.ok((await count("#board .tag.match")) > 0, "and closed groups say how many of theirs match");
+      await timed(`const filter = document.getElementById('filter'); filter.value = ""; filter.dispatchEvent(new Event("input", { bubbles: true }));`);
+      const back = await timed("document.getElementById('level-in').click()");
+      assert.equal(await page.run<string>("return location.hash + ' ' + document.getElementById('level').textContent"), "#board Everything");
+      assert.match(await summary(), /^2000 tasks/);
+      // Far more room than is needed: each of these is a few hundredths of a second, and seconds if the work grew with the square of the plan.
+      assert.ok(out < 1500 && back < 1500 && typed < 3000, `zooming out took ${Math.round(out)} ms, in ${Math.round(back)} ms, four letters ${Math.round(typed)} ms`);
+      assert.deepEqual(page.errors, []);
     });
 
     it("says how large the graph is and draws it when asked, not by itself; the choice holds from the board and back", async () => {

@@ -95,10 +95,26 @@ export class Unchanged {
     for (const link of this.graph.in(ref)) this.touch(link.from, revision);
   }
 
+  /** Every task below a container can show another `live_containers` answer when that ancestor changes. */
+  private descendants(ref: Ref, revision: number): void {
+    const seen = new Set<string>();
+    const queue: Ref[] = [ref];
+    for (let next = 0; next < queue.length; next++) {
+      for (const link of this.graph.out(queue[next]!, CONTAINS)) {
+        const found = this.graph.node(link.to);
+        if (!found || found.kind !== "task" || seen.has(key(found))) continue;
+        seen.add(key(found));
+        this.touch(found, revision);
+        queue.push(found);
+      }
+    }
+  }
+
   /** An item is stored: new, or changed. Told once it is in the graph. */
   stored(node: Node, revision: number): void {
     this.touch(node, revision);
     this.neighbours(node, revision);
+    if (node.kind !== "user" && this.holding.has(key(node))) this.descendants(node, revision);
     if (node.kind !== "user") this.workChanged = revision;
   }
 
@@ -120,6 +136,7 @@ export class Unchanged {
     this.touch(link.to, revision);
     if (SHAPES_WORK.has(link.type)) this.workChanged = revision;
     if (!changed || link.type !== CONTAINS) return;
+    this.descendants(link.to, revision);
     const holds = (this.holding.get(key(link.from)) ?? 0) + by;
     if (holds > 0) this.holding.set(key(link.from), holds);
     else this.holding.delete(key(link.from));

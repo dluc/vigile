@@ -2232,6 +2232,59 @@ describe("groups", () => {
     assert.equal((await refusal(agent("list_tasks", { parent: "WEB" }))).code, "not_found");
   });
 
+  it("keep what a deleted group holds inside the groups and the project above it, and say so the same way in progress, in the lists and in live_containers", async () => {
+    const { agent, epic, feature, a, b, c, loose } = await plan();
+    const ids = async (input: Record<string, unknown>) => (await agent("list_tasks", input)).tasks.map((t: any) => t.id);
+    const beforeAncestorDelete = (await agent("get", { id: a.id })).unchanged_since;
+    assert.equal("live_containers" in (await agent("get", { id: a.id })), false, "with no deleted container, contained_in says it all");
+    await agent("delete", { id: feature.id, version: 1 });
+    // The deleted group is no longer listed or counted. Its two tasks are still inside the group above it.
+    assert.deepEqual((await agent("get", { id: epic.id })).progress, { finished: 0, total: 3 });
+    assert.deepEqual(await ids({ parent: epic.id }), [a.id, b.id, c.id]);
+    assert.deepEqual(await ids({ project: "WEB" }), [epic.id, a.id, b.id, c.id, loose.id]);
+    assert.deepEqual(await ids({ top_level: true }), [epic.id, loose.id], "they are not at the top: they are inside a group");
+    assert.deepEqual(await ids({ top_level: false }), [a.id, b.id, c.id]);
+    const afterAncestorDelete = await agent("get", { id: a.id });
+    assert.ok(afterAncestorDelete.unchanged_since > beforeAncestorDelete, "a descendant's revision moves when an ancestor changes its live containers");
+    const inside = (await agent("list_tasks", { parent: epic.id })).tasks.find((t: any) => t.id === a.id);
+    assert.deepEqual([inside.contained_in, inside.live_containers], [[feature.id], [epic.id]]);
+    assert.equal("live_containers" in (await agent("get", { id: c.id })), false);
+    // Through two deleted groups, one in the other, and from a second way up that is live: each live holder once.
+    const other = await agent("create_task", task("Second way up", { project: "WEB" }));
+    await agent("add_link", { from: other.id, type: "contains", to: a.id });
+    const beforeOuterDelete = (await agent("get", { id: a.id })).unchanged_since;
+    await agent("delete", { id: epic.id, version: (await agent("get", { id: epic.id })).version });
+    const afterOuterDelete = await agent("get", { id: a.id });
+    assert.deepEqual(afterOuterDelete.live_containers, [other.id, "WEB"], "the live group, and the project the deleted groups are in: the nearest first");
+    assert.ok(afterOuterDelete.unchanged_since > beforeOuterDelete, "invalidation crosses the deleted group between an outer ancestor and its leaf");
+    assert.deepEqual((await agent("get", { id: b.id })).live_containers, ["WEB"]);
+    assert.deepEqual(await ids({ top_level: true }), [b.id, c.id, loose.id, other.id]);
+    // Restored, the group is a container like any other again, and the extra field goes.
+    await agent("restore", { id: epic.id });
+    await agent("restore", { id: feature.id });
+    const restored = await agent("get", { id: a.id });
+    assert.ok(restored.unchanged_since > afterOuterDelete.unchanged_since, "restoring ancestors advances the leaf again");
+    assert.equal("live_containers" in (await agent("get", { id: b.id })), false);
+    assert.deepEqual(await ids({ top_level: true }), [epic.id, loose.id, other.id]);
+  });
+
+  it("bounds live_containers in a detail while keeping the whole summary in a task list", async () => {
+    const { agent } = await setup();
+    await agent("create_project", { title: "Web", prefix: "WEB" });
+    const deleted = await agent("create_task", task("Deleted group", { project: "WEB" }));
+    const leaf = await agent("create_task", task("Leaf", { project: "WEB" }));
+    await agent("add_link", { from: deleted.id, type: "contains", to: leaf.id });
+    for (let i = 0; i < 101; i++) {
+      const holder = await agent("create_task", task(`Holder ${i}`, { project: "WEB" }));
+      await agent("add_link", { from: holder.id, type: "contains", to: deleted.id });
+    }
+    await agent("delete", { id: deleted.id, version: (await agent("get", { id: deleted.id })).version });
+    const detail = await agent("get", { id: leaf.id });
+    const summary = (await agent("list_tasks", { project: "WEB" })).tasks.find((item: any) => item.id === leaf.id);
+    assert.deepEqual([detail.live_containers.length, detail.more.live_containers], [100, { total: 102 }]);
+    assert.equal(summary.live_containers.length, 102, "list summaries stay whole for drawing the plan");
+  });
+
   it("take the project's prefix through their parent, and can be regrouped with links", async () => {
     const { agent, feature, c, loose } = await plan();
     assert.match(feature.id, /^WEB-/);

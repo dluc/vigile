@@ -234,9 +234,34 @@ by itself, with a note that its further pages are not shown.
 
 ![A task open in the panel: its state, description, reason, links grouped by kind, and details](images/task.webp)
 
+The board can be zoomed out for a high-level view. It opens with every task
+shown. The control above it, a minus, the level in words and a plus, closes or
+opens one level of groups at a time, down to "Top level": the groups that are
+in no other group, and the tasks that are in none. A group at the last open
+level is closed. Its card stands for the tasks it holds: it says how many of
+them are done, in progress and waiting, whether any has a problem, and, under
+the filter, how many match. It stands in the column of the group's own state.
+"Zoom in" on such a card, or "Show only this group" in the panel of any group,
+shows that group alone, with a trail above the board that leads back out. A
+task in two groups is on the board as soon as one of them is open, and is
+counted once. The counts above the board are those of the cards on it. With
+auto-refresh on, a change to anything a closed group's card shows, also among
+the tasks it holds, rings that card; your own typing in the filter and your
+own zooming ring nothing. Where nothing holds anything there is nothing to
+zoom, and the control is not shown. The keyboard stays with what it was on
+through every zoom: on the same task where it still shows, else on the closed
+group that now holds it or on the way out of the group. A zoom is said to a
+screen reader once, in a few words.
+The graph is not zoomed this way: it has its own "Collapse groups" switch, and
+shares with the board only the group that was zoomed into.
+
 Every view and every open item has its own address, such as `/#board`,
-`/#graph/WEB-012` or `/#board/project:WEB`. Bookmark it or share it; the
-browser's Back returns to the item before.
+`/#graph/WEB-012` or `/#board/project:WEB`. So does the zoom:
+`/#board?in=WEB-003&zoom=1` is the top level of the group WEB-003. Bookmark it
+or share it; the browser's Back returns to the item, or the zoom, before.
+When the service no longer accepts the page's key, the page empties itself and
+its address names the view alone, since the IDs of groups and items are part of
+the plan; given a key that is accepted, it is back where it was.
 
 The page loads once and then stays as it is, so it never changes under your
 eyes while you read. The refresh button reloads it. With "Auto-refresh" on, the
@@ -602,6 +627,12 @@ prefix used up, and no later project can have it.
 ### Can I undo a delete?
 
 Yes. `delete` marks an item as deleted and `restore` brings it back.
+
+Deleting a group does not delete what it holds. Those tasks stay inside the
+group and the project above the deleted one: they count in that group's
+progress, are listed by `project` and `parent`, are not `top_level`, and are
+shown there on the board and in the graph. Such a task names the deleted group
+in `contained_in`, and the live ones that hold it in `live_containers`.
 
 An admin can also delete for good, with `permanent`. That cannot be undone: the
 item goes with its description, its links and its history, and nothing of it is

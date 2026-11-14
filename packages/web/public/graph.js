@@ -12,6 +12,12 @@ const isNumbered = (id) => /^\d+$/.test(id);
 export const projectRef = (project) => (isNumbered(project.id) ? `project:${project.id}` : project.id);
 const short = (text, length) => (text.length > length ? `${text.slice(0, length - 1).trimEnd()}…` : text);
 
+/**
+ * The live projects and tasks that hold a task. The service lists them apart when a deleted item is among the
+ * task's containers: what a live group holds through a deleted one is still inside it, and is drawn there.
+ */
+const holdersOf = (task) => task.live_containers ?? task.contained_in;
+
 /** A task's state for colouring: its status, with open split into next and waiting. */
 export function stateOf(task) {
   if (task.status === "open") return task.is_waiting ? "waiting" : "next";
@@ -34,13 +40,13 @@ export function buildElements(tasks, projects, { collapsed = false } = {}) {
   // the order the service lists them in: the same plan is the same drawing.
   const parentTask = new Map();
   for (const task of tasks) {
-    const holders = task.contained_in.filter((ref) => byId.has(ref) && ref !== task.id).sort();
+    const holders = holdersOf(task).filter((ref) => byId.has(ref) && ref !== task.id).sort();
     if (holders.length) parentTask.set(task.id, holders[0]);
   }
   const homeProject = (task) => {
     const named = /^([A-Z]+)-\d+$/.exec(task.id)?.[1];
-    if (named && projectByRef.has(named) && task.contained_in.includes(named)) return named;
-    return task.contained_in.filter((ref) => projectByRef.has(ref)).sort()[0] ?? null;
+    if (named && projectByRef.has(named) && holdersOf(task).includes(named)) return named;
+    return holdersOf(task).filter((ref) => projectByRef.has(ref)).sort()[0] ?? null;
   };
   const top = (id, seen = new Set()) => {
     const parent = parentTask.get(id);
@@ -115,7 +121,7 @@ export function buildElements(tasks, projects, { collapsed = false } = {}) {
     }
     // A task that sits in a second container is drawn in one and tied to the other by a dashed line.
     if (shown(task.id) !== task.id) continue;
-    for (const ref of task.contained_in) {
+    for (const ref of holdersOf(task)) {
       const other = byId.has(ref) ? nodeId(shown(ref)) : projectByRef.has(ref) ? projectId(ref) : null;
       if (!other || other === drawnParent.get(target)) continue;
       if (projectByRef.has(ref)) usedProjects.add(ref);
