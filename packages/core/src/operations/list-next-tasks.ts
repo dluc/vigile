@@ -18,7 +18,7 @@ export const nextTasksCursor = (input: Record<string, unknown>, who: string): Cu
 export const listNextTasks = defineRead({
   name: "list_next_tasks",
   description:
-    "List the tasks you can start now: open, with nothing unfinished in the way, and either assigned to you or to nobody. Highest priority first; tasks of equal priority come in no meaningful order, so choose among them using value and size. This starts nothing: call set_task_status with in_progress on the task you pick.",
+    "List the tasks you can start now: open, with nothing unfinished in the way, and either assigned to you or to nobody. Highest priority first; tasks of equal priority come in no meaningful order, so choose among them using value and size. This starts nothing: read the chosen task with get, then call set_task_status with in_progress only when work actually starts.",
   access: "all",
   input: z.strictObject({
     project: z.string().optional().describe("Only tasks inside this project, at any depth."),

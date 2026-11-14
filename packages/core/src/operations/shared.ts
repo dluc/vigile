@@ -35,7 +35,7 @@ export const version = z.number().int().min(1).describe("The version of the item
 
 export const kind = z.enum(KINDS).optional().describe('The kind of item: "project", "task" or "user". Needed only when the ID alone is ambiguous.');
 
-export const continuation = z.string().optional().describe("The continuation token from the previous page, to get the next one.");
+export const continuation = z.string().optional().describe("The continuation token from the previous page. Return it unchanged to the same operation with the same filters; stop when no token is returned.");
 
 export const number = z.number().finite();
 
