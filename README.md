@@ -248,8 +248,10 @@ in no other group, and the tasks that are in none. A group at the last open
 level is closed. Its card stands for the tasks it holds: it says how many of
 them are done, in progress and waiting, whether any has a problem, and, under
 the filter, how many match. It stands in the column of the group's own state.
-"Zoom in" on such a card, or "Show only this group" in the panel of any group,
-shows that group alone, with a trail above the board that leads back out. A
+The accented "Zoom in" action along the bottom of such a card, or "Show only
+this group" in the panel of any group, shows that group alone. The accented
+zoom controls appear before search and add “Leave group” beside the level
+controls, while the trail above the board keeps each earlier step reachable. A
 task in two groups is on the board as soon as one of them is open, and is
 counted once. The counts above the board are those of the cards on it. With
 auto-refresh on, a change to anything a closed group's card shows, also among

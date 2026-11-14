@@ -88,14 +88,15 @@
       <span id="scope" class="scope"></span>
     </div>
     <div class="filters">
-      <label class="search"><span class="visually-hidden">Filter tasks</span>
-        <input id="filter" type="search" placeholder="Filter by ID, title or user" autocomplete="off">
-      </label>
       <span id="levels" class="zoom levels" role="group" aria-label="Zoom of the board: how many levels of groups are open" hidden>
         <button id="level-out" type="button" aria-label="Zoom out" aria-describedby="level">−</button>
         <span id="level" class="level"></span>
         <button id="level-in" type="button" aria-label="Zoom in" aria-describedby="level">+</button>
+        <button id="leave-group" class="wide leave" type="button" hidden>↑ Leave group</button>
       </span>
+      <label class="search"><span class="visually-hidden">Filter tasks</span>
+        <input id="filter" type="search" placeholder="Filter by ID, title or user" autocomplete="off">
+      </label>
       <div id="summary" class="summary"></div>
     </div>
     <div id="board" class="board"></div>
