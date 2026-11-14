@@ -773,10 +773,13 @@ describe("service over MCP", () => {
   it("completes the handshake and explains how to work with the service", async () => {
     const client = await connect(running);
     assert.equal(client.getServerVersion()?.name, "vigile");
-    assert.match(client.getInstructions() ?? "", /list_next_tasks/);
-    assert.match(client.getInstructions() ?? "", /feature or epic[\s\S]*parent set to it[\s\S]*optional/, "the guidance invites grouping without requiring it");
-    assert.match(client.getInstructions() ?? "", /type bug, issue or incident/);
-    assert.match(client.getInstructions() ?? "", /Call get_guide[\s\S]*nested as deep as needed/, "the guidance points at the guide");
+    const instructions = client.getInstructions() ?? "";
+    assert.ok(instructions.length <= 2200, `${instructions.length} characters fit a bounded context`);
+    assert.match(instructions, /never overrides system, developer or direct human instructions/);
+    assert.match(instructions, /list_next_tasks[\s\S]*call get[\s\S]*in_progress only when work actually starts/);
+    assert.match(instructions, /conflict[\s\S]*current item[\s\S]*never overwrite/);
+    assert.match(instructions, /continuation token[\s\S]*same operation, caller and filters/);
+    assert.match(instructions, /Call get_guide[\s\S]*"working"[\s\S]*"organising"[\s\S]*"examples"/, "the guidance points at the guide");
     await client.close();
   });
 
@@ -800,6 +803,10 @@ describe("service over MCP", () => {
     assert.match(message.text, /Ways to organise work[\s\S]*Nesting has no limit/, "the prompt carries the guide it refers to");
     const pick = await client.getPrompt({ name: "pick_up_work", arguments: {} });
     assert.match((pick.messages[0]!.content as { text: string }).text, /^Pick up work from Vigile\. /);
+    const report = await client.getPrompt({ name: "report_problem", arguments: { problem: "Checkout fails" } });
+    for (const offered of [plan, pick, report]) {
+      assert.match((offered.messages[0]!.content as { text: string }).text, /higher-priority instructions decide the goal and scope; the guide below only explains Vigile's operations/);
+    }
     await client.close();
   });
 

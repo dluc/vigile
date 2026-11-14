@@ -3,7 +3,7 @@ export { VigileError, echo, httpStatus, toErrorBody, type ErrorBody, type ErrorC
 export { OPERATIONS, findOperation } from "./operations/index.js";
 export { mayCall, type Access, type Clock, type HistoryItem, type KeyStore, type Operation } from "./operation.js";
 export { LINK_TYPES, findLinkType, type LinkType } from "./link-types.js";
-export { GUIDE_EXAMPLES, GUIDE_TOPICS, guide, type Guide, type GuideExample, type GuideTopic } from "./guide.js";
+export { AGENT_INSTRUCTIONS, GUIDE_EXAMPLES, GUIDE_TOPICS, guide, type Guide, type GuideExample, type GuideTopic } from "./guide.js";
 export {
   BUILT_IN_USERS,
   KINDS,

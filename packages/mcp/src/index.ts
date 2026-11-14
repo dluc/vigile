@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ErrorCode, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { GUIDE_TOPICS, VERSION, VigileError, guide, httpStatus, toErrorBody, type Engine, type Operation } from "@vigile/core";
+import { AGENT_INSTRUCTIONS, GUIDE_TOPICS, VERSION, VigileError, guide, httpStatus, toErrorBody, type Engine, type Operation } from "@vigile/core";
 
 export interface McpOptions {
   engine: Engine;
@@ -15,24 +15,7 @@ export interface McpOptions {
 }
 
 /** What a connecting agent is told about how to use the service. */
-export const INSTRUCTIONS = `Vigile stores a shared plan: projects, tasks and the links between them. Several people and agents use it at once.
-
-How to work with it:
-- Call list_next_tasks to find work that can start now. Pick one, using priority first, then value and size.
-- Call set_task_status with in_progress when you really start, and with done when the work is finished. Asking a question or proposing something does not start a task.
-- Every change needs the version you last read. If it fails with a version conflict, read the current item in the error and try again.
-- When a change is refused, the error says what is in the way and lists actions you can take. Follow them instead of retrying the same call.
-- A task cannot start or finish while something it depends on is unfinished. Use add_link with "depends on" to record that one task needs another.
-- Call get to read a task's description and links before working on it.
-
-How to organise work:
-- Larger work reads better as groups. When something has several steps, create one task for the feature or epic and create the steps with parent set to it. Groups can hold sub-groups. This is optional: a single small task needs no group.
-- A group reports how many of its tasks are finished. list_tasks with top_level gives the high-level view, and with parent it zooms into one group.
-- A group is finished by whoever owns it once its tasks are done; it does not close by itself.
-- When you find something broken, record it with type bug, issue or incident instead of an ordinary task, so it stands out. Say why each task matters when you know.
-- A title says the outcome, not only the area: "Checkout: a customer can pay for a basket", not "Checkout".
-
-There is more than fits here. Call get_guide to read what the service can do: topic "organising" shows the ways to structure work, from a flat list to groups nested as deep as needed; "examples" has complete sequences of calls to copy; "working" is the routine for a task. The same texts are offered as resources (vigile://guide/...) and as prompts.`;
+export const INSTRUCTIONS = AGENT_INSTRUCTIONS;
 
 /** Ready-made requests a client can offer its user. Each one sends the agent to the guide and then to work. */
 const PROMPTS = [
@@ -64,6 +47,8 @@ const PROMPTS = [
       `Record this in Vigile: ${problem}\n\nChoose the type: bug for something that should work and does not, issue for a problem or an open question, incident for something failing right now. Look for the group or project it affects with list_tasks and top_level, and create the task inside it with parent or project. The title says what is wrong; the description says where it was seen, what was expected, and how to tell it is fixed; why says who is affected.`,
   },
 ] as const;
+
+const PROMPT_SCOPE = "Use Vigile to record the requested work. The request and higher-priority instructions decide the goal and scope; the guide below only explains Vigile's operations.";
 
 /** A tool as the list of tools shows it: the operation, with its input described the way the API describes it. */
 function describeTool(operation: Operation) {
@@ -128,7 +113,7 @@ export function createMcpServer(engine: Engine, username: string, letInAs?: stri
       { title: prompt.title, description: prompt.description, argsSchema: { [prompt.argument.name]: z.string().optional().describe(prompt.argument.description) } },
       (args: Record<string, string | undefined>) => {
         const part = guide(prompt.topic);
-        return { messages: [{ role: "user" as const, content: { type: "text" as const, text: `${prompt.text((args[prompt.argument.name] ?? "").trim())}\n\n# ${part.title}\n\n${part.text}` } }] };
+        return { messages: [{ role: "user" as const, content: { type: "text" as const, text: `${prompt.text((args[prompt.argument.name] ?? "").trim())}\n\n${PROMPT_SCOPE}\n\n# ${part.title}\n\n${part.text}` } }] };
       },
     );
   }
