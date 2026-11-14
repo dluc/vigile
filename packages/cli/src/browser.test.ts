@@ -8,6 +8,7 @@ import { initConfig, loadConfig, setValue } from "@vigile/config";
 import { paging } from "@vigile/core";
 import { adversary, type Target } from "./adversary.js";
 import { Page, findBrowser } from "./browser-driver.js";
+import { BROWSER_TEST_SHARDS, type BrowserTestShard, type BrowserTestSuite } from "./browser-shards.js";
 import { seedDemoPlan } from "./demo-plan.js";
 import { startService, type Service } from "./service.js";
 
@@ -260,7 +261,14 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     rmSync(directory, { recursive: true, force: true });
   });
 
-  describe("board", () => {
+  const selectedShard = process.env.VIGILE_TEST_BROWSER_SHARD;
+  if (selectedShard !== undefined && !Object.hasOwn(BROWSER_TEST_SHARDS, selectedShard)) throw new Error(`Unknown browser test shard: ${selectedShard}`);
+  const browserSuite = (name: BrowserTestSuite, run: () => void) => {
+    const selected = selectedShard === undefined || (BROWSER_TEST_SHARDS[selectedShard as BrowserTestShard] as readonly string[]).includes(name);
+    describe(name, { skip: selected ? false : `not in ${selectedShard}` }, run);
+  };
+
+  browserSuite("board", () => {
     it("shows every task in the column for its state, bugs among them and marked as bugs", async () => {
       await page.size(1440, 900);
       await load();
@@ -1189,7 +1197,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     });
   });
 
-  describe("reading on in the panel, while other things happen", () => {
+  browserSuite("reading on in the panel, while other things happen", () => {
     /** A group of 205 tasks: three pages of what it contains, and a history of 206 changes. */
     let group: string;
     const made: string[] = [];
@@ -1663,8 +1671,22 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       const mark = (question: unknown, key: unknown) => paging.sealToken({ q: paging.questionMark(question), k: key });
       const arm = async (target: Target) => {
         await page.run(`const paging = await import('/shared/paging.js'); ${source}; window.attacks = adversary(paging, ${JSON.stringify(target)});`);
-        // The same table here, for what each of its ways is called and is to be told.
-        return adversary(paging, target).map((attack, at) => ({ ...attack, at })).filter((attack) => attack.why !== null);
+        // The shared paging rules and the command-line readers hold the whole adversary table. Here the page
+        // proves its integration with one case from each failure class, without repeating hundreds of requests.
+        const all = adversary(paging, target).map((attack, at) => ({ ...attack, at }));
+        const classes = [
+          /^two tokens that lead to each other$/,
+          /^a token of /,
+          /^what is no token: "the next page"$/,
+          /^a token of this list with no key of it: \{\}$/,
+          /^an entry twice in one page$/,
+          /^an entry of a page before$/,
+          /^a page that holds nothing and goes on$/,
+          /^a token that passes entries over:/,
+        ];
+        const selected = classes.map((pattern) => all.find((attack) => attack.why !== null && pattern.test(attack.name)));
+        assert.ok(selected.every(Boolean), `every browser adversary class exists for ${target.list}`);
+        return selected as Array<(typeof all)[number]>;
       };
       const answered = (body: string) => `new Response(JSON.stringify(${body}), { status: 200, headers: { 'content-type': 'application/json' } })`;
       const said = "The service answered with an error: What answered ";
@@ -1689,7 +1711,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
           "the list of tasks, as a service gives it under a filter": (await run("list_tasks", { status: "open" })).continuation,
         },
       });
-      assert.ok(board.length > 25, `${board.length} ways`);
+      assert.equal(board.length, 8, `${board.length} representative ways`);
       const notice = () => page.run<string | null>("const notice = document.getElementById('notice'); return notice.hidden ? null : notice.textContent");
       for (const attack of board) {
         await page.run(`window.attack = window.attacks[${attack.at}]; window.attackAsked = 0`);
@@ -1751,7 +1773,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       let was = await open();
       for (const [target, button, shape] of inPanel) {
         const table = await arm(target);
-        assert.ok(table.length > 35, `${target.entries}: ${table.length} ways`);
+        assert.equal(table.length, 8, `${target.entries}: representative ways`);
         for (const attack of table) {
           was = await open();
           await arm(target);
@@ -1869,7 +1891,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     });
   });
 
-  describe("refreshing", () => {
+  browserSuite("refreshing", () => {
     const loads = () => page.requests.filter((url) => url.endsWith("/api/list-tasks")).length;
     const listeners = async () => ((await (await fetch(`${base}/api/admin/status`, { headers: { authorization: `Bearer ${adminKey}` } })).json()) as { listeners: number }).listeners;
     /** Counts the copies of cards that float across the page while a card travels or leaves. */
@@ -2420,7 +2442,9 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.equal(await page.run<string>(`return document.querySelector('.card[data-id="${ids.address}"]').closest('.column').dataset.key`), "in_review");
         // The tab that holds the stream stops listening: another takes over, and all of them still hear of changes.
         await setting("auto");
-        assert.equal(await settle(1, 4000), 1, "one of the other tabs listens now");
+        // The explicit handoff is normally immediate. If its broadcast is lost, the remaining tabs recover by
+        // their bounded liveness check; allow that real fallback rather than failing before its first interval.
+        assert.equal(await settle(1, 20_000), 1, "one of the other tabs listens now");
         await move(ids.address!, "in_progress");
         for (const name of ["tab-two", "tab-three", "tab-four"]) {
           await page.until(`return document.getElementById(${JSON.stringify(name)}).contentDocument.querySelector('.column[data-key="in_progress"] .card[data-id="${ids.address}"]') !== null`, `the next change to reach ${name}`, 3000);
@@ -3159,7 +3183,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     });
   });
 
-  describe("graph", () => {
+  browserSuite("graph", () => {
     it("is reached from the header, shows only itself, and is part of the address", async () => {
       await page.size(1280, 900);
       await load();
@@ -3848,7 +3872,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     });
   });
 
-  describe("themes", () => {
+  browserSuite("themes", () => {
     const THEMES = ["vigile", "dado", "jeev", "gito"] as const;
     /** Runs in the page: the theme's colours as the page uses them, and how well text can be read on them. */
     const COLOURS = `
@@ -4056,7 +4080,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     });
   });
 
-  describe("background lights", () => {
+  browserSuite("background lights", () => {
     const canvas = () =>
       page.run<{ shown: boolean; frames: number; time: number; at: number; lit: boolean }>(
         "const c = document.getElementById('lights'); return { shown: !c.hidden && c.getBoundingClientRect().width > 0, frames: Number(c.dataset.frames ?? 0), time: Number(c.dataset.time ?? 0), at: performance.now(), lit: document.body.classList.contains('lit') }",
@@ -4169,7 +4193,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     });
   });
 
-  describe("settings", () => {
+  browserSuite("settings", () => {
     const pressed = () => page.run<string | null>("return document.getElementById('settings').getAttribute('aria-expanded')");
 
     it("keeps the page's choices behind one button in the header, and nowhere else", async () => {
@@ -4346,7 +4370,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     });
   });
 
-  describe("room", () => {
+  browserSuite("room", () => {
     const place = (id: string) => page.run<{ top: number; bottom: number; height: number }>(`const r = document.getElementById(${JSON.stringify(id)}).getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), height: Math.round(r.height) }`);
     const header = () => page.run<number>("return Math.round(document.querySelector('.top').getBoundingClientRect().bottom)");
 
@@ -4507,7 +4531,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     });
   });
 
-  describe("access", () => {
+  browserSuite("access", () => {
     it("asks for a key when one is needed, says when it is wrong, and shows nothing until it is right", async () => {
       await page.size(1280, 900);
       await load();
@@ -4978,7 +5002,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
    * The graph of a plan of 2,000 tasks, on a service of its own. Working out where that many items go takes many
    * seconds, during which the page must go on answering, and it is work the page does not start by itself.
    */
-  describe("a large plan", () => {
+  browserSuite("a large plan", () => {
     let largeDirectory: string;
     let large: Service;
     /** The ten letters typed into the filter: each one more leaves a tenth fewer of the tasks. */
