@@ -103,5 +103,5 @@ export async function runOperation(operation: Operation, args: Args, ui: Ui): Pr
   // In words, something is said only of the answer that this operation gives to this call: one that is another
   // operation's, or about another item, says nothing of what was asked.
   const answer = accepted(client.base, operation.name, input, result, "Look at what the command was about: vigile get <id>, or vigile list-tasks, vigile list-projects, vigile list-users.");
-  showing(ui, client.base, asked, (page) => renderResult(page, operation.name, answer, client.base));
+  showing(ui, client.base, asked, (page) => renderResult(page, operation.name, answer, client.base, input));
 }

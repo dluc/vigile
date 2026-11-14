@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { UnconfirmedWrite, generateKey, keyOf, loadConfig, readRaw, setKey } from "@vigile/config";
-import { areTexts, isRecord, keyRefused, notAsVigile, showing, usersOf } from "../answers.js";
+import { allUsers, areTexts, isRecord, keyRefused, notAsVigile, showing } from "../answers.js";
 import { configPath, flag, type Args } from "../args.js";
 import { ANSWER_WITHIN_MS, NoAnswerError } from "../client.js";
 import { accepted } from "../expected.js";
@@ -105,7 +105,7 @@ export async function user(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_MS
     case "list": {
       given(builtin("user list"), args);
       const client = await service();
-      const users = usersOf(client.base, await client.call("list_users"));
+      const users = await allUsers(client);
       const { auth } = loadConfig(path).config;
       // A key in the config lets its user in only if it was issued for that user: the service says which keys
       // it refuses on that ground.

@@ -1,4 +1,25 @@
-import { GUIDE_TOPICS, KINDS, PROJECT_STATUSES, TASK_STATUSES, TASK_TYPES, USER_TYPES, findLinkType, findOperation, isIdOfKind, isMoment, isStoredNumber, isUsername, isVersion, isWho, normalizeId, splitRef, toHyphens, type Kind } from "@vigile/core";
+import {
+  GUIDE_TOPICS,
+  KINDS,
+  PROJECT_STATUSES,
+  TASK_STATUSES,
+  TASK_TYPES,
+  USER_TYPES,
+  findLinkType,
+  findOperation,
+  isIdOfKind,
+  isMoment,
+  isStoredNumber,
+  isToken,
+  isUsername,
+  isVersion,
+  isWho,
+  paging,
+  normalizeId,
+  splitRef,
+  toHyphens,
+  type Kind,
+} from "@vigile/core";
 import { isRecord, notAsOperation, unknownOutcome } from "./answers.js";
 
 /**
@@ -162,8 +183,23 @@ const LINKS: Sort = {
 // An entry of the history is not an item, and the engine has no rule for what one may be but that it is kept
 // as it was written: when, by whom and what are text, and what it says of the change is an object in a shape of
 // its own for each kind of change. It is shown as far as it is known, and nothing is done on the strength of it.
-const READ = { links: LINKS, created_at: MOMENT, created_by: WHO, updated_at: MOMENT, history: optional(each({ at: WORDS, by: WORDS, action: WORDS, data: OBJECT }, "a history")) };
-const timelineOf = (statuses: readonly string[]): Sort => each({ status: oneOf(statuses, ""), at: MOMENT, by: WHO }, "a timeline");
+/** How many entries a list has, or a revision of the plan: a whole number that can be counted to, and is printed as one. */
+const COUNT: Sort = { is: (value) => Number.isSafeInteger(value) && (value as number) >= 0, called: "a whole number from 0 up" };
+// Its place among the item's changes is the revision that wrote it and its number in that revision: what the
+// token after a page of history names.
+const HISTORY = each({ at: WORDS, by: WORDS, action: WORDS, data: OBJECT, place: { is: (value) => Array.isArray(value) && value.length === 2 && value.every((part) => COUNT.is(part)), called: "a place" } }, "a history");
+/**
+ * A continuation token, by the engine's own rule for what it makes: letters, digits, "-" and "_", beginning
+ * with a letter. It is printed into the command that reads on and sent on as it came, and is held to being
+ * what can be: nothing in it ends an option or means something to a shell.
+ */
+const TOKEN: Sort = { is: isToken, called: "a continuation token" };
+/** Since which revision of the plan nothing that the answer shows has changed: what pages of one item are held against each other by. */
+const UNCHANGED_SINCE = COUNT;
+// What says that lists go on, `more`, is held against the lists of the answer it comes with: see `goesOn`.
+const READ = { links: LINKS, created_at: MOMENT, created_by: WHO, updated_at: MOMENT, unchanged_since: UNCHANGED_SINCE, history: optional(HISTORY) };
+/** Each entry of a timeline says its place, counted from the item's first status: what the token after a page of it names. */
+const timelineOf = (statuses: readonly string[]): Sort => each({ status: oneOf(statuses, ""), at: MOMENT, by: WHO, place: COUNT }, "a timeline");
 const DETAIL: Record<Kind, Record<string, Sort>> = {
   task: { ...READ, description: WORDS, why: orNothing(WORDS), timeline: timelineOf(TASK_STATUSES) },
   project: { ...READ, description: WORDS, timeline: timelineOf(PROJECT_STATUSES) },
@@ -202,13 +238,168 @@ const theItem =
     return summary(answer, among, (kind) => more(input, kind)) ?? (names(input.id, among, answer as Record<string, unknown>) ? null : `it is about ${about(answer)}, and not about ${String(input.id)}`);
   };
 
+/** Where a list that is read on by itself stands in an answer of `get`: a list of links under its name, the timeline, the history. */
+type At = paging.At;
+/** The lists of a task's summary, which `get` cuts and counts, and which are read on as lists of links. */
+const COUNTED = ["contained_in", "depends_on", "assigned_to", "waiting_for"] as const;
+
+/**
+ * What an answer of `get` says of its lists that go on, `more`, held against those lists. The service names a
+ * list there when it returned a part of it, and only then:
+ * - a list that can be read on, the links under one name, the timeline, the history: how many entries it has,
+ *   which is more than the answer shows of it, and the token that reads on. The token is one, and it is the
+ *   token of that list of that item: it is what the command line prints for whoever reads on.
+ * - in an item in full, a list of a task's summary: how many it has, more than are shown, and no token.
+ * - in a page that continues a list (`page`), that list and no other; nothing when the page is the last.
+ * A `more` that names no list is not sent, and neither is one about a list the answer does not carry.
+ */
+function goesOn(answer: Record<string, unknown>, kind: Kind, what: string, page?: At): string | null {
+  if (!Object.hasOwn(answer, "more")) return null;
+  const more = answer.more;
+  if (!isRecord(more)) return `"more" of ${what} is not which lists go on`;
+  const item = { kind, id: String(answer.id) };
+  let named = 0;
+  /** More than what is shown, and what is shown is something. */
+  const counted = (field: string, part: unknown, shown: unknown): string | null => {
+    named++;
+    if (!Array.isArray(shown)) return `"more.${field}" of ${what} is about a list the answer does not carry`;
+    if (!isRecord(part) || !COUNT.is(part.total) || (part.total as number) <= shown.length || shown.length === 0) {
+      return `"more.${field}" of ${what} does not say how many entries the list has in all, more than the ${shown.length} that are shown`;
+    }
+    return null;
+  };
+  const readOn = (field: string, part: unknown, shown: unknown, at: At): string | null => {
+    if (page && (page[0] !== at[0] || page[1] !== at[1])) return `"more.${field}" of ${what} is about another list than the page holds`;
+    const why = counted(field, part, shown);
+    if (why) return why;
+    // The token is one of that list of that item, and names a place that list can have: the one check of a
+    // token, which is the service's own.
+    return paging.isTokenOf(paging.describeItemList(item, at), (part as Record<string, unknown>).continuation) ? null : `"more.${field}.continuation" of ${what} is not the token that reads on in that list`;
+  };
+  for (const field of COUNTED) {
+    if (!Object.hasOwn(more, field)) continue;
+    if (page) return `"more.${field}" of ${what} is about another list than the page holds`;
+    const part = more[field];
+    const why = counted(field, part, answer[field]) ?? (Object.hasOwn(part as object, "continuation") ? `"more.${field}" of ${what} carries a token, and the list is not read on by itself` : null);
+    if (why) return why;
+  }
+  for (const field of ["timeline", "history"] as const) {
+    if (!Object.hasOwn(more, field)) continue;
+    const why = readOn(field, more[field], answer[field], [field]);
+    if (why) return why;
+  }
+  if (Object.hasOwn(more, "links")) {
+    const links = isRecord(answer.links) ? answer.links : {};
+    if (!isRecord(more.links) || Object.keys(more.links).length === 0) return `"more.links" of ${what} is not which lists of links go on, by what they say`;
+    for (const [name, part] of Object.entries(more.links)) {
+      if (findLinkType(name) === null) return `"more.links" of ${what} is not which lists of links go on, by what they say`;
+      const why = readOn(`links.${name}`, part, Object.hasOwn(links, name) ? links[name] : undefined, ["links", name]);
+      if (why) return why;
+    }
+  }
+  return named ? null : `"more" of ${what} names no list that goes on`;
+}
+
+/**
+ * Whether a page of a list is one as the service gives it, by the steps that hold for whoever reads a list
+ * (`takePage` in core's `paging.ts`): every entry has a place in the list, none is there twice, each is after
+ * the place the page was asked from (`sent`, the token of the call), and what the page goes on with is a token
+ * of this list that names the place of its furthest entry, neither one before it nor one beyond. It holds
+ * for a page that ends the list as for one that goes on. What the command line prints as the way to read on
+ * has passed this.
+ */
+function inPlace(list: paging.ListDescriptor, entries: unknown, continuation: unknown, sent: unknown, where: string): string | null {
+  try {
+    // A page that was asked for with a token is not the first: where it was asked from is the place that token names.
+    paging.takePage(list, sent !== undefined && paging.isTokenOf(list, sent) ? paging.askedWith(list, sent) : paging.begun(), entries, continuation);
+    return null;
+  } catch (error) {
+    if (error instanceof paging.NotAList) return `${where} is not a page of that list: ${error.why}`;
+    throw error;
+  }
+}
+
+/** What a list of an item goes on with, as the answer says it in `more`: the token of that list, or that the list ends. */
+function onwards(answer: Record<string, unknown>, at: At): unknown {
+  const more = isRecord(answer.more) ? answer.more : {};
+  const part = at[0] === "links" ? (isRecord(more.links) && Object.hasOwn(more.links, at[1]) ? more.links[at[1]] : undefined) : Object.hasOwn(more, at[0]) ? more[at[0]] : undefined;
+  return isRecord(part) ? part.continuation : paging.ENDS;
+}
+
+/** Every list of an answer of `get`, or the one list of a page, held to being a page of that list: see `inPlace`. */
+function listsInPlace(answer: Record<string, unknown>, kind: Kind, what: string, page?: At, sent?: unknown): string | null {
+  const item = { kind, id: String(answer.id) };
+  const links = isRecord(answer.links) ? answer.links : {};
+  const all: At[] = page ? [page] : [...Object.keys(links).map((name): At => ["links", name]), ...(["timeline", "history"] as const).filter((list) => Object.hasOwn(answer, list)).map((list): At => [list])];
+  for (const at of all) {
+    const entries = at[0] === "links" ? links[at[1]] : answer[at[0]];
+    const why = inPlace(paging.describeItemList(item, at), entries, onwards(answer, at), sent, `"${at.join(".")}" of ${what}`);
+    if (why) return why;
+  }
+  return null;
+}
+
+/** An item in full, as `get` answers a call without a continuation: the item the call names, what it says of its lists that go on, and each list a first page of itself. */
+const inFull: Judge = (answer, input) => {
+  const why = theItem(KINDS, (_input, kind) => DETAIL[kind])(answer, input);
+  if (why) return why;
+  const { kind } = answer as { kind: Kind };
+  return goesOn(answer as Record<string, unknown>, kind, `the ${kind}`) ?? listsInPlace(answer as Record<string, unknown>, kind, `the ${kind}`);
+};
+
+/**
+ * The next page of one of an item's lists, which `get` answers to a call with a continuation: the item's kind,
+ * ID and version, since when it is unchanged, and that one list, with what says that it goes on. It is no whole
+ * item, and is not held to being one. It is about the item the call names, and its list is the one the token of
+ * the call continues: of that item, its timeline, its history, or its links under one name, which a page of
+ * links says also when it holds nothing. Which list a token is for is read from the token by the engine's own
+ * rule, as the service reads it. A user that was named by its username comes back as its ID, and a page
+ * carries no username: the token says which user's list it continues.
+ */
+const aPage: Judge = (answer, input) => {
+  const among = kindsOf(input);
+  const kind = isRecord(answer) ? answer.kind : undefined;
+  if (!isRecord(answer) || !isKind(kind) || !among.includes(kind)) return `it is not a page of a ${among.join(" or a ")}`;
+  const what = `a page of the ${kind}`;
+  // A user has no timeline: its lists are its links and its history.
+  const lists: Record<string, Sort> = { links: LINKS, ...(kind === "user" ? {} : { timeline: DETAIL[kind].timeline! }), history: HISTORY };
+  const there = Object.keys(lists).filter((list) => Object.hasOwn(answer, list)) as Array<"links" | "timeline" | "history">;
+  const list = there[0];
+  if (there.length !== 1 || !list) return `it is not one list of the ${kind}: a page carries its links, its timeline or its history, and one of them`;
+  const why = carries(answer, what, { id: idOf(kind), version: VERSION_OF_ITEM, unchanged_since: UNCHANGED_SINCE, [list]: lists[list]! });
+  if (why) return why;
+  const names = list === "links" ? Object.keys(answer.links as object) : [];
+  if (list === "links" && names.length !== 1) return `"links" of ${what} is not one list of links, under the name it reads by`;
+  const at: At = list === "links" ? ["links", names[0]!] : [list];
+  if (typeof input.id !== "string") return `it is about ${about(answer)}, and the call names no item`;
+  const { kind: stated, rest } = splitRef(input.id);
+  const named = (!stated || stated === kind) && (normalizeId(kind, rest) === answer.id || (kind === "user" && normalizeId("user", rest) === null));
+  if (!named) return `it is about ${about(answer)}, and not about ${input.id}`;
+  if (!paging.isTokenOf(paging.describeItemList({ kind, id: answer.id as string }, at), input.continuation)) return `it is a page of ${at.join(" ")} of ${about(answer)}, and not of the list the continuation of the call reads on in`;
+  return goesOn(answer, kind, what, at) ?? listsInPlace(answer, kind, what, at, input.continuation);
+};
+
 const about = (answer: unknown): string => (isRecord(answer) && typeof answer.kind === "string" && typeof answer.id === "string" ? `the ${answer.kind} ${answer.id}` : "something else");
 
-/** A list of items, with what else the list says: where the next page begins when there is one. */
+/**
+ * A list of items, with what else the list says. A list that is returned a page at a time, by the operation
+ * that is named, says where the next page begins when there is one: a token, after a page that holds
+ * something, and the token of this very list, which is the operation with the filters of the call. It is
+ * printed for whoever reads on with the same command, and a token of another list would only be refused there.
+ */
 const listed =
-  (field: string, spec: Record<string, Sort>, what: string, more: Record<string, Sort> = { continuation: optional(TEXT) }): Judge =>
-  (answer) =>
-    carries(answer, "a list", { [field]: each(spec, `a list of ${what}`), ...more });
+  (paged: string | null, field: string, spec: Record<string, Sort>, what: string, also: Record<string, Sort> = {}): Judge =>
+  (answer, input) => {
+    const why = carries(answer, "a list", { [field]: each(spec, `a list of ${what}`), ...(paged ? { continuation: optional(TOKEN) } : {}), ...also });
+    if (why || !paged || !paging.isPaged(paged)) return why;
+    const page = answer as Record<string, unknown>;
+    // The list as it was asked for. Whose list it is, where it is a user's own, is not known here.
+    const list = paging.describeList(paged, input);
+    const goesOn = Object.hasOwn(page, "continuation");
+    if (goesOn && (page[field] as unknown[]).length === 0) return `"continuation" of a list says that there is more, after a page that holds nothing`;
+    if (goesOn && !paging.isTokenOf(list, page.continuation)) return `"continuation" of a list is not a token of the list that was asked for`;
+    return inPlace(list, page[field], goesOn ? page.continuation : paging.ENDS, input.continuation, `"${field}" of a list`);
+  };
 
 /**
  * A key that was issued: the key, and the user it is for. Where the call names a user that exists, it is that
@@ -280,23 +471,24 @@ export const EXPECTED: Record<string, Judge> = {
   set_project_status: theItem(["project"]),
   // A list is of whatever the service found for what was asked: which items those are is the service's to say,
   // and the command line, which does not have the plan, holds a list to nothing but that each item is one.
-  list_projects: listed("projects", PROJECT, "projects"),
+  list_projects: listed("list_projects", "projects", PROJECT, "projects"),
   create_task: (answer) => summary(answer, ["task"]),
   update_task: theItem(["task"]),
   set_task_status: theItem(["task"]),
-  list_tasks: listed("tasks", TASK, "tasks"),
+  list_tasks: listed("list_tasks", "tasks", TASK, "tasks"),
   // Each of them can be started: that is what the list says of them.
-  list_next_tasks: listed("tasks", { ...TASK, is_next: exactly(true) }, "tasks that can be started"),
-  get: theItem(KINDS, (_input, kind) => DETAIL[kind]),
+  list_next_tasks: listed("list_next_tasks", "tasks", { ...TASK, is_next: exactly(true) }, "tasks that can be started"),
+  // The item in full, or, to a call with a continuation, the next page of one of its lists.
+  get: (answer, input) => (input.continuation === undefined ? inFull(answer, input) : aPage(answer, input)),
   delete: deleted,
   restore: theItem(KINDS),
   override_timestamp: theItem(["project", "task"]),
   add_link: linked({ created: YES_NO }),
   remove_link: linked({ removed: exactly(true) }),
-  list_link_types: listed("link_types", { type: TEXT, reverse: TEXT, from: listOf(KIND, "a list of kinds"), to: listOf(KIND, "a list of kinds"), built_in: YES_NO, effect: TEXT }, "link types", {}),
+  list_link_types: listed(null, "link_types", { type: TEXT, reverse: TEXT, from: listOf(KIND, "a list of kinds"), to: listOf(KIND, "a list of kinds"), built_in: YES_NO, effect: TEXT }, "link types"),
   create_user: issued(),
   // Who asked is said with the list.
-  list_users: listed("users", USER, "users", { you: NAME_OF_USER }),
+  list_users: listed("list_users", "users", USER, "users", { you: NAME_OF_USER }),
   reset_user_key: issued((input) => input.user),
   // The part of the guide that was asked for is the part that is read.
   get_guide: (answer, input) =>

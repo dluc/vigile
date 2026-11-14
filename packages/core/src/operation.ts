@@ -32,7 +32,24 @@ export interface HistoryItem {
   data: Record<string, unknown>;
 }
 
+/** Where a history entry stands among those of its item: the revision that wrote it, and its place in that revision. */
+export type HistoryPlace = readonly [revision: number, seq: number];
+
+export interface HistoryPage {
+  /** Oldest first, each with its place among the item's changes: what the token after a page names. */
+  items: Array<HistoryItem & { place: HistoryPlace }>;
+  /** How many changes to the item are recorded in all. */
+  total: number;
+  /** Where this page starts, when there are changes before it: the page before ends there. */
+  earlier?: HistoryPlace;
+}
+
 export interface ReadContext {
+  /**
+   * The plan as the engine has it at the moment this is asked. A read that waits for the store asks again after
+   * waiting, or holds on to one graph and checks afterwards that it is still this one: the engine puts another
+   * graph in its place when it reads the plan anew.
+   */
   readonly graph: GraphView;
   readonly caller: UserNode;
   /** The time of this call, as an ISO timestamp. */
@@ -40,6 +57,29 @@ export interface ReadContext {
   readText(ref: Ref): Promise<string | null>;
   /** Every recorded change to an item, oldest first. */
   readHistory(ref: Ref): Promise<HistoryItem[]>;
+  /** The revision the plan in memory is at, at the moment this is asked. Every change and every new reading of the plan from the store moves it or the graph. */
+  readonly revision: number;
+  /**
+   * The revision of the plan since which nothing that `get` shows of an item has changed: see `Unchanged` for
+   * what that is and how it is kept. Two answers about an item that say the same revision here show nothing
+   * that differs. Known without looking at the item's lists.
+   */
+  unchangedSince(ref: Ref): number;
+  /** The latest recorded changes to an item, or the latest before a given one: at most a page of them, without reading the rest. */
+  readHistoryPage(ref: Ref, before?: HistoryPlace): Promise<HistoryPage>;
+  /**
+   * Whether the store is at the revision of the plan in memory. Asked after reading text or history beside the
+   * plan: the revision only goes up, so a store that is still where the plan in memory is was there during the
+   * reads, and what they found is of that plan. Otherwise someone has stored a change that is not in memory:
+   * another engine on the same store, or this one, between storing a change and taking it into memory.
+   */
+  storeInStep(): Promise<boolean>;
+  /**
+   * Runs a reading in its turn among the changes, on the plan as the store has it: the engine first reads the
+   * plan anew if the store has moved past it, and while the reading runs this engine stores no change and does
+   * not read the plan anew, and its changes wait. For a reading that was overtaken when it held nothing up.
+   */
+  inTurn<T>(read: () => Promise<T>): Promise<T>;
 }
 
 export type Mutation =

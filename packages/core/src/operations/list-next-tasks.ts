@@ -1,13 +1,19 @@
 import { z } from "zod";
 import { containedTasks, taskCalc, type Known } from "../calc.js";
-import { compareTaskIds } from "../ids.js";
 import { defineRead } from "../operation.js";
 import { resolveRef } from "../rules.js";
 import { taskSummary } from "../views.js";
-import { continuation, isId, paginate } from "./shared.js";
+import { describeList } from "../paging.js";
+import { continuation, cursor, paginate, type Cursor } from "./shared.js";
 
 /** Highest priority first, then by ID so that paging is stable. */
 type SortKey = [priority: number, id: string];
+
+/**
+ * The tokens of a list of tasks that can be started, for the filters it was asked with and for the user who
+ * asked: what is next depends on who asks, and a token does not pass from one user to another.
+ */
+export const nextTasksCursor = (input: Record<string, unknown>, who: string): Cursor<SortKey> => cursor(describeList("list_next_tasks", input, who));
 
 export const listNextTasks = defineRead({
   name: "list_next_tasks",
@@ -28,13 +34,11 @@ export const listNextTasks = defineRead({
       const calc = taskCalc(ctx.graph, task, known);
       return calc.is_next && (!calc.is_assigned || calc.assigned_to.some((u) => u.id === ctx.caller.id));
     });
-    const order = (a: SortKey, b: SortKey) => b[0] - a[0] || compareTaskIds(a[1], b[1]);
-    const key = (t: { priority: number; id: string }): SortKey => [t.priority, t.id];
-    tasks.sort((a, b) => order(key(a), key(b)));
-    const { continuation: token, ...filters } = input;
-    const isKey = (k: unknown): k is SortKey => Array.isArray(k) && k.length === 2 && typeof k[0] === "number" && Number.isFinite(k[0]) && isId(k[1]);
-    // What is next depends on who asks: a token does not pass from one user to another.
-    const page = paginate(tasks, key, order, token, { question: ["list_next_tasks", filters, ctx.caller.id], isKey });
+    // A priority is a number. One that damage left as something else is taken for none, so that the task has a place.
+    const key = (t: { priority: number; id: string }): SortKey => [typeof t.priority === "number" && Number.isFinite(t.priority) ? t.priority : 0, t.id];
+    const tokens = nextTasksCursor(input, ctx.caller.id);
+    tasks.sort((a, b) => tokens.list.compare(key(a), key(b)));
+    const page = paginate(tasks, key, input.continuation, tokens);
     return { tasks: page.items.map((t) => taskSummary(ctx.graph, t, known)), ...(page.continuation ? { continuation: page.continuation } : {}) };
   },
 });

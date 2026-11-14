@@ -5,7 +5,7 @@ import { prefixProblem, refText } from "../ids.js";
 import { ASSIGNED_TO, CONTAINS } from "../link-types.js";
 import { KINDS, type Node } from "../model.js";
 import { defineWrite, type ReadContext } from "../operation.js";
-import { describe, errorItem, requireVersion, resolveRef } from "../rules.js";
+import { describe, blockedBy, requireVersion, resolveRef } from "../rules.js";
 import { summary } from "../views.js";
 import { recordLinkChanges } from "./links.js";
 import { kind, touch, version } from "./shared.js";
@@ -16,7 +16,7 @@ function inTheWay(ctx: ReadContext, node: Node, permanent: boolean): void {
     const tasks = containedTasks(ctx.graph, node, false);
     if (tasks.length) {
       throw refused("contains_tasks", `${describe(node)} still contains ${tasks.length} task${tasks.length === 1 ? "" : "s"}.`, {
-        blocking: tasks.slice(0, 20).map(errorItem),
+        ...blockedBy(tasks),
         actions: ["Delete those tasks first, or call remove_link to move them out of the project."],
       });
     }
@@ -25,7 +25,7 @@ function inTheWay(ctx: ReadContext, node: Node, permanent: boolean): void {
     const deleted = permanent ? ctx.graph.out(node, CONTAINS).flatMap((link) => ctx.graph.get("task", link.to.id) ?? []).filter((task) => !isLive(task)) : [];
     if (deleted.length) {
       throw refused("contains_deleted_tasks", `${describe(node)} still contains ${deleted.length} deleted task${deleted.length === 1 ? "" : "s"}, which can be restored and would then be in no project.`, {
-        blocking: deleted.slice(0, 20).map(errorItem),
+        ...blockedBy(deleted),
         actions: ["Delete those tasks permanently first, or call remove_link to move them out of the project."],
       });
     }
@@ -37,7 +37,7 @@ function inTheWay(ctx: ReadContext, node: Node, permanent: boolean): void {
       .filter(isLive);
     if (tasks.length) {
       throw refused("has_assigned_tasks", `${describe(node)} still has ${tasks.length} task${tasks.length === 1 ? "" : "s"} assigned.`, {
-        blocking: tasks.slice(0, 20).map(errorItem),
+        ...blockedBy(tasks),
         actions: ['Reassign them first: call remove_link and add_link with type "assigned to".'],
       });
     }

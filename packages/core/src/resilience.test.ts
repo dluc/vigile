@@ -376,8 +376,10 @@ function fixed(snapshot: Snapshot): StorageAdapter {
     commit: async () => {
       throw new Error("read-only");
     },
+    readRevision: async () => snapshot.head.revision,
     readText: async () => null,
     readHistory: async () => [],
+    readHistoryPage: async () => ({ records: [], total: 0 }),
     close: async () => {},
   };
 }
@@ -510,6 +512,161 @@ describe("a damaged or foreign store", () => {
     const flagged = ((await engine.execute("list_tasks", "agent1", { has_problems: true })) as { tasks: Array<{ id: string }> }).tasks;
     assert.equal(flagged.length, 100, "a page of the 299 groups that are done above an open task");
     assert.equal(((await engine.execute("list_projects", "agent1", { has_problems: true })) as { projects: unknown[] }).projects.length, 1);
+  });
+
+  it("answers get, a refused loop and a refused start with the same few kilobytes whatever the size of the plan", async () => {
+    const small = await snapshotOf(async (engine) => {
+      await engine.execute("create_project", "agent1", { title: "Big", prefix: "BIG" });
+      await engine.execute("create_task", "agent1", task("First", { project: "BIG" }));
+    });
+    const template = small.objects.find((o) => o.kind === "task")!;
+    const person = small.objects.find((o) => o.kind === "user" && o.data.username === "user")!;
+    /**
+     * A plan in which everything that `get` lists grows with the number of tasks: one project that holds them
+     * all, one user who has them all, a first task that waits for every other and has changed status as often
+     * as there are tasks, and each further task waiting for the one before it. The history of every item is as
+     * long as the plan too.
+     */
+    const plan = (tasks: number): StorageAdapter => {
+      const snapshot = structuredClone(small);
+      const data = { at: "2026-01-01T00:00:00.000Z", by: "1" };
+      const id = (n: number) => `BIG-${String(n).padStart(3, "0")}`;
+      const first = snapshot.objects.find((o) => o.kind === "task")!;
+      first.data = { ...first.data, timeline: Array.from({ length: tasks }, (_, n) => ({ status: n % 2 ? "draft" : "open", at: new Date(Date.UTC(2026, 0, 1) + n * 1000).toISOString(), by: "1" })) };
+      snapshot.links.push({ fromKind: "task", fromId: id(1), type: "assigned to", toKind: "user", toId: person.id, data });
+      for (let n = 2; n <= tasks; n++) {
+        snapshot.objects.push({ ...template, id: id(n) });
+        snapshot.links.push({ fromKind: "project", fromId: "BIG", type: "contains", toKind: "task", toId: id(n), data });
+        snapshot.links.push({ fromKind: "task", fromId: id(1), type: "depends on", toKind: "task", toId: id(n), data });
+        snapshot.links.push({ fromKind: "task", fromId: id(n), type: "assigned to", toKind: "user", toId: person.id, data });
+        if (n > 2) snapshot.links.push({ fromKind: "task", fromId: id(n), type: "depends on", toKind: "task", toId: id(n - 1), data });
+      }
+      snapshot.head.counters.task = tasks;
+      return {
+        ...fixed(snapshot),
+        // One entry for each revision from 1 to the number of tasks, of which a page is the latest before a given one.
+        readHistoryPage: async (_tenant, kind, item, page) => {
+          const end = page.before ? page.before.revision - 1 : tasks;
+          const records = [];
+          for (let revision = Math.max(1, end - page.limit + 1); revision <= end; revision++) records.push({ kind, id: item, at: data.at, actor: "1", action: "updated", data: { changes: { priority: [1, 2] } }, revision, seq: 0 });
+          return { records, total: tasks };
+        },
+      };
+    };
+    /** The longest list anywhere in an answer. */
+    const longest = (value: unknown): number => {
+      if (Array.isArray(value)) return Math.max(value.length, ...value.map(longest));
+      if (value && typeof value === "object") return Math.max(0, ...Object.values(value).map(longest));
+      return 0;
+    };
+    const answers = async (tasks: number) => {
+      const engine = await Engine.open({ storage: plan(tasks) });
+      const get = (input: Record<string, unknown>) => engine.execute("get", "agent1", input) as Promise<any>;
+      const project = await get({ id: "BIG", history: true });
+      const first = await get({ id: "BIG-001", history: true });
+      const user = await get({ kind: "user", id: "user", history: true });
+      const all: Record<string, unknown> = {
+        "the project": project,
+        "the next page of what the project contains": await get({ id: "BIG", continuation: project.more.links.contains.continuation }),
+        "the task that waits for every other": first,
+        "the next page of what it depends on": await get({ id: "BIG-001", continuation: first.more.links["depends on"].continuation }),
+        "the timeline before the latest": await get({ id: "BIG-001", continuation: first.more.timeline.continuation }),
+        "the history before the latest": await get({ id: "BIG-001", continuation: first.more.history.continuation }),
+        "the user who has every task": user,
+        "the next page of what the user has": await get({ kind: "user", id: "user", continuation: user.more.links["is assigned"].continuation }),
+        "a refused loop": (await failure(engine.execute("add_link", "agent1", { from: "BIG-002", type: "depends on", to: `BIG-${tasks}` }))).toJSON(),
+        "a refused start": (await failure(engine.execute("set_task_status", "agent1", { id: "BIG-001", version: 1, status: "in_progress" }))).toJSON(),
+      };
+      // What each answer counts is the whole, of which it returns a part.
+      assert.deepEqual(
+        [project.more.links.contains.total, project.more.history.total, first.more.links["depends on"].total, first.more.depends_on.total, first.more.waiting_for.total, first.more.timeline.total, user.more.links["is assigned"].total, (all["a refused loop"] as any).blocking_total, (all["a refused start"] as any).blocking_total],
+        [tasks, tasks, tasks - 1, tasks - 1, tasks - 1, tasks, tasks, tasks - 2, tasks - 1],
+      );
+      return Object.entries(all).map(([what, answer]) => ({ what, bytes: JSON.stringify(answer).length, longest: longest(answer) }));
+    };
+    const few = await answers(400);
+    const many = await answers(4000);
+    for (const [index, answer] of many.entries()) {
+      assert.ok(answer.longest <= 100, `${answer.what}: no list in it is longer than 100, the longest has ${answer.longest}`);
+      // Ten times the plan. The answer gains the digits its counts gain, and those of the places of its hundred
+      // changes, each of which is a revision of a plan that has had ten times as many: nothing else.
+      assert.ok(answer.bytes <= few[index]!.bytes + 300, `${answer.what}: ${few[index]!.bytes} bytes for 400 tasks, ${answer.bytes} for 4,000`);
+      assert.ok(answer.bytes < 40_000, `${answer.what}: ${answer.bytes} bytes`);
+    }
+  });
+
+  it("fills the pages of a list of links from the links that lead somewhere, counts those, and goes once through a list that mostly leads nowhere", async () => {
+    const small = await snapshotOf(async (engine) => {
+      await engine.execute("create_task", "agent1", task("Waits for what is partly gone"));
+      await engine.execute("create_task", "agent1", task("Holds what is partly gone"));
+      await engine.execute("create_task", "agent1", task("First of a chain"));
+    });
+    const template = small.objects.find((o) => o.kind === "task")!;
+    const id = (n: number) => String(n).padStart(3, "0");
+    const letters = (n: number) => Array.from({ length: 5 }, (_, place) => String.fromCharCode(65 + (Math.floor(n / 26 ** place) % 26))).join("");
+    /**
+     * A plan as damage leaves it. Task 001 depends on that many projects that are not there, which stand before
+     * every task in the order of a list, and on five tasks that are. Task 002 holds 150 tasks that are there and,
+     * before them, 50 that are not. Tasks 501 to 530 each wait for the next, and five of them are not there.
+     */
+    const plan = (gone: number): Snapshot => {
+      const snapshot = structuredClone(small);
+      const data = { at: "2026-01-01T00:00:00.000Z", by: "1" };
+      const link = (fromId: string, type: string, toKind: string, toId: string) => snapshot.links.push({ fromKind: "task", fromId, type, toKind, toId, data });
+      const there = (n: number) => snapshot.objects.push({ ...template, id: id(n) });
+      for (let n = 0; n < gone; n++) link("001", "depends on", "project", `G${letters(n)}`);
+      for (let n = 11; n <= 15; n++) (there(n), link("001", "depends on", "task", id(n)));
+      for (let n = 50; n < 100; n++) link("002", "contains", "task", id(n));
+      for (let n = 100; n < 250; n++) (there(n), link("002", "contains", "task", id(n)));
+      for (let n = 501; n <= 530; n++) {
+        if (n < 504 || n > 508) there(n);
+        if (n < 530) link(id(n), "depends on", "task", id(n + 1));
+      }
+      snapshot.head.counters.task = 600;
+      return snapshot;
+    };
+    const engine = await Engine.open({ storage: fixed(plan(100)) });
+    const get = (input: Record<string, unknown>) => engine.execute("get", "agent1", input) as Promise<any>;
+    const ids = (items: Array<{ id: string }>) => items.map((item) => item.id);
+
+    // A hundred links that lead nowhere stand before the five that lead somewhere: the first page is those five,
+    // not an empty page with more behind it that nobody could ask for.
+    const waits = await get({ id: "001" });
+    assert.deepEqual([ids(waits.links["depends on"]), waits.depends_on, "more" in waits], [["011", "012", "013", "014", "015"], ["011", "012", "013", "014", "015"], false]);
+    // What a list counts is what its pages hold: 150, in two pages, and none of the 50 that are not there.
+    const holds = await get({ id: "002" });
+    assert.deepEqual([ids(holds.links.contains).slice(0, 2), holds.links.contains.length, holds.more.links.contains.total], [["100", "101"], 100, 150]);
+    const rest = await get({ id: "002", continuation: holds.more.links.contains.continuation });
+    assert.deepEqual([ids(rest.links.contains).at(0), ids(rest.links.contains).at(-1), rest.links.contains.length, "more" in rest], ["200", "249", 50, false]);
+    // A token that names a place among the links that lead nowhere goes on from there to those that lead somewhere.
+    const { q } = JSON.parse(Buffer.from(holds.more.links.contains.continuation, "base64url").toString("utf8")) as { q: string };
+    const from = await get({ id: "002", continuation: Buffer.from(JSON.stringify({ q, k: "task:060" }), "utf8").toString("base64url") });
+    assert.deepEqual([ids(from.links.contains).at(0), from.links.contains.length, from.more.links.contains.total], ["100", 100, 150]);
+    // The damage is said where damage is said: to whoever checks the plan.
+    assert.equal(engine.checkConsistency().filter((problem) => /^Link points at an item that does not exist/.test(problem)).length, 100 + 50 + 6);
+
+    // A refused loop that runs through items that are not there names and counts the items that are: 29 steps
+    // lie between the two ends of the new link, 24 of them are there, 20 are named.
+    const loop = (await failure(engine.execute("add_link", "agent1", { from: "530", type: "depends on", to: "501" }))).toJSON();
+    assert.deepEqual([loop.rule, loop.blocking!.length, loop.blocking_total, loop.blocking!.map((item) => item.id).slice(0, 4)], ["loop", 20, 24, ["501", "502", "503", "509"]]);
+
+    // However many links lead nowhere, one reading goes through the item's links once: ten times as many take
+    // about ten times as long, and the answer is the same.
+    const timed = async (gone: number) => {
+      const large = await Engine.open({ storage: fixed(plan(gone)) });
+      let best = Infinity;
+      let answer = "";
+      for (let round = 0; round < 5; round++) {
+        const began = performance.now();
+        answer = JSON.stringify(((await large.execute("get", "agent1", { id: "001" })) as any).links);
+        best = Math.min(best, performance.now() - began);
+      }
+      return { ms: best, answer };
+    };
+    const few = await timed(10_000);
+    const many = await timed(100_000);
+    assert.equal(many.answer, JSON.stringify(waits.links));
+    assert.ok(many.ms < Math.max(30 * few.ms, 250), `10,000 links to nothing took ${few.ms.toFixed(1)} ms, 100,000 took ${many.ms.toFixed(1)} ms`);
   });
 
   it("finds loops, links to nothing, unknown link types, counters that fell behind and missing built-in users", async () => {

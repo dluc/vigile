@@ -43,6 +43,22 @@ const VENDOR: Record<string, string> = {
   "cytoscape-elk.js": "cytoscape-elk/dist/cytoscape-elk.js",
 };
 
+/**
+ * The rules by which a list is read in pages: what a continuation token is, which list it belongs to, and the
+ * steps of reading one to its end. They are the engine's own modules, compiled, and are served as they are, so
+ * that the page runs the rules the service runs and has none of its own. They use nothing but the language.
+ */
+const SHARED: Record<string, string> = {
+  "paging.js": "@vigile/core/paging.js",
+  "ids.js": "@vigile/core/ids.js",
+};
+
+function sharedFile(pathname: string): string | null {
+  const name = pathname.slice("/shared/".length);
+  const target = Object.hasOwn(SHARED, name) ? SHARED[name] : undefined;
+  return target ? require.resolve(target) : null;
+}
+
 function vendorFile(pathname: string): string | null {
   const name = pathname.slice("/vendor/".length);
   const target = Object.hasOwn(VENDOR, name) ? VENDOR[name] : undefined;
@@ -61,6 +77,10 @@ export function serveWeb(response: ServerResponse, pathname: string, headOnly = 
     if (!vendor) return false;
     file = vendor;
     cache = "public, max-age=86400";
+  } else if (pathname.startsWith("/shared/")) {
+    const shared = sharedFile(pathname);
+    if (!shared) return false;
+    file = shared;
   } else {
     let decoded: string;
     try {

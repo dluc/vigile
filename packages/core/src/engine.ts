@@ -1,15 +1,16 @@
-import { CommitTooLargeError, FORMAT_VERSION, RevisionConflictError, type StorageAdapter } from "@vigile/storage";
+import { CommitTooLargeError, FORMAT_VERSION, RevisionConflictError, type HistoryRecord, type StorageAdapter } from "@vigile/storage";
 import { randomBytes } from "node:crypto";
 import { isLive, taskCalc, type Known } from "./calc.js";
-import { VigileError, forbidden, invalidInput, notFound, toErrorBody } from "./errors.js";
+import { VigileError, echo, forbidden, invalidInput, notFound, toErrorBody } from "./errors.js";
 import { Graph, type GraphView } from "./graph.js";
 import { userId } from "./ids.js";
 import { LINK_TYPES } from "./link-types.js";
-import { BUILT_IN_USERS, COUNTERS, RETIRED_PREFIX, areKeyMarks, keyMark, type Node, type Ref, type UserNode, type UserType } from "./model.js";
+import { BUILT_IN_USERS, COUNTERS, LIMITS, RETIRED_PREFIX, areKeyMarks, keyMark, type Node, type Ref, type UserNode, type UserType } from "./model.js";
 import { shapeProblem } from "./shape.js";
-import { Plan, mayCall, type Clock, type HistoryItem, type KeyStore, type Mutation, type Operation, type ReadContext } from "./operation.js";
+import { Plan, mayCall, type Clock, type HistoryItem, type HistoryPage, type HistoryPlace, type KeyStore, type Mutation, type Operation, type ReadContext } from "./operation.js";
 import { OPERATIONS, findOperation } from "./operations/index.js";
 import { displayId, recordToLink, recordToNode, storageId, storedAs, toChanges } from "./records.js";
+import { Unchanged } from "./unchanged.js";
 
 export interface OperationLog {
   operation: string;
@@ -39,6 +40,8 @@ export interface EngineStatus {
   counters: Record<string, number>;
   /** How many prefixes are used up: those of projects that were deleted for good. */
   retired_prefixes: number;
+  /** How many numbers the engine keeps for single items to say since when each is unchanged: bounded by the items and links there are. */
+  remembered: number;
   counts: Record<string, number>;
   links: number;
   loaded_at: string;
@@ -65,6 +68,14 @@ export class MemoryKeyStore implements KeyStore {
   }
 }
 
+/** The entry an item's history begins with. */
+const CREATED = "created";
+
+/** How many of the mistakes in an operation's input a refusal puts into words. */
+const MOST_ISSUES = 5;
+/** How much of one of them: enough for the values a field can take, not for the names of fields a caller made up. */
+const MOST_OF_AN_ISSUE = 300;
+
 /** The user a caller was let in as: the name, and which user had it then. */
 export interface Caller {
   username: string;
@@ -80,6 +91,8 @@ export class Engine {
   /** What the last reading of the store found under IDs the store would not write. */
   private misstored: string[] = [];
   private revision = 0;
+  /** Since when nothing that is shown of each item has changed: kept up with the plan in memory, see `Unchanged`. */
+  private unchanged = new Unchanged(this.graph, 0);
   private format = FORMAT_VERSION;
   private counters: Record<string, number> = {};
   private loadedAt = "";
@@ -172,7 +185,7 @@ export class Engine {
     let rule: string | undefined;
     let cause: unknown;
     try {
-      if (!operation) throw notFound(`There is no operation called "${name}".`);
+      if (!operation) throw notFound(`There is no operation called "${echo(name)}".`);
       return operation.kind === "read"
         ? await this.run(operation, username, letInAs, input, null, this.clock.now().toISOString())
         : await this.enqueue(() => this.write(operation, username, letInAs, input));
@@ -207,20 +220,62 @@ export class Engine {
     }
   }
 
+  /**
+   * What an operation is given to work with.
+   *
+   * The graph is handed out when it is asked for, not when the context is made: `load()` puts a new graph in
+   * the place of the old one, and a read that was waiting for the store at that moment would otherwise go on
+   * reading a plan that is no longer the engine's, beside what `unchangedSince` says of the new one. A read
+   * that waits for the store goes through `readSteady`, which holds on to one graph for a try and throws the
+   * try away when the engine has another by its end.
+   *
+   * A write needs none of that, and is given the graph of its turn (see `run`). Writes run one at a time, in
+   * the queue. The plan in memory is changed in two places only, `apply()` after a commit and `load()`, and both
+   * run inside a turn of the queue: `apply()` and the `load()` after a failed commit in the turn of the write
+   * itself, `reload()` in a turn of its own. So from the moment a write's context is made to the moment its
+   * reply is built, nothing but the write itself changes the plan, also while the write waits for the store:
+   * a node it read before waiting is the node there is after. And a write that is run again after a conflict
+   * gets a new context, made after the plan was read anew.
+   *
+   * What a write reads from the store (`update_task` the description, `override_timestamp` the history,
+   * `create_project` whether a prefix left history behind) is held against the plan in memory by the commit:
+   * the commit names the revision of the plan in memory and is refused when the store is anywhere else. The
+   * revision only goes up, so a store that is at that revision when the change is stored was at it when the
+   * write read from it, and what the write read is of the plan it checked the change against. A commit that
+   * is refused has the plan read anew and the write run again, with its reads. This covers every write that
+   * stores something. A write that ends without storing, because it changes nothing or is refused, has
+   * certified nothing: it answered from the store as it is, which is never older than the plan in memory.
+   */
   private context(caller: UserNode, now: string): ReadContext {
+    const engine = this;
     return {
-      graph: this.graph,
+      get graph() {
+        return engine.graph;
+      },
       caller,
       now,
+      storeInStep: async () => (await this.storage.readRevision(this.tenant)) === this.revision,
+      // A read takes a turn of the queue, and finds the plan in step with the store when its turn comes. A write
+      // has a turn: it is not made to wait for itself.
+      inTurn: (read) =>
+        this.enqueue(async () => {
+          if (this.stale || (await this.storage.readRevision(this.tenant)) !== this.revision) await this.load();
+          return read();
+        }),
       readText: (ref) => this.storage.readText(this.tenant, ref.kind, storageId(ref.kind, ref.id)),
+      get revision() {
+        return engine.revision;
+      },
+      unchangedSince: (ref) => this.unchanged.since(ref),
       readHistory: (ref) => this.history(ref),
+      readHistoryPage: (ref, before) => this.historyPage(ref, before),
     };
   }
 
   /** Checks who is calling and what they sent, then runs the operation. `plan` is null for reads. */
   private async run(operation: Operation, username: string, letInAs: string | undefined, input: unknown, plan: Plan | null, now: string): Promise<any> {
     const caller = this.user(username);
-    if (!caller) throw new VigileError("unauthorized", `There is no user called "${username}".`);
+    if (!caller) throw new VigileError("unauthorized", `There is no user called "${echo(username)}".`);
     if (letInAs !== undefined && caller.id !== letInAs) {
       throw new VigileError("unauthorized", `The user "${username}" this request was let in as has been deleted since, and the name belongs to someone else now.`, {
         actions: ["Send the request again with an API key of the present user."],
@@ -231,14 +286,18 @@ export class Engine {
     }
     const parsed = operation.input.safeParse(input ?? {});
     if (!parsed.success) {
-      const issues = parsed.error.issues.map((issue: { path: PropertyKey[]; message: string }) => {
-        const where = issue.path.length ? issue.path.join(".") : "input";
-        return /received undefined$/.test(issue.message) ? `${where} is required.` : `${where}: ${issue.message.replace(/\.$/, "")}.`;
+      // The first few of what is wrong, each in a few words: a mistake names fields the caller made up, and
+      // there can be as many mistakes as there are fields.
+      const all = parsed.error.issues as Array<{ path: PropertyKey[]; message: string }>;
+      const issues = all.slice(0, MOST_ISSUES).map((issue) => {
+        const where = issue.path.length ? echo(issue.path.join(".")) : "input";
+        return /received undefined$/.test(issue.message) ? `${where} is required.` : `${where}: ${echo(issue.message.replace(/\.$/, ""), MOST_OF_AN_ISSUE)}.`;
       });
+      if (all.length > MOST_ISSUES) issues.push(`And ${all.length - MOST_ISSUES} more.`);
       throw invalidInput(`The input for ${operation.name} is not valid. ${issues.join(" ")}`);
     }
     const ctx = this.context(caller, now);
-    return operation.kind === "read" ? operation.run(ctx, parsed.data) : operation.run({ ...ctx, plan: plan!, keys: this.keys }, parsed.data);
+    return operation.kind === "read" ? operation.run(ctx, parsed.data) : operation.run({ ...ctx, graph: this.graph, inTurn: (read) => read(), plan: plan!, keys: this.keys }, parsed.data);
   }
 
   private async write(operation: Operation, username: string, letInAs: string | undefined, input: unknown): Promise<unknown> {
@@ -255,7 +314,7 @@ export class Engine {
             counters: plan.counters,
             changes: toChanges(plan.mutations, now, caller.id),
           });
-          this.apply(plan.mutations);
+          this.apply(plan.mutations, head.revision);
           this.revision = head.revision;
           this.counters = head.counters;
           this.loadedAt = now;
@@ -283,22 +342,33 @@ export class Engine {
     return next;
   }
 
-  private apply(mutations: Mutation[]): void {
+  private apply(mutations: Mutation[], revision: number): void {
+    // Each change is told to what keeps since when the items are unchanged, once the graph has it: a number is
+    // kept only for an item that is in the graph, and an item that has left it takes its number along.
     for (const m of mutations) {
       switch (m.t) {
         case "put":
           this.graph.putNode(m.node);
+          this.unchanged.stored(m.node, revision);
           break;
         case "remove":
           this.graph.removeNode(m.ref);
+          this.unchanged.removed(m.ref, revision);
           break;
-        case "link":
+        case "link": {
+          const there = this.graph.findLink(m.link) !== undefined;
           this.graph.addLink(m.link);
+          this.unchanged.linked(m.link, 1, !there, revision);
           break;
-        case "unlink":
+        }
+        case "unlink": {
+          const there = this.graph.findLink(m.link) !== undefined;
           this.graph.removeLink(m.link);
+          this.unchanged.linked(m.link, -1, there, revision);
           break;
+        }
         case "history":
+          this.unchanged.noted(m.ref, revision);
           break;
       }
     }
@@ -335,6 +405,8 @@ export class Engine {
     this.misstored = [...misstored];
     const before = this.revision;
     this.graph = graph;
+    // What was known of single items is of the plan that was in memory before: every item is as it was read now.
+    this.unchanged = new Unchanged(graph, snapshot.head.revision);
     this.revision = snapshot.head.revision;
     this.format = snapshot.head.format;
     this.counters = snapshot.head.counters;
@@ -389,6 +461,7 @@ export class Engine {
       revision: this.revision,
       counters,
       retired_prefixes: names.length - Object.keys(counters).length,
+      remembered: this.unchanged.size,
       counts,
       links: this.graph.links().length,
       loaded_at: this.loadedAt,
@@ -399,11 +472,29 @@ export class Engine {
     const all = await this.storage.readHistory(this.tenant, ref.kind, storageId(ref.kind, ref.id));
     // An item's history begins where it was created. In data from before a prefix was given only once, a
     // project can have the history of an earlier project of its name stored in front of its own.
-    const records = all.slice(Math.max(0, all.findLastIndex((r) => r.action === "created")));
-    return records.map((r) => {
-      const actor = this.graph.get("user", displayId("user", r.actor));
-      return { at: r.at, by: actor?.username ?? displayId("user", r.actor), action: r.action, data: r.data };
+    const records = all.slice(Math.max(0, all.findLastIndex((r) => r.action === CREATED)));
+    return records.map((r) => this.historyItem(r));
+  }
+
+  private historyItem(record: HistoryRecord): HistoryItem {
+    const actor = this.graph.get("user", displayId("user", record.actor));
+    return { at: record.at, by: actor?.username ?? displayId("user", record.actor), action: record.action, data: record.data };
+  }
+
+  /**
+   * One page of an item's history, which begins where the item was created, as in `history`: neither the page
+   * nor the count goes back beyond that. One entry more than a page is asked for: when it comes, there are
+   * earlier entries, and it is left for the page before.
+   */
+  private async historyPage(ref: Ref, before?: HistoryPlace): Promise<HistoryPage> {
+    const { records, total } = await this.storage.readHistoryPage(this.tenant, ref.kind, storageId(ref.kind, ref.id), {
+      ...(before ? { before: { revision: before[0], seq: before[1] } } : {}),
+      limit: LIMITS.page + 1,
+      sinceLast: CREATED,
     });
+    const shown = records.length > LIMITS.page ? records.slice(records.length - LIMITS.page) : records;
+    const first = shown[0];
+    return { items: shown.map((r) => ({ ...this.historyItem(r), place: [r.revision, r.seq] as const })), total, ...(first && shown.length < records.length ? { earlier: [first.revision, first.seq] as const } : {}) };
   }
 
   /** Looks for damage in the graph. An empty list means it is consistent. */

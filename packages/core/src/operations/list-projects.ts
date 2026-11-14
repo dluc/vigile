@@ -1,9 +1,12 @@
 import { z } from "zod";
 import { isLive, projectCalc, type Known } from "../calc.js";
-import { compareProjectIds } from "../ids.js";
 import { defineRead } from "../operation.js";
 import { projectSummary } from "../views.js";
-import { continuation, isId, paginate } from "./shared.js";
+import { describeList } from "../paging.js";
+import { continuation, cursor, paginate, type Cursor } from "./shared.js";
+
+/** The tokens of a list of projects, for the filters it was asked with. The list is in the order of the IDs, and a token carries the ID of the last project returned. */
+export const projectsCursor = (input: Record<string, unknown> = {}): Cursor<string> => cursor(describeList("list_projects", input));
 
 export const listProjects = defineRead({
   name: "list_projects",
@@ -18,9 +21,9 @@ export const listProjects = defineRead({
     let projects = ctx.graph.all("project").filter(isLive);
     const known: Known = new Map();
     if (input.has_problems !== undefined) projects = projects.filter((p) => projectCalc(ctx.graph, p, known).has_problems === input.has_problems);
-    projects.sort((a, b) => compareProjectIds(a.id, b.id));
-    const { continuation: token, ...filters } = input;
-    const page = paginate(projects, (p) => p.id, compareProjectIds, token, { question: ["list_projects", filters], isKey: isId });
+    const tokens = projectsCursor(input);
+    projects.sort((a, b) => tokens.list.compare(a.id, b.id));
+    const page = paginate(projects, (p) => p.id, input.continuation, tokens);
     return { projects: page.items.map((p) => projectSummary(ctx.graph, p, known)), ...(page.continuation ? { continuation: page.continuation } : {}) };
   },
 });

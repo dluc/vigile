@@ -1,8 +1,7 @@
 import { containers, dependencies, groupProgress, projectCalc, taskCalc, type Problem, type Known } from "./calc.js";
 import type { GraphView } from "./graph.js";
-import { refText } from "./ids.js";
-import { LINK_TYPES } from "./link-types.js";
-import type { Node, ProjectNode, StatusEntry, TaskNode, UserNode } from "./model.js";
+import { comparePlaces, placeOf, refText } from "./ids.js";
+import { LIMITS, type Node, type ProjectNode, type StatusEntry, type TaskNode, type UserNode } from "./model.js";
 import type { HistoryItem } from "./operation.js";
 
 /** How items are shown to clients. Summaries are compact, for lists; details add text, links and timeline. */
@@ -70,21 +69,46 @@ export interface LinkedItem {
   deleted?: true;
 }
 
+/** A list that is not returned whole: how many entries it has, and the token that continues it where it can be continued. */
+export interface More {
+  total: number;
+  continuation?: string;
+}
+
+/** The lists of a task's summary: one for each kind of link it has, and what it waits for. */
+const SUMMARY_LISTS = ["contained_in", "depends_on", "assigned_to", "waiting_for"] as const;
+
+/** Which lists of an item were cut at the page size. A list that is returned whole is not named here. */
+export type MoreLists = Partial<Record<(typeof SUMMARY_LISTS)[number] | "timeline" | "history", More>> & {
+  /** By the name the list has in `links`. */
+  links?: Record<string, More>;
+};
+
 export type Detail = Summary & {
   description?: string;
   /** Why the work matters. Tasks only; null when nobody has said. */
   why?: string | null;
-  /** Links in both directions, keyed by the name that reads correctly from this item. */
+  /** Links in both directions, keyed by the name that reads correctly from this item. At most a page of each, in the order of the IDs. */
   links: Record<string, LinkedItem[]>;
-  timeline?: Array<StatusEntry & { by: string }>;
+  /** The latest statuses the item went through, at most a page of them, oldest first. */
+  timeline?: Array<StatusEntry & { by: string; place: number }>;
   created_at: string;
   created_by: string;
   updated_at: string;
-  /** Every recorded change, oldest first. Only when asked for. */
-  history?: HistoryItem[];
+  /**
+   * The revision of the plan since which nothing in this answer has changed: the item, its lists, and what they
+   * show of other items and of users. Two answers about the item that say the same show nothing that differs,
+   * so pages of its lists belong together when they say the same. See `Unchanged`.
+   */
+  unchanged_since: number;
+  /** The latest recorded changes, at most a page of them, oldest first. Only when asked for. */
+  history?: Array<HistoryItem & { place: readonly [revision: number, seq: number] }>;
+  more?: MoreLists;
 };
 
 const problemViews = (problems: Problem[]): ProblemView[] => problems.map(({ code, message }) => ({ code, message }));
+/** Stable in every store and after every reload: insertion order is not part of an answer. */
+const orderedNodes = <T extends Node>(values: T[]): T[] => values.sort((a, b) => comparePlaces(placeOf(a), placeOf(b)));
 
 export function taskSummary(graph: GraphView, task: TaskNode, known?: Known): TaskSummary {
   const calc = taskCalc(graph, task, known);
@@ -99,13 +123,13 @@ export function taskSummary(graph: GraphView, task: TaskNode, known?: Known): Ta
     value: task.value,
     size: task.size,
     version: task.version,
-    contained_in: containers(graph, task).map(refText),
-    depends_on: dependencies(graph, task).map(refText),
-    assigned_to: calc.assigned_to.map((u) => u.username),
+    contained_in: orderedNodes(containers(graph, task)).map(refText),
+    depends_on: orderedNodes(dependencies(graph, task)).map(refText),
+    assigned_to: orderedNodes(calc.assigned_to).map((u) => u.username),
     is_assigned: calc.is_assigned,
     is_next: calc.is_next,
     is_waiting: calc.is_waiting,
-    waiting_for: calc.waiting_for.map(refText),
+    waiting_for: orderedNodes(calc.waiting_for).map(refText),
     has_problems: calc.has_problems,
     ...(calc.has_problems ? { problems: problemViews(calc.problems) } : {}),
     ...(progress ? { progress } : {}),
@@ -152,29 +176,45 @@ export function summary(graph: GraphView, node: Node): Summary {
   }
 }
 
-function linkedItem(node: Node): LinkedItem {
+export function linkedItem(node: Node): LinkedItem {
   const base = node.kind === "user" ? { kind: node.kind, id: node.id, title: node.username } : { kind: node.kind, id: refText(node), title: node.title, status: node.status };
   return node.deleted_at ? { ...base, deleted: true } : base;
 }
 
-const username = (graph: GraphView, id: string): string => graph.get("user", id)?.username ?? id;
+export const username = (graph: GraphView, id: string): string => graph.get("user", id)?.username ?? id;
 
-export function detail(graph: GraphView, node: Node, text: string | null): Detail {
-  const links: Record<string, LinkedItem[]> = {};
-  for (const linkType of LINK_TYPES) {
-    const forward = graph.out(node, linkType.type).flatMap((l) => graph.node(l.to) ?? []);
-    const backward = graph.in(node, linkType.type).flatMap((l) => graph.node(l.from) ?? []);
-    if (forward.length) links[linkType.type] = forward.map(linkedItem);
-    if (backward.length) links[linkType.reverse] = backward.map(linkedItem);
+/**
+ * A summary as it is returned for one item by itself, in full or as what the item is now in a refusal: each of
+ * its lists is cut at the page size, and `more` says how many a cut list has. In a list of tasks the summaries
+ * are whole: whoever draws the plan from a list needs every link of every task in it.
+ */
+export function shortened<S extends Summary>(item: S): S & { more?: MoreLists } {
+  const cut: Record<string, unknown> = {};
+  const more: MoreLists = {};
+  for (const name of SUMMARY_LISTS) {
+    const list: unknown = name in item ? item[name as keyof S] : undefined;
+    if (!Array.isArray(list) || list.length <= LIMITS.page) continue;
+    cut[name] = list.slice(0, LIMITS.page);
+    more[name] = { total: list.length };
   }
+  return Object.keys(more).length ? { ...item, ...cut, more } : item;
+}
+
+/** An item in full. Its lists are handed in, a page of each, with what says that there is more of one. */
+export function detail(graph: GraphView, node: Node, text: string | null, lists: Pick<Detail, "links" | "timeline" | "history" | "more" | "unchanged_since">): Detail {
+  const item = shortened(summary(graph, node));
+  const more: MoreLists = { ...item.more, ...lists.more };
   return {
-    ...summary(graph, node),
+    ...item,
     ...(node.kind === "user" ? {} : { description: text ?? "" }),
     ...(node.kind === "task" ? { why: node.why } : {}),
-    links,
-    ...(node.kind === "user" ? {} : { timeline: node.timeline.map((e) => ({ ...e, by: username(graph, e.by) })) }),
+    links: lists.links,
+    ...(lists.timeline ? { timeline: lists.timeline } : {}),
     created_at: node.created_at,
     created_by: username(graph, node.created_by),
     updated_at: node.updated_at,
+    unchanged_since: lists.unchanged_since,
+    ...(lists.history ? { history: lists.history } : {}),
+    ...(Object.keys(more).length ? { more } : {}),
   };
 }

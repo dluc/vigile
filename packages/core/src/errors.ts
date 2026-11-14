@@ -20,8 +20,10 @@ export interface ErrorItem {
 export interface ErrorDetails {
   /** The specific rule that refused the change, such as `unfinished_dependencies`. */
   rule?: string;
-  /** What is in the way. */
+  /** What is in the way: the first few, when there are many. */
   blocking?: ErrorItem[];
+  /** How many are in the way in all. Only when `blocking` does not name every one of them. */
+  blocking_total?: number;
   /** Things the client can do about it. Not exhaustive. */
   actions?: string[];
   /** The item as it is now, when the client's copy was stale. */
@@ -48,6 +50,19 @@ export class VigileError extends Error {
   toJSON(): ErrorBody {
     return { code: this.code, message: this.message, ...this.details };
   }
+}
+
+/** How much of a value a caller sent is repeated in a message. */
+const ECHOED = 80;
+
+/**
+ * What a caller sent, as a message repeats it: whole when it is short, and otherwise its start and how long it
+ * was. A message says what is wrong with a value; it does not hand a value of any length back.
+ */
+export function echo(value: string, most = ECHOED): string {
+  if (value.length <= most) return value;
+  // Cut between two characters, never through the middle of one that takes two code units.
+  return `${value.slice(0, most).replace(/[\uD800-\uDBFF]$/, "")}… (${value.length} characters)`;
 }
 
 export const invalidInput = (message: string, actions?: string[]) => new VigileError("invalid_input", message, { actions });

@@ -1,5 +1,7 @@
 import { LARGE, STATES, clearGraph, renderGraph, resizeGraph, zoomGraph } from "./graph.js";
 import { lights } from "./lights.js";
+// The rules for reading a list in pages are the service's own modules, handed over as they are.
+import { ENDS, NotAList, begun, describeItemList, describeList, readToEnd, resume, takePage } from "/shared/paging.js";
 
 /**
  * What the browser remembers for the page. A browser may refuse to remember anything, as one that blocks all
@@ -160,18 +162,32 @@ async function api(path, input) {
 /** The key the service last answered to, or nothing when it answered without one. */
 let keyInUse = "";
 
+/**
+ * What answered is not a Vigile service, or not this version of one: it gave a list that is not one as the
+ * service gives them. Said as an answer that was an error, which is shown with a way to try again; it is never
+ * taken for the end of a list, and nothing more is asked for on the strength of it.
+ */
+const notAsVigile = (asked, why) => new ApiError(200, { code: "internal", message: `What answered ${asked} did not answer as this Vigile service does: ${why}.` });
+
+/**
+ * Reads a list to its end, page by page, by the steps that hold for whoever reads one: they are the service's
+ * own, in `/shared/paging.js`. A token is sent on once, and only a token of this very list, after a page that
+ * brings something new and further on; the list is read for a thousand pages and a hundred thousand entries
+ * at most. A list that is not so is not the service's: the reading stops and says so.
+ */
 async function all(path, field, input = {}) {
-  const items = [];
   const session = sessions;
-  let continuation;
-  do {
-    // A list comes in pages. Should the key be refused between two of them, the rest is not asked for.
-    if (session !== sessions) throw new Error("The page was locked out while it was reading.");
-    const page = await api(path, { ...input, ...(continuation ? { continuation } : {}) });
-    items.push(...page[field]);
-    continuation = page.continuation;
-  } while (continuation);
-  return items;
+  const operation = path.replaceAll("-", "_");
+  try {
+    return await readToEnd(describeList(operation, input), async (continuation) => {
+      // A list comes in pages. Should the key be refused between two of them, the rest is not asked for.
+      if (session !== sessions) throw new Error("The page was locked out while it was reading.");
+      const page = await api(path, { ...input, ...(continuation === undefined ? {} : { continuation }) });
+      return { entries: page?.[field], continuation: page && Object.hasOwn(page, "continuation") ? page.continuation : ENDS };
+    });
+  } catch (error) {
+    throw error instanceof NotAList ? notAsVigile(path, error.why) : error;
+  }
 }
 
 const COLUMNS = [
@@ -520,49 +536,303 @@ const RELATIONS = {
 /** One section of the panel: a block of its own with a heading. */
 const block = (title, ...children) => el("section", { class: "block" }, el("h3", {}, title), ...children);
 
-async function renderDetail() {
+/**
+ * Where one of an item's lists stands in what `get` returns, and what says that it goes on: a list of links by
+ * its name, the timeline, the history. The service returns at most a page of each.
+ */
+const listAt = (where) => (where.startsWith("links:") ? ["links", where.slice(6)] : [where]);
+function goesOn(item, where) {
+  const [field, name] = listAt(where);
+  const more = item.more ?? {};
+  if (name === undefined) return Object.hasOwn(more, field) ? more[field] : undefined;
+  return more.links && Object.hasOwn(more.links, name) ? more.links[name] : undefined;
+}
+
+/**
+ * Reads the next page of one of an item's lists and joins it to the item as it was read. Links go on after the
+ * ones that are there; of the timeline and the history the service returns the latest entries first, so the
+ * next page holds the ones before. `had` says how many pages beyond the first the item holds of the list.
+ * Returns what the page says of the state it was read of (`unchanged_since`: since when neither the item nor
+ * any of its lists has changed), or null when the list does not go on.
+ *
+ * The list is read by the steps that hold for whoever reads one, which are the service's own, in
+ * `/shared/paging.js`: the token is sent only when it is the token of this list of this item, and the page is
+ * joined only when it is a page of that list whose entries are all further on in the list than the place it
+ * was asked from, so that none was there before, and which goes on, if it does, with a token of the same list
+ * that names the place of its furthest entry. A list is read for a thousand pages at most. What is
+ * not so is said, as an answer that is not the service's, and is never taken for the end of the list. A page
+ * of another state of the item is not looked at further: its caller reads the item again.
+ */
+async function readOn(item, where, had) {
+  const part = goesOn(item, where);
+  if (!part) return null;
+  const [field, name] = listAt(where);
+  const shown = name === undefined ? (item[field] ?? []) : Object.hasOwn(item.links, name) ? item.links[name] : [];
+  const list = describeItemList({ kind: item.kind, id: item.id }, name === undefined ? [field] : ["links", name]);
+  let page;
+  let read;
+  let on;
+  try {
+    // How far the reading has come, as the item in hand has it. The first page is taken here, by the same
+    // steps as any; the pages after it were taken when they were read.
+    let progress = begun();
+    if (had === 0) takePage(list, progress, shown, part.continuation);
+    else progress = resume(list, had + 1, shown, part.continuation);
+    page = await api("get", { kind: item.kind, id: item.id, continuation: progress.sent });
+    read = name === undefined ? page?.[field] : page?.links && Object.hasOwn(page.links, name) ? page.links[name] : undefined;
+    const rest = page?.more ?? {};
+    on = name === undefined ? rest[field] : rest.links && Object.hasOwn(rest.links, name) ? rest.links[name] : undefined;
+    if (page?.kind !== item.kind || page?.id !== item.id || typeof page.unchanged_since !== "number") throw new NotAList("it is no page of a list of that item");
+    // Read of another state of the item, the page is not joined to this one: the item is read again.
+    if (page.unchanged_since !== item.unchanged_since) return page.unchanged_since;
+    // A continuation answer is one page of one list. Metadata for another list must not make this one look
+    // finished, nor be ignored beside its own metadata.
+    const moreObject = rest && typeof rest === "object" && !Array.isArray(rest);
+    const moreFields = moreObject ? Object.keys(rest) : [];
+    const rightMore =
+      page.more === undefined ||
+      (moreObject &&
+        (name === undefined
+          ? moreFields.length === 1 && moreFields[0] === field
+          : moreFields.length === 1 && moreFields[0] === "links" && rest.links && typeof rest.links === "object" && !Array.isArray(rest.links) && Object.keys(rest.links).length === 1 && Object.hasOwn(rest.links, name)));
+    if (!rightMore) throw new NotAList("it names another list among those that go on");
+    takePage(list, progress, read, on === undefined ? ENDS : on?.continuation);
+  } catch (error) {
+    throw error instanceof NotAList ? notAsVigile(`for a list of ${item.id}`, error.why) : error;
+  }
+  if (name === undefined) {
+    item[field] = [...read, ...(item[field] ?? [])];
+    if (on) item.more[field] = on;
+    else delete item.more[field];
+    return page.unchanged_since;
+  }
+  item.links[name] = [...(Object.hasOwn(item.links, name) ? item.links[name] : []), ...read];
+  if (on) item.more.links[name] = on;
+  else delete item.more.links[name];
+  return page.unchanged_since;
+}
+
+/**
+ * Reads on in the lists of an item until it holds as many pages of each as the person has opened. `have` says
+ * how many pages of each list the item holds, and is kept up as they are read. The pages that are wanted are
+ * looked up again before each one: a page that is asked for while this reads is read here too. A list that
+ * turns out to end sooner is wanted no further than it goes.
+ *
+ * Says whether the item and its pages are of one state of the item. Every answer of the service says since
+ * when the item and its lists are unchanged: a page that says something else than the item in hand was read
+ * after a link came or went, or the item changed, and what it counts and holds does not fit what was read
+ * before. The item's version does not tell: a task taken out of a group changes the group's list and not the
+ * group. At the first such page the reading stops, since nothing more is to be joined to the two. A reading
+ * that is not `live` any more stops as well, and its caller drops it.
+ */
+async function catchUp(item, have, live) {
+  while (live()) {
+    const { pages } = state.further;
+    const [where] = [...pages].find(([list, wanted]) => (have.get(list) ?? 0) < wanted) ?? [];
+    if (where === undefined) break;
+    const had = have.get(where) ?? 0;
+    const since = await readOn(item, where, had);
+    if (!live()) break;
+    if (since === null) {
+      if (had) state.further.pages.set(where, had);
+      else state.further.pages.delete(where);
+      continue;
+    }
+    if (since !== item.unchanged_since) return false;
+    have.set(where, had + 1);
+  }
+  return true;
+}
+
+/** The button that reads on in a list that the panel shows a part of. */
+const further = (where, text) => el("button", { class: "further", type: "button", "data-list": where, onclick: () => renderDetail(where) }, text);
+
+/**
+ * The readings of the open item, counted. Each one takes the next number, and only the one with the latest
+ * number draws: an answer that was asked for earlier is never drawn over one that was asked for later.
+ */
+let detailTurn = 0;
+/** The number of the reading that is under way, or 0 when none is. */
+let detailReading = 0;
+
+/**
+ * How often an item is read from the start for one drawing, when it turns out to have changed between its
+ * reading and that of one of its pages. An item that someone changes every second would otherwise be read
+ * without end.
+ */
+const DETAIL_TRIES = 3;
+
+/**
+ * Says something about the reading of the item under what the panel shows of it, with a button that reads the
+ * item again. It stays in sight wherever the panel is scrolled to. Said again, it leaves the keyboard on its button.
+ */
+function sayInPanel(text) {
+  state.troubled = true;
+  const had = $("detail").querySelector(".not-read");
+  const note = el("div", { class: "not-read", role: "alert" }, el("p", {}, text), el("button", { class: "retry", type: "button", onclick: () => renderDetail() }, "Try again"));
+  const onButton = had?.contains(document.activeElement);
+  had?.remove();
+  $("detail").append(note);
+  if (onButton) note.querySelector(".retry").focus({ preventScroll: true });
+}
+
+/**
+ * Says in the panel that the item could not be read, with a button that reads it again. What the panel shows of
+ * the item stays as it was read, with the pages that were opened: only an item that is not there any more, or
+ * one of which nothing was read yet, leaves the panel with nothing but the message. The next reading that
+ * succeeds takes the message away, whoever asked for it: this button, the refresh button, or a change.
+ */
+function showTrouble(asked, error) {
+  state.troubled = true;
+  const kept = state.item && sameItem(asked, state.shown) && !$("panel").hidden && error.code !== "not_found";
+  if (kept) {
+    const what = error.status ? `The service answered with an error: ${error.message}` : "Cannot reach the service.";
+    return sayInPanel(`${what} This is the item as it was read before.`);
+  }
+  state.shown = null;
+  state.drawn = null;
+  state.item = null;
+  state.have = null;
+  // What the service says is said in its words; that it said nothing, in the page's.
+  $("detail").replaceChildren(el("p", { class: "empty" }, error.status ? error.message : "Cannot reach the service."), el("button", { class: "retry", type: "button", onclick: () => renderDetail() }, "Try again"));
+  $("panel").hidden = false;
+  // The panel is a dialog also when all it has to say is that the item cannot be shown: the keyboard goes into
+  // it, unless it is in it already, on the control that closes it for instance.
+  if (!$("panel").contains(document.activeElement)) $("panel").querySelector(".panel-card").focus({ preventScroll: true });
+}
+
+/** Takes the message about a failed reading away, once a reading has succeeded. */
+function clearTrouble() {
+  state.troubled = false;
+  const note = $("detail").querySelector(".not-read");
+  if (!note) return;
+  // The keyboard does not go with the button it was on: it stays in the panel.
+  const inside = note.contains(document.activeElement);
+  note.remove();
+  if (inside) $("panel").querySelector(".panel-card").focus({ preventScroll: true });
+}
+
+/**
+ * Shows the open item in the panel: the item as it is now, with as many pages of each list as the person has
+ * opened. Asked with one of its lists, by the button under a list that is not shown whole, it opens one page
+ * more of that list.
+ *
+ * What can happen while it reads, and what the panel shows then:
+ * - Another reading is asked for (a change, the refresh button, "Try again", the item opened anew): the later
+ *   one draws, with every page that was opened, and the earlier one is dropped when its answer comes.
+ * - One more page is asked for, of the same list or of another: the reading that is under way reads it too,
+ *   and draws once, with all of them.
+ * - The panel is closed, another item is opened, the key is refused: the answer is dropped.
+ * - The item or one of its lists has changed since the panel read it, which the page of a list says, or the
+ *   token of a list is not taken any more: the item is read again from the start, with the pages that were opened.
+ * - The item changes between its reading and that of one of its pages: it is read from the start again, a few
+ *   times. What is drawn is an item and pages of one state of it, whichever way the reading went. An item that
+ *   goes on changing is drawn as it was read last, by itself, and the panel says that its further pages are
+ *   not shown and offers to try again.
+ * - The reading fails: the panel says so and offers to try again, and keeps what it shows.
+ */
+async function renderDetail(more) {
   // Locked out, the page asks the service for nothing: the item named in the address opens once it is let in.
   if (!state.open || locked) return;
   const asked = state.open;
-  const session = sessions;
-  let item;
-  try {
-    item = await api("get", { kind: asked.kind, id: asked.id, history: true });
-  } catch (error) {
-    // A refused key is for the page as a whole to deal with: it empties itself and asks for one.
-    if (error.status === 401) return void load();
-    if (session !== sessions || locked || !sameItem(asked, state.open)) return;
-    state.shown = null;
-    state.drawn = null;
-    $("detail").replaceChildren(el("p", { class: "empty" }, error.message));
-    $("panel").hidden = false;
-    // The panel is a dialog also when all it has to say is that the item cannot be shown: the keyboard goes into
-    // it, unless it is in it already, on the control that closes it for instance.
-    if (!$("panel").contains(document.activeElement)) $("panel").querySelector(".panel-card").focus({ preventScroll: true });
-    return;
+  // How many pages beyond the first the person opened, by list: for this item only.
+  if (!sameItem(asked, state.further?.of)) state.further = { of: asked, pages: new Map() };
+  if (more) {
+    // Only what the panel shows has a list to read on in.
+    if (!state.item || !sameItem(asked, state.shown) || $("panel").hidden) return;
+    state.further.pages.set(more, (state.further.pages.get(more) ?? 0) + 1);
+    // A reading that is under way reads this page as well, before it draws.
+    if (detailReading) return;
   }
-  // The answer to an earlier click must not replace what was opened since. Nor may an answer asked for before the
-  // key was refused show an item afterwards.
-  if (session !== sessions || locked || !sameItem(asked, state.open)) return;
+  const turn = ++detailTurn;
+  const session = sessions;
+  // Whether this reading is still the one to draw: no later one was begun, the page was not locked out, and the
+  // panel is still open on the item.
+  const live = () => turn === detailTurn && session === sessions && !locked && sameItem(asked, state.open);
+  detailReading = turn;
+  let item;
+  let have;
+  // Whether the item went on changing while it was read, so that it is shown without its further pages.
+  let changing = false;
+  try {
+    // One page more is joined to what the panel shows, which is not read again, unless the item has moved on
+    // since or the service does not take the token: then it is read from the start like any other time.
+    let whole = !more;
+    if (more) {
+      item = structuredClone(state.item);
+      have = new Map(state.have);
+      try {
+        whole = !(await catchUp(item, have, live));
+      } catch (error) {
+        if (error.status !== 400 && error.status !== 404) throw error;
+        whole = true;
+      }
+      if (!live()) return;
+    }
+    // Read from the start, the item and its pages are of one state of it or are not drawn together: a page that
+    // was read after something changed sends the reading back to the start, with the pages that were opened
+    // still wanted. After a few tries the item is read once more and shown by itself.
+    for (let tries = 1; whole; tries++) {
+      item = await api("get", { kind: asked.kind, id: asked.id, history: true });
+      have = new Map();
+      if (!live()) return;
+      changing = tries > DETAIL_TRIES;
+      if (changing) break;
+      try {
+        if (await catchUp(item, have, live)) break;
+      } catch (error) {
+        // A marked boundary entry may have disappeared after the first page was read. The initial `get` above is
+        // deliberately outside this catch: only a rejected continuation restarts the bounded whole-item read.
+        if (error.status !== 400 && error.status !== 404) throw error;
+      }
+      if (!live()) return;
+    }
+    if (!live()) return;
+  } catch (error) {
+    // A refused key is for the page as a whole to deal with: it empties itself and asks for one. Should it be
+    // let in again without that, the panel is read again with the plan.
+    if (error.status === 401) {
+      state.troubled = true;
+      return void load();
+    }
+    if (live()) showTrouble(asked, error);
+    return;
+  } finally {
+    if (detailReading === turn) detailReading = 0;
+  }
+  // What the panel says of a reading stands under the item, whether the item is drawn again or not: that it
+  // could not be read is taken away by this reading, and that it is changing is said by it.
+  const said = () => changing && sayInPanel("The item is being changed while it is read. This is the item as it was read last; the further pages of its lists are not shown.");
+  if (!changing) clearTrouble();
   // The same item drawn again, after a refresh, keeps its place: how far it was scrolled and whether its history was unfolded.
   const again = sameItem(asked, state.shown) && !$("panel").hidden;
   // And when nothing the panel shows has changed, it is not drawn again at all: a change to some other task must
   // not take away what someone has selected in it, nor where they are in it with the keyboard.
-  const drawing = JSON.stringify([item, state.trail.at(-1) ?? null, watched.has(item.id)]);
-  if (again && drawing === state.drawn) return;
+  // Since when the item is unchanged is nothing the panel shows: after the service has read the plan anew it
+  // says another revision of an item that is as it was.
+  const drawing = JSON.stringify([{ ...item, unchanged_since: null }, state.trail.at(-1) ?? null, watched.has(item.id)]);
+  // What was read is what the next page is joined to, whether it is drawn again or looks the same.
+  const same = again && drawing === state.drawn;
+  state.item = item;
+  state.have = have;
+  if (same) return void said();
   state.drawn = drawing;
   const place = again ? placeInPanel() : null;
   const historyOpen = again && Boolean($("detail").querySelector(".fold-block")?.open);
   state.shown = asked;
   state.openTitle = item.title ?? item.username ?? "";
   document.title = [item.id, state.openTitle, state.instance?.name, "Vigile"].filter(Boolean).join(" · ");
+  // A list the service returned a part of says so: how many of how many, and a button that reads on.
+  const timelineOn = goesOn(item, "timeline");
+  const historyOn = goesOn(item, "history");
   const links = Object.entries(item.links ?? {})
     .filter(([, items]) => items.length)
-    .map(([relation, items]) =>
-      el(
+    .map(([relation, items]) => {
+      const on = goesOn(item, `links:${relation}`);
+      return el(
         "div",
         { class: "relation", "data-relation": relation },
-        el("h4", { title: `Link type: ${relation}` }, RELATIONS[relation] ?? relation, el("span", { class: "count" }, String(items.length))),
+        el("h4", { title: `Link type: ${relation}` }, RELATIONS[relation] ?? relation, el("span", { class: "count" }, on ? `${items.length} of ${on.total}` : String(items.length))),
         el(
           "ul",
           { class: "links" },
@@ -580,15 +850,16 @@ async function renderDetail() {
             ),
           ),
         ),
-      ),
-    );
+        on && further(`links:${relation}`, "Show more"),
+      );
+    });
   const facts = [
     item.kind === "task" && ["Type", item.type],
     item.kind === "task" && item.progress && ["Progress", `${item.progress.finished} of ${item.progress.total} tasks inside finished`],
     item.kind === "task" && ["Priority", String(item.priority)],
     item.kind === "task" && item.value !== null && ["Value", String(item.value)],
     item.kind === "task" && item.size !== null && ["Size", String(item.size)],
-    item.kind === "task" && ["Assigned to", item.assigned_to.length ? item.assigned_to.join(", ") : "nobody"],
+    item.kind === "task" && ["Assigned to", item.assigned_to.length ? `${item.assigned_to.join(", ")}${item.more?.assigned_to ? ` and ${item.more.assigned_to.total - item.assigned_to.length} more` : ""}` : "nobody"],
     item.kind === "project" && ["Progress", `${item.progress.finished} of ${item.progress.total} tasks finished`],
     item.completed_at && ["Completed", when(item.completed_at)],
     ["Created", `${when(item.created_at)} by ${item.created_by}`],
@@ -646,6 +917,8 @@ async function renderDetail() {
       item.timeline?.length &&
         block(
           "Status timeline",
+          timelineOn && el("p", { class: "partial" }, `The latest ${item.timeline.length} of ${timelineOn.total}.`),
+          timelineOn && further("timeline", "Show earlier ones"),
           el(
             "ol",
             { class: "timeline" },
@@ -656,7 +929,9 @@ async function renderDetail() {
         el(
           "details",
           { class: "block fold-block", open: historyOpen },
-          el("summary", {}, el("h3", {}, "History"), el("span", { class: "count" }, `${item.history.length} ${item.history.length === 1 ? "change" : "changes"}`)),
+          el("summary", {}, el("h3", {}, "History"), el("span", { class: "count" }, `${historyOn?.total ?? item.history.length} ${(historyOn?.total ?? item.history.length) === 1 ? "change" : "changes"}`)),
+          historyOn && el("p", { class: "partial" }, `The latest ${item.history.length} of ${historyOn.total}.`),
+          historyOn && further("history", "Show earlier ones"),
           el(
             "ol",
             { class: "history" },
@@ -667,6 +942,7 @@ async function renderDetail() {
         ),
     ),
   );
+  said();
   $("panel").hidden = false;
   const card = $("panel").querySelector(".panel-card");
   if (!again) card.scrollTop = 0;
@@ -685,7 +961,7 @@ function placeInPanel() {
   // its label, a link shows the state of what it leads to, and both change while the control stays the same one.
   // A link is the one of its kind to its item: a task can both hold and wait for the same task.
   const name = (control) =>
-    control.matches("summary") ? "summary" : control.matches(".link") ? `link ${control.closest(".relation")?.dataset.relation} ${control.querySelector(".id")?.textContent}` : control.className || control.textContent;
+    control.matches("summary") ? "summary" : control.matches(".further") ? `further ${control.dataset.list}` : control.matches(".link") ? `link ${control.closest(".relation")?.dataset.relation} ${control.querySelector(".id")?.textContent}` : control.className || control.textContent;
   const wanted = name(at);
   return () => [...$("detail").querySelectorAll("button, summary, a[href]")].find((control) => control.tagName === at.tagName && name(control) === wanted);
 }
@@ -712,6 +988,10 @@ function hidePanel() {
   const inside = !$("panel").hidden && ($("panel").contains(document.activeElement) || document.activeElement === document.body);
   $("panel").hidden = true;
   state.drawn = null;
+  state.item = null;
+  state.have = null;
+  state.further = null;
+  state.troubled = false;
   if (inside) panelOpener?.()?.focus({ preventScroll: true });
   panelOpener = null;
   document.title = state.instance?.name ? `${state.instance.name} · Vigile` : "Vigile";
@@ -943,7 +1223,7 @@ function lockOut(refused = "") {
   // was not refused and stays.
   if (refused) localStorage.removeItemIf(KEY_NAME, refused);
   // Nothing is loaded any more, and the header must go on saying that the page is not connected.
-  Object.assign(state, { projects: [], tasks: [], byId: new Map(), snapshot: "", shown: null, loadedAt: null, loadedMs: null, failed: true });
+  Object.assign(state, { projects: [], tasks: [], byId: new Map(), snapshot: "", shown: null, drawn: null, item: null, have: null, further: null, troubled: false, loadedAt: null, loadedMs: null, failed: true });
   $("main").hidden = true;
   $("you").textContent = "";
   $("panel").hidden = true;
@@ -1018,8 +1298,9 @@ async function refresh() {
     else fitBoard();
     if (before) showMoves(before);
     announce(tasks, (id) => state.byId.get(id) ?? null, turn);
-    // An item named in the address opens once there is data; an open one follows the changes.
-    if (state.open && (changed || first || $("panel").hidden)) await renderDetail();
+    // An item named in the address opens once there is data; an open one follows the changes, and one that
+    // could not be read the last time is read again.
+    if (state.open && (changed || first || $("panel").hidden || state.troubled)) await renderDetail();
   } catch (error) {
     $("sync").textContent = "Not connected";
     $("sync").classList.remove("old");

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { isLive } from "../calc.js";
-import { afterStored, invalidInput, refused } from "../errors.js";
+import { afterStored, echo, invalidInput, refused } from "../errors.js";
 import { RESERVED_PREFIXES, USERNAME, userId } from "../ids.js";
 import { LIMITS, keyMark, type UserNode } from "../model.js";
 import { unconfirmed } from "./shared.js";
@@ -21,7 +21,7 @@ export const createUser = defineWrite({
   run(ctx, input) {
     const username = input.username.toLowerCase();
     if (!USERNAME.test(username) || looksLikeId.test(username)) {
-      throw invalidInput(`"${input.username}" cannot be a username.`, [
+      throw invalidInput(`"${echo(input.username)}" cannot be a username.`, [
         `Use lowercase letters, digits, "-" and "_", starting with a letter, at most ${LIMITS.username} characters, and not something that reads like an ID.`,
       ]);
     }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { isLive } from "../calc.js";
-import { invalidInput, refused } from "../errors.js";
+import { echo, invalidInput, refused } from "../errors.js";
 import { formatNumber, prefixProblem } from "../ids.js";
 import type { ProjectNode } from "../model.js";
 import { defineWrite } from "../operation.js";
@@ -22,7 +22,7 @@ export const createProject = defineWrite({
     if (input.prefix !== undefined && input.prefix !== "") {
       prefix = input.prefix.toUpperCase();
       const problem = prefixProblem(prefix);
-      if (problem) throw invalidInput(`"${input.prefix}" cannot be a prefix. ${problem}`);
+      if (problem) throw invalidInput(`"${echo(input.prefix)}" cannot be a prefix. ${problem}`);
       const existing = ctx.graph.get("project", prefix);
       if (existing) {
         throw refused("prefix_taken", `The prefix ${prefix} is already used by a project${isLive(existing) ? "" : " that is deleted"}.`, {
@@ -30,8 +30,9 @@ export const createProject = defineWrite({
         });
       }
       // A prefix is given once. A project that was deleted for good left its prefix beside the counters; one
-      // that was deleted before prefixes were remembered left its history, which was kept then.
-      if (ctx.plan.isRetired(prefix) || (await ctx.readHistory({ kind: "project", id: prefix })).length) {
+      // that was deleted before prefixes were remembered left its history, which was kept then. Whether there
+      // is any is asked of a page of it: however long it is, it is not read to find out that it is there.
+      if (ctx.plan.isRetired(prefix) || (await ctx.readHistoryPage({ kind: "project", id: prefix })).total > 0) {
         throw refused("prefix_taken", `The prefix ${prefix} was used by a project that has been deleted for good. A prefix is never given twice: the IDs that carried it go on meaning what they meant.`, {
           actions: ["Choose a different prefix."],
         });

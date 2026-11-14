@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { connect as openSocket, createServer } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { initConfig, loadConfig, setKey, setValue } from "@vigile/config";
-import { backupTenantFile, historyOwners, inspectTenantFile } from "@vigile/storage-sqlite";
+import { Engine, VigileError, paging } from "@vigile/core";
+import type { StorageAdapter } from "@vigile/storage";
+import { SqliteStorage, backupTenantFile, historyOwners, inspectTenantFile } from "@vigile/storage-sqlite";
 import { webRoot } from "@vigile/web";
 import { openAsPlan } from "./restore.js";
 import { StartupError, isLoopback, namedFromOutside, startService, type Service, type ServiceOptions } from "./service.js";
@@ -156,9 +159,25 @@ describe("service over HTTP", () => {
     assert.equal((await fetch(`${running.service.urls.base}/..%2f..%2fpackage.json`)).status, 404);
   });
 
+  it("hands the page the engine's own rules for reading a list in pages, as they are compiled, and nothing else of the engine", async () => {
+    for (const file of ["paging.js", "ids.js"]) {
+      const response = await fetch(`${running.service.urls.base}/shared/${file}`);
+      assert.deepEqual([response.status, response.headers.get("content-type"), response.headers.get("cache-control")], [200, "text/javascript; charset=utf-8", "no-cache"], file);
+      // The very file the service runs: what the page reads a list by cannot come to differ from what makes the list.
+      assert.equal(await response.text(), readFileSync(fileURLToPath(import.meta.resolve(`@vigile/core/${file}`)), "utf8"), file);
+    }
+    // What the page imports from it is there.
+    const page = await (await fetch(`${running.service.urls.base}/app.js`)).text();
+    const taken = /import \{([^}]+)\} from "\/shared\/paging\.js";/.exec(page)?.[1]?.split(",").map((name) => name.trim()) ?? [];
+    assert.ok(taken.length > 5 && taken.every((name) => name in paging), taken.join(", "));
+    for (const path of ["/shared/index.js", "/shared/engine.js", "/shared/", "/shared/paging.js.map", "/shared/..%2fengine.js", "/shared/constructor"]) {
+      assert.equal((await fetch(`${running.service.urls.base}${path}`)).status, 404, path);
+    }
+  });
+
   it("tells the browser what the page may do, as a second line of defence", async () => {
     // The worker that lays out the graph is among them: the policy it is served with is the one that holds inside it.
-    for (const path of ["/", "/app.js", "/boot.js", "/vendor/cytoscape.min.js", "/vendor/elk-api.js", "/vendor/elk-worker.min.js", "/vendor/cytoscape-elk.js"]) {
+    for (const path of ["/", "/app.js", "/boot.js", "/shared/paging.js", "/shared/ids.js", "/vendor/cytoscape.min.js", "/vendor/elk-api.js", "/vendor/elk-worker.min.js", "/vendor/cytoscape-elk.js"]) {
       const response = await fetch(`${running.service.urls.base}${path}`);
       await response.arrayBuffer();
       assert.equal(response.status, 200, path);
@@ -903,6 +922,258 @@ describe("service over MCP", () => {
     assert.ok(result instanceof Error || result.isError, "an agent cannot call an admin-only tool");
     await agent.close();
     await assert.rejects(connect(running, "vig_not-a-real-key-000000000000"));
+  });
+});
+
+describe("lists longer than a page, over HTTP and MCP on the store the service runs on", () => {
+  let running: Running;
+  let group: string;
+  let busy: string;
+  before(async () => {
+    running = await start();
+    const run = (operation: string, input: Record<string, unknown>) => running.service.engine.execute(operation, "agent1", input) as Promise<any>;
+    group = (await run("create_task", { title: "A group of many", description: "d" })).id;
+    for (let n = 1; n <= 105; n++) await run("create_task", { title: `Step ${n}`, description: "d", parent: group });
+    busy = (await run("create_task", { title: "Back and forth", description: "d" })).id;
+    for (let n = 1; n <= 150; n++) await run("set_task_status", { id: busy, version: n, status: n % 2 ? "draft" : "open" });
+  });
+  after(() => running.stop());
+
+  it("returns the latest 100 changes of an item's history from the data file, counts them all, and reads back to the first", async () => {
+    const first = (await running.call("/api/get", { id: busy, history: true })).body;
+    assert.deepEqual([first.history.length, first.more.history.total, first.timeline.length, first.more.timeline.total], [100, 151, 100, 151]);
+    assert.deepEqual(first.history.at(-1).data, { from: "draft", to: "open" });
+    const before = await running.call("/api/get", { id: busy, continuation: first.more.history.continuation });
+    assert.equal(before.status, 200);
+    assert.deepEqual([before.body.history.length, before.body.history[0].action, before.body.history[1].data, "more" in before.body], [51, "created", { from: "open", to: "draft" }, false]);
+    const changes = [...before.body.history, ...first.history];
+    assert.deepEqual(changes.map((entry: any) => entry.data.to ?? "created"), ["created", ...Array.from({ length: 150 }, (_, n) => (n % 2 ? "open" : "draft"))], "every change once, in the order it was made");
+    // The group's own history is as long as what was put into it, and is read the same way.
+    const filled = (await running.call("/api/get", { id: group, history: true })).body;
+    assert.deepEqual([filled.history.length, filled.more.history.total, filled.links.contains.length, filled.more.links.contains.total], [100, 106, 100, 105]);
+    // A token that is refused is refused as a mistake of the caller's, with what to do.
+    const wrong = await running.call("/api/get", { id: group, continuation: first.more.history.continuation });
+    assert.deepEqual([wrong.status, wrong.body.error.code], [400, "invalid_input"]);
+    assert.match(wrong.body.error.message, /belongs to another list/);
+  });
+
+  it("returns and counts a project's history from its own creation on, where the data file holds a longer one of an earlier project of its name", async () => {
+    const { engine, storage } = running.service;
+    const run = (operation: string, input: Record<string, unknown>) => engine.execute(operation, "agent1", input) as Promise<any>;
+    // Data from before a prefix was given only once: 149 entries of a project that was deleted for good stand
+    // in the file in front of the creation of the project that has its prefix now.
+    await run("create_project", { title: "Second of the name", prefix: "LEG" });
+    const second = (await run("get", { id: "LEG" })).created_at as string;
+    const entry = (action: string, data = {}, at = "2025-06-01T00:00:00.000Z") => ({ op: "add_history" as const, record: { kind: "project", id: "LEG", at, actor: "3", action, data } });
+    const earlier = (entries: number) => Array.from({ length: entries }, () => entry("status_changed", { from: "open", to: "broken" }));
+    const { head, objects } = (await storage.load("default"))!;
+    const first = await storage.commit("default", { expectedRevision: head.revision, counters: head.counters, changes: [{ op: "delete_object", kind: "project", id: "LEG" }, entry("created", { status: "open" }), ...earlier(97)] });
+    await storage.commit("default", {
+      expectedRevision: first.revision,
+      counters: first.counters,
+      changes: [...earlier(50), entry("deleted_permanently"), { op: "put_object", record: objects.find((record) => record.kind === "project" && record.id === "LEG")!, text: "" }, entry("created", { status: "open" }, second)],
+    });
+    await engine.reload();
+
+    const young = (await running.call("/api/get", { id: "LEG", history: true })).body;
+    assert.deepEqual([young.history.map((h: any) => [h.action, h.at]), "more" in young], [[["created", second]], false]);
+    let version = 1;
+    for (let n = 0; n < 120; n++) version = (await run("set_project_status", { id: "LEG", version, status: n % 2 ? "open" : "in_preview" })).version;
+    const latest = (await running.call("/api/get", { id: "LEG", history: true })).body;
+    assert.deepEqual([latest.history.length, latest.more.history.total], [100, 121]);
+    const before = (await running.call("/api/get", { id: "LEG", continuation: latest.more.history.continuation })).body;
+    assert.deepEqual([before.history.length, [before.history[0].action, before.history[0].at], "more" in before], [21, ["created", second], false]);
+    assert.equal([...before.history, ...latest.history].some((h: any) => h.data.to === "broken" || h.action === "deleted_permanently"), false);
+    // A place before its creation, in a token nobody was given, leads to nothing of the earlier project.
+    const { q } = JSON.parse(Buffer.from(latest.more.history.continuation, "base64url").toString("utf8")) as { q: string };
+    const made = Buffer.from(JSON.stringify({ q, k: [first.revision, 50] }), "utf8").toString("base64url");
+    assert.deepEqual((await running.call("/api/get", { id: "LEG", continuation: made })).body.history, []);
+    // Deleted for good, the project takes all of it along: what was its own and what stood before it.
+    await engine.execute("delete", "admin", { id: "LEG", version, permanent: true });
+    assert.deepEqual(await storage.readHistoryPage("default", "project", "LEG", { limit: 5, sinceLast: "created" }), { records: [], total: 0 });
+    assert.equal((await running.call("/api/create-project", { title: "Third", prefix: "LEG" })).body.error.rule, "prefix_taken");
+  });
+
+  it("answers every read of an item alike while the plan is read anew again and again, and while the item is changed between the reads", async () => {
+    const { engine } = running.service;
+    const whole = async () => (await running.call("/api/get", { id: busy, history: true })).body;
+    const quiet = await whole();
+    // Thirty reads over HTTP, with the plan read anew under them as fast as it can be: each is the item as it
+    // is, with nothing left from the plan as it was in memory before, and none fails or waits for ever.
+    // Each round lets the service get to its requests: reading the plan from this store takes no waiting, and a
+    // loop that never waits would keep every request out.
+    const breath = () => new Promise((resolve) => setImmediate(resolve));
+    let reading = true;
+    const anew = (async () => {
+      while (reading) await engine.reload().then(breath);
+    })();
+    const answers = await Promise.all(Array.from({ length: 30 }, whole));
+    reading = false;
+    await anew;
+    for (const answer of answers) assert.deepEqual({ ...answer, unchanged_since: 0 }, { ...quiet, unchanged_since: 0 });
+    // The item is changed again and again while it is read and its history paged: every answer is of one state.
+    // Its version, the last entry of its history and of its timeline, and how many of each there are, fit.
+    let now = { version: quiet.version as number, status: quiet.status as string };
+    let changing = true;
+    const changes = (async () => {
+      while (changing) now = (await engine.execute("set_task_status", "agent1", { id: busy, version: now.version, status: now.status === "open" ? "draft" : "open" }).finally(breath)) as typeof now;
+    })();
+    const read = await Promise.all(Array.from({ length: 40 }, whole));
+    changing = false;
+    await changes;
+    for (const answer of read) {
+      const changed = (answer.version as number) - (quiet.version as number);
+      assert.deepEqual(
+        [answer.more.history.total, answer.more.timeline.total, answer.history.at(-1).data.to, answer.timeline.at(-1).status],
+        [quiet.more.history.total + changed, quiet.more.timeline.total + changed, answer.status, answer.status],
+        `version ${answer.version}`,
+      );
+    }
+    // Two answers that say the same revision are the same answer.
+    const bySince = new Map<number, string>();
+    for (const answer of read) {
+      const said = JSON.stringify(answer);
+      assert.equal(bySince.get(answer.unchanged_since) ?? said, said);
+      bySince.set(answer.unchanged_since, said);
+    }
+  });
+
+  it("offers the same over MCP: the tool says what is returned, takes the token, and returns the next page", async () => {
+    const agent = await connect(running);
+    const tools = (await agent.listTools()).tools;
+    const get = tools.find((tool) => tool.name === "get")!;
+    assert.match(get.description ?? "", /at most 100 entries[\s\S]*"more"[\s\S]*continuation token/);
+    assert.ok("continuation" in (get.inputSchema.properties as object));
+    const users = tools.find((tool) => tool.name === "list_users")!;
+    assert.match(users.description ?? "", /at most 100 per call/);
+    assert.ok("continuation" in (users.inputSchema.properties as object));
+
+    const first = payload(await agent.callTool({ name: "get", arguments: { id: group } }));
+    assert.deepEqual([first.links.contains.length, first.more.links.contains.total], [100, 105]);
+    const next = payload(await agent.callTool({ name: "get", arguments: { id: group, continuation: first.more.links.contains.continuation } }));
+    assert.deepEqual([next.kind, next.id, next.links.contains.map((item: any) => item.title), "more" in next], ["task", group, ["Step 101", "Step 102", "Step 103", "Step 104", "Step 105"], false]);
+    // Both answers say since when the group and its lists are unchanged, and say the same: they belong together.
+    // The description tells an agent what the field is for.
+    assert.match(get.description ?? "", /"unchanged_since"[\s\S]*Pages belong together when they say the same/);
+    assert.deepEqual([typeof first.unchanged_since, next.unchanged_since], ["number", first.unchanged_since]);
+    const overHttp = (await running.call("/api/get", { id: group, continuation: first.more.links.contains.continuation })).body;
+    assert.deepEqual([overHttp.unchanged_since, overHttp.version], [first.unchanged_since, first.version]);
+    const refused = await agent.callTool({ name: "set_task_status", arguments: { id: group, version: 1, status: "done" } });
+    assert.deepEqual([refused.isError, payload(refused).error.blocking.length, payload(refused).error.blocking_total], [true, 20, 105]);
+    // A token is taken or refused as over the API, and a page of users is asked for the same way.
+    const wrong = await agent.callTool({ name: "get", arguments: { id: busy, continuation: first.more.links.contains.continuation } });
+    assert.deepEqual([wrong.isError, payload(wrong).error.code], [true, "invalid_input"]);
+    assert.match(payload(wrong).error.message, /belongs to another list/);
+    assert.match(payload(await agent.callTool({ name: "list_users", arguments: { continuation: "bm90IGEgdG9rZW4" } })).error.message, /continuation token is not valid/);
+
+    // A call goes to the engine as it came, whatever it sends: what the engine answers repeats as little of it
+    // as it does over the API, in the answer and in the log.
+    const long = "x".repeat(200_000);
+    const from = running.logged.length;
+    for (const [name, input, message] of [
+      [long, {}, /^There is no operation called "x{80}… \(200000 characters\)"\.$/],
+      ["get", { id: long }, /^No project, task or user matches "x{80}… \(200000 characters\)"\.$/],
+      ["get", { id: group, [long]: 1 }, /^The input for get is not valid\. input: Unrecognized key: "x+… \(\d+ characters\)\.$/],
+      ["add_link", { from: group, type: long, to: busy }, /^"x{80}… \(200000 characters\)" is not a link type\.$/],
+    ] as const) {
+      const answer = await agent.callTool({ name, arguments: input });
+      const said = (answer.content as Array<{ text: string }>)[0]!.text;
+      assert.equal(answer.isError, true);
+      assert.match(payload(answer).error.message, message);
+      assert.ok(said.length < 800, `an answer of ${said.length} characters`);
+    }
+    const lines = running.logged.slice(from);
+    assert.equal(lines.length, 4);
+    assert.match(lines[0]!, new RegExp(` op=x{64} caller=agent1 kind=read ms=\\S+ result=not_found$`));
+    assert.ok(lines.every((line) => line.length < 200), "no line of the log is longer for it");
+    await agent.close();
+  });
+
+  it("repeats an address that leads nowhere only in part", async () => {
+    const long = "x".repeat(8000);
+    for (const [path, body] of [[`/api/${long}`, {}], [`/api/${long}`, undefined], [`/${long}`, undefined]] as const) {
+      const answer = await running.call(path, body);
+      assert.equal(answer.status, 404);
+      assert.ok(JSON.stringify(answer.body).length < 400, JSON.stringify(answer.body).slice(0, 200));
+      assert.match(answer.body.error.message, /x{60,80}… \(80\d\d characters\)/);
+    }
+  });
+});
+
+describe("two engines on one data file", () => {
+  it("answers get with the data file and the plan in memory at one revision, whenever the other engine stores a change during the read, and refuses a read that is overtaken every time", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "vigile-two-engines-"));
+    const file = new SqliteStorage({ directory });
+    // What happens while this engine reads: during the next reading of a description, during the next readings
+    // of a history, and just before the file is next asked which revision it is at.
+    const during = { text: null as (() => unknown) | null, history: [] as Array<() => unknown>, revision: null as (() => unknown) | null, histories: 0 };
+    const once = async (what: "text" | "revision") => {
+      const now = during[what];
+      during[what] = null;
+      await now?.();
+    };
+    const watched: StorageAdapter = {
+      load: (tenant) => file.load(tenant),
+      commit: (tenant, request) => file.commit(tenant, request),
+      readRevision: async (tenant) => (await once("revision"), file.readRevision(tenant)),
+      readText: async (tenant, kind, id) => (await once("text"), file.readText(tenant, kind, id)),
+      readHistory: (tenant, kind, id) => file.readHistory(tenant, kind, id),
+      readHistoryPage: async (tenant, kind, id, page) => (during.histories++, await during.history.shift()?.(), file.readHistoryPage(tenant, kind, id, page)),
+      close: async () => {},
+    };
+    try {
+      const mine = await Engine.open({ storage: watched });
+      const other = await Engine.open({ storage: file });
+      const group = ((await mine.execute("create_task", "agent1", { title: "Group", description: "As it was" })) as { id: string }).id;
+      await other.reload();
+      let version = 1;
+      let texts = 0;
+      let members = 0;
+      /** The other engine rewrites the group's description and puts a task into it. */
+      const elsewhere = async () => {
+        version = ((await other.execute("update_task", "user", { id: group, version, description: `Rewritten ${++texts} times` })) as { version: number }).version;
+        await other.execute("create_task", "user", { title: `Put in by the other engine, ${++members}`, description: "d", parent: group });
+      };
+      const read = () => mine.execute("get", "agent1", { id: group, history: true }) as Promise<any>;
+      const whole = async (what: string) => {
+        const answer = await read();
+        assert.deepEqual(
+          [answer.description, answer.version, answer.links.contains.length, answer.history.filter((h: any) => h.action === "updated").length, answer.history.filter((h: any) => h.action === "link_added").length, answer.unchanged_since],
+          [`Rewritten ${texts} times`, version, members, texts, members, other.currentRevision],
+          what,
+        );
+        return answer;
+      };
+      const quiet = await read();
+      assert.deepEqual([quiet.description, quiet.version], ["As it was", 1]);
+      await elsewhere();
+      const first = await whole("a change stored before the read");
+      assert.ok(first.unchanged_since > quiet.unchanged_since);
+      during.text = elsewhere;
+      await whole("a change stored while the description is read");
+      during.history.push(elsewhere);
+      await whole("a change stored between the description and the history");
+      during.revision = elsewhere;
+      await whole("a change stored after the last of the reads");
+      during.history.push(elsewhere, elsewhere);
+      await whole("a change stored during the read, and another during the read that had its turn");
+
+      // Overtaken by the other engine every time: four readings, and then a refusal to ask again.
+      during.histories = 0;
+      during.history.push(elsewhere, elsewhere, elsewhere, elsewhere);
+      const refused = await read().then(
+        () => assert.fail("a read that was overtaken every time gave an answer"),
+        (error: unknown) => error as VigileError,
+      );
+      assert.ok(refused instanceof VigileError);
+      assert.deepEqual([refused.code, during.histories], ["too_many_requests", 4]);
+      assert.match(refused.message, /changed faster than it can be read/);
+      await whole("the item as it is, once it is left alone");
+      await other.close();
+    } finally {
+      await file.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 

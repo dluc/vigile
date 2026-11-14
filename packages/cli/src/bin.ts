@@ -66,7 +66,7 @@ function told(error: unknown): [code: string, message: string, actions: string[]
       `This request is over when the service's log has the line of its operation (it has none when log_level is quiet), or when the service has been stopped and started again, which ends whatever it had taken. A request that does not reach the service in full within ${LIMITS.requestMs / 1000} seconds is dropped, and leaves no such line.`,
     ];
     const look = [
-      "vigile get <id> --history shows an item with every change made to it; vigile list-tasks, vigile list-projects and vigile user list show what is there now.",
+      "vigile get <id> --history shows an item with the latest changes made to it; vigile list-tasks, vigile list-projects and vigile user list show what is there now.",
       "Sent again, a change is sure to be stored only once when it names its item by an ID together with a version: the ID of a task, of a user (USER-007) or of a project is never given twice, so of two such requests the later one to be carried out is refused.",
       "A request that names a user by its username acts on whoever has the name when it is carried out, and one that names no version on the item as it is then: a task is created once for each request, and a key is replaced by each reset, the last one carried out being the one in force. Do not send such a request again while an earlier one is outstanding: wait until it is over, or name the user by its ID, which vigile get <username> --kind user shows.",
     ];

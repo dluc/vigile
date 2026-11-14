@@ -1,3 +1,4 @@
+import { isToken } from "@vigile/core";
 import { SYMBOL, accent, bold, dim, fields, mark, note, pad, plural, table, type Ui } from "./ui.js";
 
 type Style = Parameters<Ui["paint"]>[0];
@@ -45,10 +46,22 @@ function taskTable(ui: Ui, tasks: any[], next: boolean): void {
   ]);
 }
 
+/**
+ * What is added to a command to read on, with the token the service gave for it. The token is printed for a
+ * person to paste into a command: it is printed only when it is a token as the service makes them, which is
+ * letters, digits, "-" and "_" beginning with a letter, and needs no quotes in any shell. An answer is looked
+ * at before it is printed (expected.ts); should anything else get here, it is not printed, and the answer is
+ * reported as one that cannot be read.
+ */
+function readOn(token: unknown): string {
+  if (!isToken(token)) throw new TypeError("what says where to read on is not a continuation token");
+  return `add --continuation ${token}`;
+}
+
 function more(ui: Ui, result: any): void {
-  if (!result.continuation) return;
+  if (result.continuation === undefined) return;
   ui.out();
-  ui.out(`  ${dim(ui, `There are more. Next page: add --continuation ${result.continuation}`)}`);
+  ui.out(`  ${dim(ui, `There are more. Next page: ${readOn(result.continuation)}`)}`);
 }
 
 function detail(ui: Ui, item: any): void {
@@ -72,14 +85,32 @@ function detail(ui: Ui, item: any): void {
   if (item.kind === "task") {
     pairs.push(["Type", item.type], ["Priority", String(item.priority)], ["Value", orDash(item.value)], ["Size", orDash(item.size)]);
     if (item.progress) pairs.push(["Progress", `${item.progress.finished} of ${plural(item.progress.total, "task")} inside finished`]);
-    pairs.push(["Assigned to", item.assigned_to.length ? item.assigned_to.join(", ") : "nobody"]);
+    pairs.push(["Assigned to", item.assigned_to.length ? `${item.assigned_to.join(", ")}${item.more?.assigned_to ? `, … (${item.more.assigned_to.total} in all)` : ""}` : "nobody"]);
   }
   if (item.kind === "project") pairs.push(["Progress", `${item.progress.finished} of ${plural(item.progress.total, "task")} finished`]);
   if (item.kind === "user") pairs.push(["Type", item.type], ["Built in", item.built_in ? "yes" : "no"]);
   if (item.completed_at) pairs.push(["Completed", item.completed_at]);
   pairs.push(["Created", `${item.created_at} by ${item.created_by}`], ["Updated", item.updated_at], ["Version", String(item.version)]);
+  // Since when nothing that is shown of the item has changed: what a further page is held against.
+  pairs.push(["Unchanged since", `revision ${item.unchanged_since}`]);
   fields(ui, pairs);
+  lists(ui, item);
+  ui.out();
+}
 
+/** What says that a list is not whole: how many of how many are shown, and how to read on. */
+function cut(ui: Ui, shown: number, part: any, of: string, next: string): string {
+  return dim(ui, `${of} ${shown} of ${part.total}. ${next}: ${readOn(part.continuation)}`);
+}
+
+/**
+ * The lists of an item: its links, its timeline, its history. Each holds at most a page; one that goes on says
+ * so, with the token that reads on. This is also all there is to show of a page that continues one of them.
+ */
+function lists(ui: Ui, item: any, continued = false): void {
+  const more = item.more ?? {};
+  // Of a timeline and a history the latest entries come first, and a page that continues holds the ones before.
+  const these = continued ? "A further" : "The latest";
   const links = Object.entries(item.links ?? {}) as Array<[string, any[]]>;
   if (links.length) {
     ui.out();
@@ -88,20 +119,38 @@ function detail(ui: Ui, item: any): void {
       for (const other of items) {
         ui.out(`  ${dim(ui, pad(relation, size))}  ${accent(ui, other.id)}  ${titled(other.title)}${other.status ? `  ${status(ui, other.status)}` : ""}${other.deleted ? dim(ui, "  (deleted)") : ""}`);
       }
+      const part = more.links && Object.hasOwn(more.links, relation) ? more.links[relation] : undefined;
+      if (part) ui.out(`  ${dim(ui, pad(relation, size))}  ${cut(ui, items.length, part, "These are", "Next page")}`);
     }
   }
   if (item.timeline?.length) {
     ui.out();
+    if (more.timeline) ui.out(`  ${cut(ui, item.timeline.length, more.timeline, these, "The ones before")}`);
     for (const entry of item.timeline) ui.out(`  ${dim(ui, entry.at)}  ${pad(status(ui, entry.status), 11)}  ${dim(ui, `by ${entry.by}`)}`);
   }
   if (item.history?.length) {
     ui.out();
     ui.out(`  ${dim(ui, "History")}`);
+    if (more.history) ui.out(`  ${cut(ui, item.history.length, more.history, these, "The ones before")}`);
     const size = Math.max(...item.history.map((h: any) => label(h.action).length));
     for (const entry of item.history) {
       ui.out(`  ${dim(ui, entry.at)}  ${pad(label(entry.action), size)}  ${dim(ui, `by ${entry.by}`)}  ${change(entry.data)}`.trimEnd());
     }
   }
+}
+
+/**
+ * One list of an item, read on with a continuation: the item's ID and version, and that list. The command line
+ * does not know what was printed before: it says since which revision of the plan nothing that is shown of the
+ * item has changed, for whoever reads it to hold against what the first page said. Pages that say two different
+ * revisions were read with a change in between, and do not belong together.
+ */
+function page(ui: Ui, item: any): void {
+  ui.out();
+  ui.out(`  ${accent(ui, item.id)}  ${dim(ui, `v${item.version}`)}`);
+  ui.out(`  ${dim(ui, `A page of the item as it is unchanged since revision ${item.unchanged_since}. If the first page said "Unchanged since" another revision, the item or one of its lists has changed in between: read it again from the start.`)}`);
+  lists(ui, item, true);
+  if (![...Object.values(item.links ?? {}), item.timeline ?? [], item.history ?? []].some((list: any) => list.length)) ui.out(`  ${dim(ui, "Nothing more.")}`);
   ui.out();
 }
 
@@ -140,7 +189,8 @@ export function printable<T>(value: T): T {
   return value;
 }
 
-type Printer = (ui: Ui, result: any, base: string) => void;
+/** Prints the answer of an operation. `input` is what the operation was called with: an answer is printed as the answer to that call. */
+type Printer = (ui: Ui, result: any, base: string, input: Record<string, unknown>) => void;
 
 const tasks =
   (next: boolean): Printer =>
@@ -175,8 +225,12 @@ const users: Printer = (ui, result) => {
     { title: "TYPE", value: (u) => u.type },
     { title: "", value: (u) => (u.built_in ? "built in" : ""), style: () => "dim" },
   ]);
+  more(ui, result);
   ui.out();
 };
+
+/** What `get` answers: the item in full, or, to a call with a continuation, the next page of one of its lists. */
+const read: Printer = (ui, result, _base, input) => (input.continuation === undefined ? detail(ui, result) : page(ui, result));
 
 const guide: Printer = (ui, result) => {
   ui.out();
@@ -244,7 +298,7 @@ const PRINTED: Record<string, Printer> = {
   set_task_status: item,
   list_tasks: tasks(false),
   list_next_tasks: tasks(true),
-  get: detail,
+  get: read,
   delete: deleted,
   restore: item,
   override_timestamp: item,
@@ -264,9 +318,9 @@ export const isPrinted = (operation: string): boolean => Object.hasOwn(PRINTED, 
  * Shows an operation's result the way a person reads it. `--json` skips this and prints the raw result.
  * An operation that has no way of its own is shown as it came.
  */
-export function renderResult(ui: Ui, operation: string, given: any, base: string): void {
+export function renderResult(ui: Ui, operation: string, given: any, base: string, input: Record<string, unknown> = {}): void {
   const result = printable(given);
-  if (Object.hasOwn(PRINTED, operation)) PRINTED[operation]!(ui, result, base);
+  if (Object.hasOwn(PRINTED, operation)) PRINTED[operation]!(ui, result, base, input);
   else ui.out(JSON.stringify(result, null, 2));
 }
 
@@ -284,9 +338,15 @@ export function renderError(ui: Ui, given: unknown): void {
     const safe: unknown = printable(given);
     const error: Record<string, unknown> = typeof safe === "object" && safe !== null && !Array.isArray(safe) ? (safe as Record<string, unknown>) : {};
     lines.push(`  ${ui.paint("red", SYMBOL.fail)} ${word(error.message) || "The service refused the request, and did not say why in a way this command line can read."}`);
-    for (const item of Array.isArray(error.blocking) ? error.blocking : []) {
+    const blocking: unknown[] = Array.isArray(error.blocking) ? error.blocking : [];
+    for (const item of blocking) {
       if (typeof item !== "object" || item === null) continue;
-      lines.push(`    ${dim(ui, SYMBOL.dot)} ${accent(ui, word(item.id))}  ${word(item.title)}${word(item.status) ? `  ${status(ui, word(item.status))}` : ""}`);
+      lines.push(`    ${dim(ui, SYMBOL.dot)} ${accent(ui, word((item as Record<string, unknown>).id))}  ${word((item as Record<string, unknown>).title)}${word((item as Record<string, unknown>).status) ? `  ${status(ui, word((item as Record<string, unknown>).status))}` : ""}`);
+    }
+    // A refusal names the first few of what is in the way, and says how many there are when those are not all.
+    const total: unknown = error.blocking_total;
+    if (typeof total === "number" && Number.isSafeInteger(total) && total > blocking.length) {
+      lines.push(`    ${dim(ui, `${SYMBOL.dot} and ${total - blocking.length} more`)}`);
     }
     for (const action of Array.isArray(error.actions) ? error.actions : []) if (typeof action === "string") lines.push(`    ${dim(ui, SYMBOL.fix)} ${action}`);
     if (error.current && typeof error.current === "object") {

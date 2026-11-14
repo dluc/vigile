@@ -5,6 +5,8 @@ import {
   assertTenantName,
   type CommitRequest,
   type Head,
+  type HistoryPage,
+  type HistoryPageRequest,
   type HistoryRecord,
   type LinkKey,
   type LinkRecord,
@@ -79,6 +81,10 @@ export class MemoryStorage implements StorageAdapter {
     return copy(t.head);
   }
 
+  async readRevision(tenant: string): Promise<number | null> {
+    return this.tenants.get(tenant)?.head.revision ?? null;
+  }
+
   async readText(tenant: string, kind: string, id: string): Promise<string | null> {
     return this.tenants.get(tenant)?.texts.get(objectKey(kind, id)) ?? null;
   }
@@ -86,6 +92,14 @@ export class MemoryStorage implements StorageAdapter {
   async readHistory(tenant: string, kind: string, id: string): Promise<HistoryRecord[]> {
     const t = this.tenants.get(tenant);
     return t ? copy(t.history.filter((h) => h.kind === kind && h.id === id)) : [];
+  }
+
+  async readHistoryPage(tenant: string, kind: string, id: string, page: HistoryPageRequest): Promise<HistoryPage> {
+    const stored = this.tenants.get(tenant)?.history.filter((h) => h.kind === kind && h.id === id) ?? [];
+    const all = page.sinceLast === undefined ? stored : stored.slice(Math.max(0, stored.findLastIndex((h) => h.action === page.sinceLast)));
+    const { before } = page;
+    const earlier = before ? all.filter((h) => h.revision < before.revision || (h.revision === before.revision && h.seq < before.seq)) : all;
+    return { records: copy(earlier.slice(Math.max(0, earlier.length - page.limit))), total: all.length };
   }
 
   async close(): Promise<void> {}

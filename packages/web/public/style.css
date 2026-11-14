@@ -473,6 +473,19 @@ button.link:hover { background: var(--idle-soft); }
 .link .name { overflow-wrap: anywhere; }
 .link .pill { justify-self: end; }
 .link .gone { text-decoration: line-through; color: var(--muted); }
+/* Under a list that is not shown whole: how much of it is shown, and the button that reads on. */
+.partial { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+.further { display: block; margin: 8px 0 0; padding: 6px 12px; min-height: 36px; border: 1px dashed var(--line); border-radius: var(--r-s); background: none; color: var(--muted); cursor: pointer; }
+.partial + .further { margin: 0 0 12px; }
+.further:hover { background: var(--idle-soft); }
+.further:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+/* A reading of the panel that failed. Beside an item that is shown, it stays in sight at the bottom of the panel wherever the panel is scrolled to. */
+.not-read { position: sticky; bottom: 12px; z-index: 1; display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin-top: 12px; padding: 10px 14px; border-radius: var(--r-m); background: var(--wait-soft); color: var(--text); border: 1px solid color-mix(in srgb, var(--wait) 40%, var(--line)); box-shadow: var(--shadow); font-size: 14px; }
+.not-read p { margin: 0; flex: 1 1 220px; overflow-wrap: anywhere; }
+.retry { padding: 6px 12px; min-height: 36px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--raised); color: var(--text); cursor: pointer; font-weight: 550; }
+.retry:hover { box-shadow: var(--shadow); }
+.retry:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.empty + .retry { display: block; margin: 12px auto 0; }
 .timeline { margin: 0; padding: 0 0 0 14px; list-style: none; display: grid; gap: 8px; font-size: 14px; border-left: 2px solid var(--line); }
 .timeline li { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; }
 .timeline time { color: var(--muted); font-variant-numeric: tabular-nums; }
