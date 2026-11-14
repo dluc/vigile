@@ -597,6 +597,12 @@ tasks their IDs. A group is simply a task that contains other tasks. Use a
 project for a product or a goal, and groups for the features, epics and releases
 inside it. Both report how many of the tasks inside them are finished.
 
+A completed group keeps its stored `done` status until it is explicitly
+reopened. Vigile therefore refuses to create or link new work inside a done
+group, including through a nested group, and tells you which container to
+reopen first. Reopening existing work or restoring deleted work can still
+reveal unfinished contents; that exceptional state is reported as a problem.
+
 ### What do "next" and "waiting" mean?
 
 A task is *next* when it is open and nothing unfinished is in front of it: it
