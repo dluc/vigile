@@ -1,0 +1,47 @@
+# Runs the whole suite, the browser tests included, on every pull request and on every push to main.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# The tests read the code and nothing else.
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the run for the older one pointless.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # v7.0.0 — pinned so a public pull request cannot make a moved tag run different code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # The version of pnpm is the one package.json names in "packageManager".
+      # v6.0.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
+
+      # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The browser tests are skipped when no browser is found, which would pass for the wrong reason: make sure
+      # the one the runner comes with is there.
+      - name: Check that there is a browser for the browser tests
+        run: test -x /usr/bin/google-chrome && /usr/bin/google-chrome --version
+
+      - name: Build and run every test
+        run: pnpm test
+        env:
+          VIGILE_TEST_BROWSER: /usr/bin/google-chrome

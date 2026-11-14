@@ -1,0 +1,511 @@
+import { CommitTooLargeError, FORMAT_VERSION, RevisionConflictError, type StorageAdapter } from "@vigile/storage";
+import { randomBytes } from "node:crypto";
+import { isLive, taskCalc, type Known } from "./calc.js";
+import { VigileError, forbidden, invalidInput, notFound, toErrorBody } from "./errors.js";
+import { Graph, type GraphView } from "./graph.js";
+import { userId } from "./ids.js";
+import { LINK_TYPES } from "./link-types.js";
+import { BUILT_IN_USERS, COUNTERS, RETIRED_PREFIX, areKeyMarks, keyMark, type Node, type Ref, type UserNode, type UserType } from "./model.js";
+import { shapeProblem } from "./shape.js";
+import { Plan, mayCall, type Clock, type HistoryItem, type KeyStore, type Mutation, type Operation, type ReadContext } from "./operation.js";
+import { OPERATIONS, findOperation } from "./operations/index.js";
+import { displayId, recordToLink, recordToNode, storageId, storedAs, toChanges } from "./records.js";
+
+export interface OperationLog {
+  operation: string;
+  caller: string;
+  kind: "read" | "write";
+  duration_ms: number;
+  /** `ok`, or the error code. */
+  result: string;
+  rule?: string;
+  /** What was thrown, when the result is `internal`: for the service's log, never for the caller. */
+  cause?: unknown;
+}
+
+export interface EngineOptions {
+  storage: StorageAdapter;
+  tenant?: string;
+  clock?: Clock;
+  keys?: KeyStore;
+  /** Called once per operation. Never receives titles, descriptions or other content. */
+  onOperation?: (entry: OperationLog) => void;
+}
+
+export interface EngineStatus {
+  tenant: string;
+  format: number;
+  revision: number;
+  counters: Record<string, number>;
+  /** How many prefixes are used up: those of projects that were deleted for good. */
+  retired_prefixes: number;
+  counts: Record<string, number>;
+  links: number;
+  loaded_at: string;
+}
+
+/** Keeps keys in memory only. For tests and for running without a config file. */
+export class MemoryKeyStore implements KeyStore {
+  readonly keys = new Map<string, string>();
+
+  create(): string {
+    return `vig_${randomBytes(24).toString("base64url")}`;
+  }
+
+  stored(username: string): string | undefined {
+    return this.keys.get(username);
+  }
+
+  async put(username: string, key: string): Promise<string | undefined | void> {
+    this.keys.set(username, key);
+  }
+
+  async revoke(username: string): Promise<void> {
+    this.keys.delete(username);
+  }
+}
+
+/** The user a caller was let in as: the name, and which user had it then. */
+export interface Caller {
+  username: string;
+  id: string;
+}
+
+/**
+ * One tenant's graph and the only way to change it. Reads are answered from memory. Writes go one at a time:
+ * check against memory, store as one all-or-nothing step tied to the tenant revision, then update memory.
+ */
+export class Engine {
+  private graph = new Graph();
+  /** What the last reading of the store found under IDs the store would not write. */
+  private misstored: string[] = [];
+  private revision = 0;
+  private format = FORMAT_VERSION;
+  private counters: Record<string, number> = {};
+  private loadedAt = "";
+  private stale = false;
+  private queue: Promise<unknown> = Promise.resolve();
+  private readonly listeners = new Set<(revision: number) => void>();
+
+  private readonly storage: StorageAdapter;
+  private readonly clock: Clock;
+  private readonly keys: KeyStore;
+  private readonly onOperation?: (entry: OperationLog) => void;
+  readonly tenant: string;
+
+  private constructor(options: EngineOptions) {
+    this.storage = options.storage;
+    this.tenant = options.tenant ?? "default";
+    this.clock = options.clock ?? { now: () => new Date() };
+    this.keys = options.keys ?? new MemoryKeyStore();
+    this.onOperation = options.onOperation;
+  }
+
+  static async open(options: EngineOptions): Promise<Engine> {
+    const engine = new Engine(options);
+    await engine.load();
+    return engine;
+  }
+
+  /**
+   * Calls the listener each time the plan has changed, with the new revision and nothing else: what changed
+   * is for the listener to read through an operation, as itself. Returns a function that stops the calls.
+   */
+  subscribe(listener: (revision: number) => void): () => void {
+    this.listeners.add(listener);
+    return () => void this.listeners.delete(listener);
+  }
+
+  /** The number that goes up by one with every stored change. */
+  get currentRevision(): number {
+    return this.revision;
+  }
+
+  private announce(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(this.revision);
+      } catch {
+        // A listener that fails must not undo or delay a change that is already stored.
+      }
+    }
+  }
+
+  /** The operations a user of this type may call. */
+  operationsFor(type: UserType): Operation[] {
+    return OPERATIONS.filter((o) => mayCall(o, type));
+  }
+
+  user(username: string): UserNode | undefined {
+    const user = this.graph.userByName(username);
+    return user && isLive(user) ? user : undefined;
+  }
+
+  /**
+   * Whether a key that is stored under a user's name is that user's own. A name can pass from one user to
+   * another, and a key left behind under it must not pass with it: only a key whose mark the user carries
+   * counts. Built-in users, and users from before marks were kept, carry none, and any key stored for them does.
+   */
+  keyIsTheirs(username: string, key: string): boolean {
+    const user = this.user(username);
+    if (!user) return false;
+    if (user.built_in || user.key_marks === undefined) return true;
+    // Marks that are not a list, in data that was damaged or written by hand, are the marks of no key: nothing
+    // counts for the user until a key is issued, which writes them anew.
+    return areKeyMarks(user.key_marks) && user.key_marks.includes(keyMark(key));
+  }
+
+  /**
+   * Runs one operation as the named user. Everything every interface does goes through here.
+   *
+   * An interface that let the caller in some time before, by a key, names the user it let in and not only the
+   * username: `{ username, id }`. Between the two the user may have been deleted for good and the name given
+   * to someone else, whom the key does not let in. The operation then runs only as the user that was let in,
+   * which is asked when it runs, after any wait for its turn.
+   */
+  async execute(name: string, as: string | Caller, input: unknown): Promise<unknown> {
+    const username = typeof as === "string" ? as : as.username;
+    const letInAs = typeof as === "string" ? undefined : as.id;
+    const started = performance.now();
+    const operation = findOperation(name);
+    let result = "ok";
+    let rule: string | undefined;
+    let cause: unknown;
+    try {
+      if (!operation) throw notFound(`There is no operation called "${name}".`);
+      return operation.kind === "read"
+        ? await this.run(operation, username, letInAs, input, null, this.clock.now().toISOString())
+        : await this.enqueue(() => this.write(operation, username, letInAs, input));
+    } catch (error) {
+      const body = toErrorBody(error);
+      result = body.code;
+      rule = body.rule;
+      if (error instanceof VigileError) {
+        // An internal error that was put into words keeps what set it off, for the log.
+        if (error.code === "internal") cause = (error as { cause?: unknown }).cause ?? error;
+        throw error;
+      }
+      cause = error;
+      throw Object.assign(new VigileError("internal", body.message), { cause: error });
+    } finally {
+      try {
+        this.onOperation?.({
+          // A name that is no operation's is something the caller wrote, and the log takes nothing a caller
+          // wrote as it came: it gets the start of the name, without what could end a line or pass for a word
+          // of the log.
+          operation: operation ? operation.name : name.slice(0, 64).replace(/[^\x21-\x7e]/g, "?"),
+          caller: username,
+          kind: operation?.kind ?? "read",
+          duration_ms: Math.round((performance.now() - started) * 100) / 100,
+          result,
+          ...(rule ? { rule } : {}),
+          ...(cause === undefined ? {} : { cause }),
+        });
+      } catch {
+        // The log could not be written. That is the log's trouble: the operation ends as it did.
+      }
+    }
+  }
+
+  private context(caller: UserNode, now: string): ReadContext {
+    return {
+      graph: this.graph,
+      caller,
+      now,
+      readText: (ref) => this.storage.readText(this.tenant, ref.kind, storageId(ref.kind, ref.id)),
+      readHistory: (ref) => this.history(ref),
+    };
+  }
+
+  /** Checks who is calling and what they sent, then runs the operation. `plan` is null for reads. */
+  private async run(operation: Operation, username: string, letInAs: string | undefined, input: unknown, plan: Plan | null, now: string): Promise<any> {
+    const caller = this.user(username);
+    if (!caller) throw new VigileError("unauthorized", `There is no user called "${username}".`);
+    if (letInAs !== undefined && caller.id !== letInAs) {
+      throw new VigileError("unauthorized", `The user "${username}" this request was let in as has been deleted since, and the name belongs to someone else now.`, {
+        actions: ["Send the request again with an API key of the present user."],
+      });
+    }
+    if (!mayCall(operation, caller.type)) {
+      throw forbidden(`${operation.name} is for ${(operation.access as readonly string[]).join(" or ")} users; you are connected as ${caller.username}, a${caller.type === "agent" ? "n" : ""} ${caller.type}.`);
+    }
+    const parsed = operation.input.safeParse(input ?? {});
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((issue: { path: PropertyKey[]; message: string }) => {
+        const where = issue.path.length ? issue.path.join(".") : "input";
+        return /received undefined$/.test(issue.message) ? `${where} is required.` : `${where}: ${issue.message.replace(/\.$/, "")}.`;
+      });
+      throw invalidInput(`The input for ${operation.name} is not valid. ${issues.join(" ")}`);
+    }
+    const ctx = this.context(caller, now);
+    return operation.kind === "read" ? operation.run(ctx, parsed.data) : operation.run({ ...ctx, plan: plan!, keys: this.keys }, parsed.data);
+  }
+
+  private async write(operation: Operation, username: string, letInAs: string | undefined, input: unknown): Promise<unknown> {
+    if (this.stale) await this.load();
+    for (let attempt = 0; ; attempt++) {
+      const now = this.clock.now().toISOString();
+      const plan = new Plan(this.counters);
+      const reply: () => unknown = await this.run(operation, username, letInAs, input, plan, now);
+      if (plan.mutations.length) {
+        const caller = this.user(username)!;
+        try {
+          const head = await this.storage.commit(this.tenant, {
+            expectedRevision: this.revision,
+            counters: plan.counters,
+            changes: toChanges(plan.mutations, now, caller.id),
+          });
+          this.apply(plan.mutations);
+          this.revision = head.revision;
+          this.counters = head.counters;
+          this.loadedAt = now;
+          this.announce();
+        } catch (error) {
+          if (error instanceof CommitTooLargeError) {
+            throw new VigileError("limit_exceeded", "This change touches too many records to store in one step.", {
+              actions: ["Split it into smaller changes, for example by removing links first."],
+            });
+          }
+          // Another writer got there first, or the outcome is unknown: memory may no longer match storage.
+          this.stale = true;
+          await this.load();
+          if (error instanceof RevisionConflictError && attempt === 0) continue;
+          throw error;
+        }
+      }
+      return reply();
+    }
+  }
+
+  private enqueue<T>(job: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(job, job);
+    this.queue = next.catch(() => {});
+    return next;
+  }
+
+  private apply(mutations: Mutation[]): void {
+    for (const m of mutations) {
+      switch (m.t) {
+        case "put":
+          this.graph.putNode(m.node);
+          break;
+        case "remove":
+          this.graph.removeNode(m.ref);
+          break;
+        case "link":
+          this.graph.addLink(m.link);
+          break;
+        case "unlink":
+          this.graph.removeLink(m.link);
+          break;
+        case "history":
+          break;
+      }
+    }
+  }
+
+  /** Rebuilds the in-memory graph from storage, creating the tenant with its built-in users on first use. */
+  private async load(): Promise<void> {
+    let snapshot = await this.storage.load(this.tenant);
+    if (!snapshot) {
+      await this.bootstrap();
+      snapshot = await this.storage.load(this.tenant);
+    }
+    if (!snapshot) throw new Error(`Tenant "${this.tenant}" could not be created`);
+    if (snapshot.head.format > FORMAT_VERSION) {
+      throw new Error(
+        `Tenant "${this.tenant}" uses data format ${snapshot.head.format}; this version of the service understands up to ${FORMAT_VERSION}. Upgrade the service.`,
+      );
+    }
+    const graph = new Graph();
+    for (const record of snapshot.objects) graph.putNode(recordToNode(record));
+    for (const record of snapshot.links) graph.addLink(recordToLink(record));
+    // What is stored under an ID the store would not write: seen only here, since the plan in memory knows each
+    // item by the one form of its ID.
+    const misstored = new Set<string>();
+    const stored = (what: string, kind: string, id: string): void => {
+      const written = storedAs(kind, id);
+      if (written !== id) misstored.add(`${what} is stored under "${id}", ${written === null ? "which is no ID of its kind" : `where the store writes "${written}": a change to it would miss what is stored`}`);
+    };
+    for (const record of snapshot.objects) stored(`The ${record.kind}`, record.kind, record.id);
+    for (const record of snapshot.links) {
+      stored(`The ${record.fromKind} at one end of a link`, record.fromKind, record.fromId);
+      stored(`The ${record.toKind} at one end of a link`, record.toKind, record.toId);
+    }
+    this.misstored = [...misstored];
+    const before = this.revision;
+    this.graph = graph;
+    this.revision = snapshot.head.revision;
+    this.format = snapshot.head.format;
+    this.counters = snapshot.head.counters;
+    this.loadedAt = this.clock.now().toISOString();
+    this.stale = false;
+    // Reading the plan again can bring in a change stored by another writer.
+    if (before !== 0 && before !== this.revision) this.announce();
+  }
+
+  private async bootstrap(): Promise<void> {
+    const now = this.clock.now().toISOString();
+    const plan = new Plan({});
+    const admin = userId(1);
+    for (const builtIn of BUILT_IN_USERS) {
+      const user: UserNode = {
+        kind: "user",
+        id: userId(plan.next("identity")),
+        username: builtIn.username,
+        type: builtIn.type,
+        built_in: true,
+        version: 1,
+        created_at: now,
+        created_by: admin,
+        updated_at: now,
+        deleted_at: null,
+      };
+      plan.put(user);
+      plan.history(user, "created", { username: user.username, type: user.type, built_in: true });
+    }
+    try {
+      await this.storage.commit(this.tenant, { expectedRevision: null, counters: plan.counters, changes: toChanges(plan.mutations, now, admin) });
+    } catch (error) {
+      if (!(error instanceof RevisionConflictError)) throw error;
+    }
+  }
+
+  /** Forgets the in-memory graph and reads it again from storage. */
+  async reload(): Promise<void> {
+    await this.enqueue(() => this.load());
+  }
+
+  status(): EngineStatus {
+    const counts: Record<string, number> = {};
+    for (const kind of ["project", "task", "user"] as const) counts[kind] = this.graph.all(kind).length;
+    // The prefixes that are used up are kept beside the counters. Here they are counted, not listed: there is
+    // one for every project that was ever deleted for good.
+    const names = Object.keys(this.counters);
+    const counters = Object.fromEntries(names.filter((name) => !name.startsWith(RETIRED_PREFIX)).map((name) => [name, this.counters[name]!]));
+    return {
+      tenant: this.tenant,
+      format: this.format,
+      revision: this.revision,
+      counters,
+      retired_prefixes: names.length - Object.keys(counters).length,
+      counts,
+      links: this.graph.links().length,
+      loaded_at: this.loadedAt,
+    };
+  }
+
+  async history(ref: Ref): Promise<HistoryItem[]> {
+    const all = await this.storage.readHistory(this.tenant, ref.kind, storageId(ref.kind, ref.id));
+    // An item's history begins where it was created. In data from before a prefix was given only once, a
+    // project can have the history of an earlier project of its name stored in front of its own.
+    const records = all.slice(Math.max(0, all.findLastIndex((r) => r.action === "created")));
+    return records.map((r) => {
+      const actor = this.graph.get("user", displayId("user", r.actor));
+      return { at: r.at, by: actor?.username ?? displayId("user", r.actor), action: r.action, data: r.data };
+    });
+  }
+
+  /** Looks for damage in the graph. An empty list means it is consistent. */
+  checkConsistency(): string[] {
+    return [...this.misstored, ...findInconsistencies(this.graph, this.counters)];
+  }
+
+  /** Waits for the write in flight, then stops accepting work. */
+  async close(): Promise<void> {
+    await this.queue;
+    await this.storage.close();
+  }
+}
+
+/**
+ * Loops among the links that hold work back, found by walking the whole graph once: each item is gone into
+ * once and left once, and a link that leads back to an item not yet left closes a loop. Asking for each link
+ * whether its end leads back to its start would walk the graph once for every link.
+ */
+function findLoops(graph: GraphView): string[] {
+  const key = (ref: Ref) => `${ref.kind}:${ref.id}`;
+  const holds = LINK_TYPES.filter((type) => type.effect !== "assigns").map((type) => type.type);
+  const next = (ref: Ref): Ref[] => holds.flatMap((type) => graph.out(ref, type).map((link) => link.to)).filter((to) => graph.node(to));
+  const left = new Set<string>();
+  const loops: string[] = [];
+  for (const start of [...graph.all("project"), ...graph.all("task")]) {
+    if (left.has(key(start))) continue;
+    // The way from the start to where the walk is now, with what is still to be tried from each step of it.
+    const way: Array<{ ref: Ref; rest: Ref[] }> = [{ ref: start, rest: next(start) }];
+    const onWay = new Set([key(start)]);
+    while (way.length) {
+      const step = way.at(-1)!;
+      const to = step.rest.pop();
+      if (!to) {
+        left.add(key(step.ref));
+        onWay.delete(key(step.ref));
+        way.pop();
+      } else if (onWay.has(key(to))) {
+        const from = way.findIndex((s) => key(s.ref) === key(to));
+        loops.push(`Loop: ${[...way.slice(from).map((s) => s.ref.id), to.id].join(" → ")}`);
+      } else if (!left.has(key(to))) {
+        onWay.add(key(to));
+        way.push({ ref: to, rest: next(to) });
+      }
+    }
+  }
+  return loops;
+}
+
+function findInconsistencies(graph: GraphView, counters: Record<string, number>): string[] {
+  const problems: string[] = [];
+  // Each item as a record first: the checks after this one read the fields of items, and so does every answer
+  // the service gives. An item whose fields are not what they have to be fails those, sooner or later.
+  for (const node of graph.everything()) {
+    const wrong = shapeProblem(node);
+    if (wrong) problems.push(`The ${(node as { kind: string }).kind} ${node.id} is damaged: ${wrong}`);
+  }
+  const known = new Map(LINK_TYPES.map((t) => [t.type, t]));
+  for (const link of graph.links()) {
+    const from = graph.node(link.from);
+    const to = graph.node(link.to);
+    const label = `${link.from.kind}:${link.from.id} ${link.type} ${link.to.kind}:${link.to.id}`;
+    if (!from || !to) problems.push(`Link points at an item that does not exist: ${label}`);
+    const type = known.get(link.type);
+    if (!type) problems.push(`Link has an unknown type: ${label}`);
+    else if (!type.from.includes(link.from.kind) || !type.to.includes(link.to.kind)) problems.push(`Link connects the wrong kinds: ${label}`);
+  }
+  problems.push(...findLoops(graph));
+  // What every list of tasks works out for each task, once for each here: whether it is waiting, who has it,
+  // when it was completed. A task that fails this fails every list it is in. Each of these looks no further
+  // than the task's own links; what a project adds up over all it holds is not part of this scan, which runs
+  // while the service answers others.
+  const learnt: Known = new Map();
+  for (const task of graph.all("task")) {
+    try {
+      taskCalc(graph, task, learnt);
+    } catch (error) {
+      problems.push(`The task ${task.id} cannot be worked out: ${(error as Error).message}`);
+    }
+  }
+  const highest = (nodes: Node[], number: (n: Node) => number) => nodes.reduce((max, n) => Math.max(max, number(n)), 0);
+  const trailing = (id: string) => Number(/(\d+)$/.exec(id)?.[1] ?? 0);
+  const checks: Array<[string, number]> = [
+    [COUNTERS.task, highest(graph.all("task"), (n) => trailing(n.id))],
+    [COUNTERS.identity, highest(graph.all("user"), (n) => trailing(n.id))],
+    [COUNTERS.project, highest(graph.all("project").filter((p) => p.prefix === null), (n) => trailing(n.id))],
+  ];
+  for (const [counter, max] of checks) {
+    if ((counters[counter] ?? 0) < max) problems.push(`The ${counter} counter is at ${counters[counter] ?? 0}, behind the highest ID in use (${max})`);
+  }
+  for (const builtIn of BUILT_IN_USERS) {
+    const user = graph.userByName(builtIn.username);
+    if (!user || !user.built_in) problems.push(`The built-in user "${builtIn.username}" is missing`);
+    // What a built-in user may do comes with it and cannot be given back by anyone: an admin that is no admin
+    // leaves nobody who can do what only an admin can.
+    else if (user.type !== builtIn.type) problems.push(`The built-in user "${builtIn.username}" is of type ${user.type}, not ${builtIn.type}`);
+  }
+  // A name is one user's: a caller is known by it.
+  const names = new Set<string>();
+  for (const user of graph.all("user")) {
+    if (names.has(user.username)) problems.push(`Two users are called "${user.username}"`);
+    names.add(user.username);
+  }
+  return [...new Set(problems)];
+}

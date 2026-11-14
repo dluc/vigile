@@ -1,0 +1,21 @@
+{
+  "name": "@vigile/http-api",
+  "version": "0.1.0",
+  "description": "JSON API over HTTP, one endpoint per operation",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@vigile/core": "workspace:*",
+    "zod": "^4.6.7"
+  }
+}

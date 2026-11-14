@@ -1,0 +1,21 @@
+{
+  "name": "@vigile/storage",
+  "version": "0.1.0",
+  "description": "Storage contract, shared contract tests and an in-memory adapter",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./contract-tests": {
+      "types": "./dist/contract-tests.d.ts",
+      "default": "./dist/contract-tests.js"
+    }
+  },
+  "files": [
+    "dist"
+  ]
+}

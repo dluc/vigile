@@ -1,0 +1,21 @@
+{
+  "name": "vigile",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "A planning-storage service for people and AI agents: a graph of projects and tasks with MCP, HTTP, CLI and web interfaces",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "packageManager": "pnpm@10.24.0",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "tsc -b && node --test \"packages/*/dist/**/*.test.js\""
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "@types/node": "^22.0.0"
+  }
+}

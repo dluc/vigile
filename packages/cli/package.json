@@ -1,0 +1,31 @@
+{
+  "name": "@vigile/cli",
+  "version": "0.1.0",
+  "description": "The vigile command",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@vigile/core": "workspace:*",
+    "@vigile/storage": "workspace:*",
+    "@vigile/storage-sqlite": "workspace:*",
+    "@vigile/config": "workspace:*",
+    "@vigile/http-api": "workspace:*",
+    "@vigile/mcp": "workspace:*",
+    "@vigile/web": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "bin": {
+    "vigile": "./dist/bin.js"
+  }
+}

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Vigile</title>
+<link rel="stylesheet" href="/style.css">
+<!-- The chosen theme, and light or dark, are applied before the page is drawn, so it never flashes in another one.
+     In a file of its own: the page lets no script run that is written into it, its own included. -->
+<script src="/boot.js"></script>
+</head>
+<body>
+<canvas id="lights" class="lights" aria-hidden="true" hidden></canvas>
+<!-- The small drawings that say what a setting is about: the board, a sound, how the page looks. -->
+<svg hidden>
+  <symbol id="icon-board" viewBox="0 0 16 16"><rect x="1.8" y="2.5" width="3.4" height="11" rx="1" fill="currentColor"/><rect x="6.3" y="2.5" width="3.4" height="7" rx="1" fill="currentColor"/><rect x="10.8" y="2.5" width="3.4" height="9.2" rx="1" fill="currentColor"/></symbol>
+  <symbol id="icon-sound" viewBox="0 0 16 16"><path d="M2 6.1h2.4l3.3-2.8v9.4L4.4 9.9H2z" fill="currentColor"/><path d="M10.2 5.7a3.3 3.3 0 0 1 0 4.6M12.3 3.8a6 6 0 0 1 0 8.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="icon-eye" viewBox="0 0 16 16"><path d="M1.4 8s2.5-4.4 6.6-4.4S14.6 8 14.6 8s-2.5 4.4-6.6 4.4S1.4 8 1.4 8z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="currentColor"/></symbol>
+</svg>
+<header class="top">
+  <div class="brand">
+    <span class="signal" aria-hidden="true"><i></i><i></i><i></i></span>
+    <h1>Vigile</h1>
+    <span id="instance" class="instance"></span>
+  </div>
+  <nav class="views" aria-label="Views">
+    <a id="view-board" href="#board">Board</a>
+    <a id="view-graph" href="#graph">Graph</a>
+  </nav>
+  <div class="meta">
+    <div class="status">
+      <button id="watching" class="watching" type="button" hidden></button>
+      <span id="you"></span>
+      <span id="sync" class="sync" role="status" aria-live="polite">Connecting…</span>
+    </div>
+    <div class="controls">
+      <button id="refresh" class="refresh" type="button" aria-label="Refresh now" title="Refresh now"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.75M13.3 2.2v3.3H10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button id="focus" class="round" type="button" aria-pressed="false" aria-label="Hide everything above the board" title="Hide everything above the board, to give it the whole window"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" class="when-off"><path d="M6 2H2v4M10 2h4v4M6 14H2v-4M10 14h4v-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" class="when-on"><path d="M2 6h4V2M14 6h-4V2M2 10h4v4M14 10h-4v4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div class="settings">
+        <button id="settings" class="round" type="button" aria-expanded="false" aria-controls="settings-menu" aria-label="Settings" title="Settings"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 1.2v2.2M8 12.6v2.2M1.2 8h2.2M12.6 8h2.2M3.19 3.19l1.56 1.56M11.25 11.25l1.56 1.56M3.19 12.81l1.56-1.56M11.25 4.75l1.56-1.56" fill="none" stroke="currentColor" stroke-width="2.3"/><circle cx="8" cy="8" r="3.9" fill="none" stroke="currentColor" stroke-width="2.4"/></svg></button>
+        <div id="settings-menu" class="settings-menu" role="group" aria-label="Settings" hidden>
+          <div class="setting-section" role="group" aria-label="Board">
+            <label class="switch" title="Show changes as they happen, without reloading"><svg class="setting-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><use href="#icon-board"/></svg><span>Auto-refresh</span><input id="auto" type="checkbox" role="switch"><span class="track" aria-hidden="true"></span></label>
+            <label id="column-scroll-choice" class="switch" title="Scroll each board column by itself and keep the rest of the page in view. Without it, the whole page scrolls."><svg class="setting-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><use href="#icon-board"/></svg><span>Scroll columns</span><input id="column-scroll" type="checkbox" role="switch"><span class="track" aria-hidden="true"></span></label>
+            <label class="switch" title="Show unfinished bugs, issues and incidents in a board column of their own, whatever their state"><svg class="setting-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><use href="#icon-board"/></svg><span>Show bugs column</span><input id="bugs-apart" type="checkbox" role="switch"><span class="track" aria-hidden="true"></span></label>
+          </div>
+          <div class="setting-section" role="group" aria-label="Sounds">
+            <label class="switch" title="Play a short sound each time a task is created, while this page is open"><svg class="setting-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><use href="#icon-sound"/></svg><span>Created</span><input id="sound-created" type="checkbox" role="switch" aria-label="Sound when a task is created"><span class="track" aria-hidden="true"></span></label>
+            <label class="switch" title="Play a short sound each time a task is started, while this page is open"><svg class="setting-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><use href="#icon-sound"/></svg><span>Started</span><input id="sound-started" type="checkbox" role="switch" aria-label="Sound when a task is started"><span class="track" aria-hidden="true"></span></label>
+            <label class="switch" title="Play a short sound each time a task is completed, while this page is open"><svg class="setting-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><use href="#icon-sound"/></svg><span>Completed</span><input id="sound" type="checkbox" role="switch" aria-label="Sound when a task is completed"><span class="track" aria-hidden="true"></span></label>
+          </div>
+          <div class="setting-section" role="group" aria-label="Looks">
+            <label class="switch" title="When a task changes state, its card floats to its new column. Without it, the card is only ringed for a moment."><svg class="setting-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><use href="#icon-eye"/></svg><span>Board animations</span><input id="motion" type="checkbox" role="switch"><span class="track" aria-hidden="true"></span></label>
+            <label class="switch" title="Slow coloured lights that move behind the board. They never flash."><svg class="setting-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><use href="#icon-eye"/></svg><span>Background</span><input id="lights-on" type="checkbox" role="switch" aria-label="Moving background"><span class="track" aria-hidden="true"></span></label>
+            <label class="switch" title="Light or dark as your system says. Switch it off to choose for yourself."><svg class="setting-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><use href="#icon-eye"/></svg><span>System light/dark</span><input id="scheme-system" type="checkbox" role="switch" aria-label="Light or dark as the system says"><span class="track" aria-hidden="true"></span></label>
+            <label id="scheme-dark-choice" class="switch" title="Dark when on, light when off" hidden><svg class="setting-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><use href="#icon-eye"/></svg><span>Dark mode</span><input id="scheme-dark" type="checkbox" role="switch"><span class="track" aria-hidden="true"></span></label>
+          </div>
+          <div class="setting">
+            <span id="themes-label">Theme</span>
+            <div id="themes" class="themes" role="group" aria-labelledby="themes-label">
+              <button type="button" class="theme" data-theme-choice="vigile" aria-pressed="false" title="Theme: Vigile"><span class="theme-icon vigile" aria-hidden="true"><i></i><i></i><i></i></span><span class="visually-hidden">Vigile theme</span></button>
+              <button type="button" class="theme" data-theme-choice="dado" aria-pressed="false" title="Theme: Dado"><span class="theme-icon dado" aria-hidden="true">D</span><span class="visually-hidden">Dado theme</span></button>
+              <button type="button" class="theme" data-theme-choice="jeev" aria-pressed="false" title="Theme: Jeev"><span class="theme-icon jeev" aria-hidden="true">J</span><span class="visually-hidden">Jeev theme</span></button>
+              <button type="button" class="theme" data-theme-choice="gito" aria-pressed="false" title="Theme: Gito"><span class="theme-icon gito" aria-hidden="true">G</span><span class="visually-hidden">Gito theme</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div id="notice" class="notice" hidden></div>
+
+<main id="main" hidden>
+  <section id="projects-section" class="projects-section" aria-labelledby="projects-heading">
+    <h2 id="projects-heading" class="section-title"><button id="projects-fold" class="fold" type="button" aria-expanded="true" aria-controls="projects" title="Fold the projects into one row, or unfold them"><span id="projects-chevron" aria-hidden="true">▾</span>Projects</button></h2>
+    <div id="projects" class="projects"></div>
+  </section>
+
+  <section aria-labelledby="board-heading">
+    <div class="board-head">
+      <h2 id="board-heading" class="section-title">Tasks</h2>
+      <span id="scope" class="scope"></span>
+    </div>
+    <div class="filters">
+      <label class="search"><span class="visually-hidden">Filter tasks</span>
+        <input id="filter" type="search" placeholder="Filter by ID, title or user" autocomplete="off">
+      </label>
+      <div id="summary" class="summary"></div>
+    </div>
+    <div id="board" class="board"></div>
+    <div id="graph-panel" hidden>
+      <div class="graph-tools">
+        <label class="switch" title="Show each group as one item, for the high-level view"><input id="collapse-groups" type="checkbox" role="switch" checked><span class="track" aria-hidden="true"></span><span>Collapse groups</span></label>
+        <label class="switch" title="Leave out tasks that are done or cancelled"><input id="hide-finished" type="checkbox" role="switch"><span class="track" aria-hidden="true"></span><span>Hide finished tasks</span></label>
+        <span class="zoom" role="group" aria-label="Zoom">
+          <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+          <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+          <button id="zoom-fit" class="wide" type="button">Fit</button>
+          <button id="graph-full" class="wide" type="button" aria-pressed="false" title="Give the graph the whole screen">Full screen</button>
+        </span>
+      </div>
+      <ul id="legend" class="legend" aria-label="What the colours and lines mean">
+        <li><i class="swatch trouble"></i>bug, issue or incident</li>
+        <li><i class="swatch problem"></i>has a problem</li>
+        <li><i class="line open"></i>must finish first</li>
+        <li><i class="line met"></i>already finished</li>
+        <li><i class="line contains"></i>also contains</li>
+      </ul>
+      <div class="graph-frame">
+        <p id="graph-status" class="graph-status" role="status" tabindex="-1" hidden><span id="graph-status-text"></span><button id="graph-draw" type="button" hidden></button></p>
+        <div id="graph-box" class="graph" role="img" aria-label="Graph of tasks and what they wait for. The board view lists the same tasks as text."></div>
+      </div>
+      <p id="graph-note" class="empty" hidden></p>
+    </div>
+    <p id="empty" class="empty" hidden></p>
+  </section>
+</main>
+
+<aside id="panel" class="panel" hidden aria-labelledby="panel-title">
+  <div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="panel-title" tabindex="-1">
+    <button id="close" class="close" type="button" aria-label="Close"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <div id="detail"></div>
+  </div>
+</aside>
+
+<div id="toasts" class="toasts" role="status" aria-live="polite">
+  <div id="toasts-head" class="toasts-head" hidden><span id="toasts-count"></span><button id="toasts-clear" type="button">Close all</button></div>
+</div>
+
+<script src="/app.js" type="module"></script>
+</body>
+</html>

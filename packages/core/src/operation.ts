@@ -1,0 +1,142 @@
+import type { z } from "zod";
+import type { GraphView } from "./graph.js";
+import { RETIRED_PREFIX, type CounterName, type Link, type Node, type Ref, type UserNode, type UserType } from "./model.js";
+
+export interface Clock {
+  now(): Date;
+}
+
+/**
+ * Where API keys live. The engine asks for keys to be made, stored and revoked; it never stores them itself.
+ * Of each key it keeps a mark with the user (see `keyMark`), so that a key counts only for the user it was
+ * made for and not for whoever has that user's name later.
+ */
+export interface KeyStore {
+  /** Makes a new key. Nothing is stored yet. */
+  create(): string;
+  /** The key that is stored for the user now, if there is one. */
+  stored(username: string): string | undefined;
+  /**
+   * Stores a key for the user, replacing any earlier one. Rejects when the key was not stored. Resolves to a
+   * warning, in words for the caller, when the key is stored and works but may not last, for example because
+   * the system could not confirm that it will survive a power cut.
+   */
+  put(username: string, key: string): Promise<string | undefined | void>;
+  revoke(username: string): Promise<void>;
+}
+
+export interface HistoryItem {
+  at: string;
+  by: string;
+  action: string;
+  data: Record<string, unknown>;
+}
+
+export interface ReadContext {
+  readonly graph: GraphView;
+  readonly caller: UserNode;
+  /** The time of this call, as an ISO timestamp. */
+  readonly now: string;
+  readText(ref: Ref): Promise<string | null>;
+  /** Every recorded change to an item, oldest first. */
+  readHistory(ref: Ref): Promise<HistoryItem[]>;
+}
+
+export type Mutation =
+  | { t: "put"; node: Node; text?: string }
+  | { t: "remove"; ref: Ref }
+  | { t: "link"; link: Link }
+  | { t: "unlink"; link: Pick<Link, "from" | "type" | "to"> }
+  | { t: "history"; ref: Ref; action: string; data: Record<string, unknown> };
+
+/** The changes one write operation wants. Nothing happens until the engine commits them as one step. */
+export class Plan {
+  readonly mutations: Mutation[] = [];
+  readonly counters: Record<string, number>;
+
+  constructor(counters: Record<string, number>) {
+    this.counters = { ...counters };
+  }
+
+  /** Takes the next number of a counter. The counter moves in the same step as the rest of the plan. */
+  next(counter: CounterName): number {
+    const value = (this.counters[counter] ?? 0) + 1;
+    this.counters[counter] = value;
+    return value;
+  }
+
+  /** Whether a prefix was that of a project that has since been deleted for good. */
+  isRetired(prefix: string): boolean {
+    return Object.hasOwn(this.counters, RETIRED_PREFIX + prefix);
+  }
+
+  /** Remembers a prefix as used up, in the same step as the rest of the plan. */
+  retire(prefix: string): void {
+    this.counters[RETIRED_PREFIX + prefix] = 1;
+  }
+
+  /** Stores a node. Pass `text` to set its long text; leave it out to keep the stored text. */
+  put(node: Node, text?: string): void {
+    this.mutations.push({ t: "put", node, text });
+  }
+
+  remove(ref: Ref): void {
+    this.mutations.push({ t: "remove", ref: { kind: ref.kind, id: ref.id } });
+  }
+
+  link(link: Link): void {
+    this.mutations.push({ t: "link", link });
+  }
+
+  unlink(link: Pick<Link, "from" | "type" | "to">): void {
+    this.mutations.push({ t: "unlink", link });
+  }
+
+  history(ref: Ref, action: string, data: Record<string, unknown> = {}): void {
+    this.mutations.push({ t: "history", ref: { kind: ref.kind, id: ref.id }, action, data });
+  }
+}
+
+export interface WriteContext extends ReadContext {
+  readonly plan: Plan;
+  readonly keys: KeyStore;
+}
+
+/** Who may call an operation: everyone, or only users of the listed types. */
+export type Access = "all" | readonly UserType[];
+
+interface OperationBase<S extends z.ZodObject> {
+  /** Lowercase letters and underscores. Each interface rewrites it to its own convention. */
+  name: string;
+  /** What an agent reads to decide whether and how to call the operation. */
+  description: string;
+  access: Access;
+  input: S;
+}
+
+export interface ReadOperation<S extends z.ZodObject = z.ZodObject, O = unknown> extends OperationBase<S> {
+  kind: "read";
+  run(ctx: ReadContext, input: z.output<S>): O | Promise<O>;
+}
+
+export interface WriteOperation<S extends z.ZodObject = z.ZodObject, O = unknown> extends OperationBase<S> {
+  kind: "write";
+  /**
+   * Checks the change against the graph and records it in `ctx.plan`. Returns a function that builds the reply;
+   * the engine calls it once the plan is stored, so it sees the graph as it is after the change.
+   */
+  run(ctx: WriteContext, input: z.output<S>): (() => O | Promise<O>) | Promise<() => O | Promise<O>>;
+}
+
+export type Operation = ReadOperation<any, any> | WriteOperation<any, any>;
+
+export function defineRead<S extends z.ZodObject, O>(operation: Omit<ReadOperation<S, O>, "kind">): ReadOperation<S, O> {
+  return { ...operation, kind: "read" };
+}
+
+export function defineWrite<S extends z.ZodObject, O>(operation: Omit<WriteOperation<S, O>, "kind">): WriteOperation<S, O> {
+  return { ...operation, kind: "write" };
+}
+
+export const mayCall = (operation: Pick<Operation, "access">, type: UserType): boolean =>
+  operation.access === "all" || operation.access.includes(type);

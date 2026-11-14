@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.tsbuildinfo
+# Written by a test for the time it runs; a run that was killed may leave it.
+packages/web/public/unreadable-for-the-test.css

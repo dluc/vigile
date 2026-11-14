@@ -1,0 +1,23 @@
+{
+  "name": "@vigile/web",
+  "version": "0.1.0",
+  "description": "The web status page",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "public"
+  ],
+  "dependencies": {
+    "cytoscape": "^3.35.0",
+    "cytoscape-elk": "^2.4.0",
+    "elkjs": "^0.12.1"
+  }
+}

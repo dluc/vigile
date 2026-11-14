@@ -1,0 +1,620 @@
+/*
+ * Themes. Each one sets the same list of colours, a font and how round corners are, for light and for dark.
+ * The rest of this file uses only these names, so a theme changes the whole page, and the graph, which reads
+ * its colours from here. The chosen theme is the data-theme attribute of the page; without one it is Vigile.
+ * Whether the page is light or dark is its data-scheme attribute, which the page sets from the system's setting
+ * or from the person's own choice.
+ */
+:root[data-scheme="light"] { color-scheme: light; }
+:root[data-scheme="dark"] { color-scheme: dark; }
+/* Vigile: the page's own colours. */
+:root {
+  --bg: #f6f5f1; --surface: #ffffff; --raised: #fbfaf7; --text: #1d1f23;
+  --muted: #666b75; --line: #e2dfd6; --go: #1a7a42; --go-soft: #e3f3e8;
+  --wait: #955f0e; --wait-soft: #fbf0d9; --stop: #c2362f; --stop-soft: #fbe6e4;
+  --busy: #2f62c4; --busy-soft: #e4ecfb; --review: #7a4fc4; --review-soft: #efe8fb;
+  --idle: #8a8f99; --idle-soft: #eeeeeb; --bug: #b0246e; --bug-soft: #fbe5f0;
+  --shadow: 0 1px 2px rgb(20 20 30 / 0.06), 0 4px 14px rgb(20 20 30 / 0.05);
+  --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --r-s: 8px; --r-m: 10px; --r-l: 14px; --r-pill: 999px;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+:root[data-scheme="dark"] {
+  --bg: #101214; --surface: #181b1f; --raised: #1e2227; --text: #e9eaec;
+  --muted: #9aa0aa; --line: #2b3037; --go: #4cc47f; --go-soft: #153324;
+  --wait: #e0a94a; --wait-soft: #3a2c12; --stop: #f0736c; --stop-soft: #40201e;
+  --busy: #7ea6f5; --busy-soft: #1b2a4a; --review: #b093f0; --review-soft: #2b2145;
+  --idle: #838993; --idle-soft: #24282d; --bug: #f28cbd; --bug-soft: #3d1a2c;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 18px rgb(0 0 0 / 0.3);
+}
+/* Dado: after Azure DevOps. Square corners, Segoe UI, its blue, and its greys. */
+:root[data-theme="dado"] {
+  --bg: #f8f8f8; --surface: #ffffff; --raised: #f3f2f1; --text: #1b1a19;
+  --muted: #605e5c; --line: #e1dfdd; --go: #107c10; --go-soft: #dff6dd;
+  --wait: #8a5a00; --wait-soft: #fff4ce; --stop: #a4262c; --stop-soft: #fde7e9;
+  --busy: #005a9e; --busy-soft: #deecf9; --review: #5c2d91; --review-soft: #efe6f7;
+  --idle: #8a8886; --idle-soft: #edebe9; --bug: #9b0089; --bug-soft: #fbe6f8;
+  --shadow: 0 1px 2px rgb(20 20 30 / 0.06), 0 4px 14px rgb(20 20 30 / 0.05);
+  --sans: "Segoe UI", "Segoe UI Web (West European)", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", sans-serif;
+  --r-s: 2px; --r-m: 3px; --r-l: 4px; --r-pill: 3px;
+}
+:root[data-scheme="dark"][data-theme="dado"] {
+  --bg: #201f1e; --surface: #292827; --raised: #323130; --text: #f3f2f1;
+  --muted: #b3b0ad; --line: #484644; --go: #6ccb5f; --go-soft: #1e3b1d;
+  --wait: #f2c661; --wait-soft: #433519; --stop: #f1707b; --stop-soft: #4a2528;
+  --busy: #6cb8f6; --busy-soft: #0f3257; --review: #c3a0e8; --review-soft: #3a2a57;
+  --idle: #979593; --idle-soft: #3b3a39; --bug: #ee7fe2; --bug-soft: #4d1d47;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 18px rgb(0 0 0 / 0.3);
+}
+/* Jeev: after Atlassian Jira. Its navy text, blue, and lozenge-like labels. */
+:root[data-theme="jeev"] {
+  --bg: #ffffff; --surface: #ffffff; --raised: #f1f2f4; --text: #172b4d;
+  --muted: #626f86; --line: #dcdfe4; --go: #1b7f55; --go-soft: #dcfff1;
+  --wait: #7f5f01; --wait-soft: #fff7d6; --stop: #c9372c; --stop-soft: #ffeceb;
+  --busy: #0c66e4; --busy-soft: #e9f2ff; --review: #6e5dc6; --review-soft: #f3f0ff;
+  --idle: #758195; --idle-soft: #f1f2f4; --bug: #ae4787; --bug-soft: #ffecf8;
+  --shadow: 0 1px 2px rgb(20 20 30 / 0.06), 0 4px 14px rgb(20 20 30 / 0.05);
+  --sans: "Atlassian Sans", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Ubuntu, "Helvetica Neue", sans-serif;
+  --r-s: 3px; --r-m: 3px; --r-l: 6px; --r-pill: 3px;
+}
+:root[data-scheme="dark"][data-theme="jeev"] {
+  --bg: #161a1d; --surface: #1d2125; --raised: #22272b; --text: #c7d1db;
+  --muted: #9fadbc; --line: #38414a; --go: #4bce97; --go-soft: #164b35;
+  --wait: #f5cd47; --wait-soft: #533f04; --stop: #f87168; --stop-soft: #5d1f1a;
+  --busy: #579dff; --busy-soft: #09326c; --review: #9f8fef; --review-soft: #352c63;
+  --idle: #8c9bab; --idle-soft: #2c333a; --bug: #e774bb; --bug-soft: #50253f;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 18px rgb(0 0 0 / 0.3);
+}
+/* Gito: after GitHub. Its white page, grey columns, and its green, blue and purple. */
+:root[data-theme="gito"] {
+  --bg: #ffffff; --surface: #ffffff; --raised: #f6f8fa; --text: #1f2328;
+  --muted: #59636e; --line: #d1d9e0; --go: #1a7f37; --go-soft: #dafbe1;
+  --wait: #9a6700; --wait-soft: #fff8c5; --stop: #d1242f; --stop-soft: #ffebe9;
+  --busy: #0969da; --busy-soft: #ddf4ff; --review: #8250df; --review-soft: #fbefff;
+  --idle: #818b98; --idle-soft: #eff2f5; --bug: #bf3989; --bug-soft: #ffeff7;
+  --shadow: 0 1px 2px rgb(20 20 30 / 0.06), 0 4px 14px rgb(20 20 30 / 0.05);
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  --r-s: 6px; --r-m: 6px; --r-l: 6px; --r-pill: 2em;
+}
+:root[data-scheme="dark"][data-theme="gito"] {
+  --bg: #0d1117; --surface: #151b23; --raised: #010409; --text: #f0f6fc;
+  --muted: #9198a1; --line: #3d444d; --go: #3fb950; --go-soft: #12261e;
+  --wait: #d29922; --wait-soft: #272115; --stop: #f85149; --stop-soft: #25171c;
+  --busy: #4493f8; --busy-soft: #121d2f; --review: #ab7df8; --review-soft: #231f39;
+  --idle: #9198a1; --idle-soft: #212830; --bug: #db61a2; --bug-soft: #2a1a26;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 18px rgb(0 0 0 / 0.3);
+}
+
+* { box-sizing: border-box; }
+/* The hidden attribute must win over any rule that sets display, such as a grid or flex layout. */
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+button, input { font: inherit; color: inherit; }
+/*
+ * The moving background sits behind everything, dimmed. While it runs, the page's quiet text is drawn stronger,
+ * half way to the main text: measured over the lights' whole course, both then keep a contrast of 4.5 to 1 with
+ * the brightest and the darkest spot behind them, in every theme, light and dark.
+ */
+.lights { position: fixed; inset: 0; z-index: -1; width: 100%; height: 100%; opacity: 0.4; pointer-events: none; }
+:root { --muted-plain: var(--muted); }
+body.lit { --muted: color-mix(in srgb, var(--muted-plain) 50%, var(--text)); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+.top {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 10px clamp(14px, 3vw, 28px);
+  /* A theme may give the header a bar of its own colour; without one it is the page's, seen through. */
+  background: var(--top-bg, color-mix(in srgb, var(--bg) 88%, transparent));
+  color: var(--top-text, inherit);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--top-line, var(--line));
+}
+:root .top :focus-visible { outline-color: var(--top-focus, var(--busy)); }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.brand .instance { max-width: min(100%, 28ch); }
+.brand h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+.signal { display: inline-flex; gap: 3px; padding: 4px 5px; border-radius: 999px; background: var(--top-signal, var(--text)); }
+.signal i { width: 7px; height: 7px; border-radius: 50%; }
+.signal i:nth-child(1) { background: #f0736c; }
+.signal i:nth-child(2) { background: #f2c14e; }
+.signal i:nth-child(3) { background: #4cc47f; }
+.instance { font: 12px var(--mono); color: var(--top-muted, var(--muted)); padding: 2px 8px; border: 1px solid var(--top-line, var(--line)); border-radius: var(--r-pill); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instance:empty { display: none; }
+.views { display: inline-flex; gap: 2px; padding: 3px; border-radius: var(--r-pill); background: var(--top-well, var(--idle-soft)); margin-right: auto; }
+.views a { padding: 4px 14px; min-height: 28px; display: inline-flex; align-items: center; border-radius: var(--r-pill); color: var(--top-muted, var(--muted)); font-size: 13px; font-weight: 600; text-decoration: none; }
+.views a:hover { color: var(--top-text, var(--text)); }
+.views a[aria-current="page"] { background: var(--top-chip, var(--surface)); color: var(--top-chip-text, var(--text)); box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
+.views a:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; color: var(--top-muted, var(--muted)); }
+.status, .controls { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; font-size: 13px; color: var(--top-muted, var(--muted)); min-width: 0; }
+.controls { flex-wrap: nowrap; }
+/*
+ * The page's settings are behind one button. The menu sits on the page's own surface, so inside it the header's
+ * own colours, which a theme may set for its bar, are put aside.
+ */
+.settings { position: relative; display: flex; }
+.settings-menu {
+  --top-text: initial; --top-muted: initial; --top-line: initial; --top-well: initial; --top-chip: initial; --top-chip-text: initial;
+  --top-button: initial; --top-pressed: initial; --top-warn: initial; --top-focus: initial;
+  position: absolute; top: calc(100% + 10px); right: 0; z-index: 6;
+  display: grid; gap: 0; width: 250px; max-width: calc(100vw - 28px); padding: 10px 14px;
+  border: 1px solid var(--line); border-radius: var(--r-m); background: var(--surface); color: var(--text);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.22); font-size: 14px; text-align: left;
+  overflow-y: auto; overscroll-behavior: contain;
+}
+/* The menu is in sections divided by a line. A row is a small drawing of what it is about, its name, and its switch at the end. */
+.setting-section { display: grid; gap: 2px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.setting-section:first-child { padding-top: 0; }
+.settings-menu .switch { display: flex; justify-content: flex-start; gap: 10px; min-height: 34px; }
+.settings-menu .switch > span:not(.track) { flex: 1; }
+.setting-icon { flex: none; color: var(--muted); }
+.setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding-top: 8px; }
+.settings-menu .theme { width: 30px; height: 30px; }
+#settings[aria-expanded="true"] { background: var(--top-text, var(--text)); border-color: var(--top-text, var(--text)); color: var(--top-pressed, var(--bg)); }
+/* The theme picker: one small emblem for each theme, drawn in that theme's own colours whichever theme is on. */
+.themes { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border-radius: var(--r-pill); background: var(--top-well, var(--idle-soft)); }
+.theme { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--r-pill); background: none; cursor: pointer; }
+.theme[aria-pressed="true"] { background: var(--top-chip, var(--surface)); box-shadow: 0 1px 2px rgb(0 0 0 / 0.2); }
+.theme:focus-visible, .round:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.theme-icon { display: grid; place-items: center; width: 16px; height: 16px; font: 700 10px/1 system-ui, sans-serif; color: #fff; box-shadow: 0 0 0 1px rgb(255 255 255 / 0.25); }
+.theme-icon.vigile { grid-auto-flow: column; justify-content: center; gap: 1.5px; border-radius: 999px; background: #1d1f23; }
+.theme-icon.vigile i { width: 3px; height: 3px; border-radius: 50%; }
+.theme-icon.vigile i:nth-child(1) { background: #f0736c; }
+.theme-icon.vigile i:nth-child(2) { background: #f2c14e; }
+.theme-icon.vigile i:nth-child(3) { background: #4cc47f; }
+.theme-icon.dado { border-radius: 2px; background: #0078d4; }
+.theme-icon.jeev { border-radius: 4px; background: linear-gradient(135deg, #2684ff, #0052cc); }
+.theme-icon.gito { border-radius: 50%; background: #1f2328; }
+/* A round button that holds one small drawing, centred by the layout and not by a font. */
+.round, .refresh, .close { display: grid; place-items: center; padding: 0; }
+.round { width: 30px; height: 30px; border: 1px solid var(--top-line, var(--line)); border-radius: 50%; background: var(--top-button, var(--surface)); color: var(--top-text, inherit); cursor: pointer; }
+.round:hover { box-shadow: var(--shadow); }
+.round[aria-pressed="true"] { background: var(--top-text, var(--text)); border-color: var(--top-text, var(--text)); color: var(--top-pressed, var(--bg)); }
+.round .when-on, .round[aria-pressed="true"] .when-off { display: none; }
+.round[aria-pressed="true"] .when-on { display: block; }
+#you { overflow-wrap: anywhere; }
+.sync::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--go); vertical-align: 1px; }
+.sync.stale::before { background: var(--stop); }
+.sync.old { color: var(--top-warn, var(--wait)); }
+.sync.live::before { animation: pulse 2.4s ease-in-out infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--go) 30%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .sync.live::before { animation: none; } }
+.sync.old::before { background: var(--wait); }
+.refresh.nudge { border-color: var(--top-warn, var(--wait)); color: var(--top-warn, var(--wait)); }
+
+.refresh { width: 30px; height: 30px; border: 1px solid var(--top-line, var(--line)); border-radius: 50%; background: var(--top-button, var(--surface)); color: var(--top-text, inherit); cursor: pointer; transition: transform 0.15s; }
+.refresh:hover { box-shadow: var(--shadow); }
+.refresh:active { transform: scale(0.94); }
+.switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; white-space: nowrap; min-height: 30px; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch .track { position: relative; width: 34px; height: 20px; border-radius: 999px; background: var(--idle); transition: background 0.15s; flex: none; }
+.switch .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 0.3); transition: transform 0.15s; }
+.switch input:checked + .track { background: var(--go); }
+.switch input:checked + .track::after { transform: translateX(14px); }
+.switch input:focus-visible + .track, .refresh:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .switch .track, .switch .track::after, .refresh { transition: none; } }
+
+.notice { margin: 12px clamp(14px, 3vw, 28px) 0; padding: 10px 14px; border-radius: var(--r-m); background: var(--wait-soft); color: var(--text); border: 1px solid color-mix(in srgb, var(--wait) 40%, transparent); font-size: 14px; }
+.notice form { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.notice input { flex: 1; min-width: 200px; padding: 6px 10px; border-radius: var(--r-s); border: 1px solid var(--line); background: var(--surface); }
+.notice button { padding: 6px 14px; border-radius: var(--r-s); border: 0; background: var(--text); color: var(--bg); cursor: pointer; }
+
+main { padding: 18px clamp(14px, 3vw, 28px) 60px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; }
+.fold { display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px 2px 0; border: 0; background: none; font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; cursor: pointer; border-radius: var(--r-s); }
+.fold:hover { color: var(--text); }
+.fold:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+/* Folded, the projects are one row of small items next to the heading. */
+.projects-section.folded { display: flex; align-items: center; gap: 6px 12px; min-width: 0; }
+.projects-section.folded .section-title { margin: 0; flex: none; }
+.projects-section.folded .projects { display: flex; gap: 8px; flex: 1; min-width: 0; overflow-x: auto; padding: 3px; margin: -3px; scrollbar-width: thin; }
+.projects-section.folded .projects .empty { padding: 4px 10px; flex: none; }
+.project-chip { display: inline-flex; align-items: center; gap: 8px; flex: none; max-width: 100%; padding: 4px 10px; min-height: 30px; border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--surface); cursor: pointer; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.project-chip:hover { box-shadow: var(--shadow); }
+.project-chip:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.project-chip.selected { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
+.project-chip .project-id { color: var(--text); }
+.project-chip .bar { width: 44px; flex: none; }
+.project-chip .warn { color: var(--stop); }
+.section-title { margin: 0 0 10px; font-size: 12px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+
+.projects { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(230px, 100%), 1fr)); gap: 10px; }
+.project {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 12px 14px; min-width: 0;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.project:hover { box-shadow: var(--shadow); }
+.project.selected { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
+.project-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; border-radius: var(--r-s); }
+.project-main:active { transform: scale(0.99); }
+.tag-button { border: 0; cursor: pointer; padding: 2px 8px; min-height: 24px; font: inherit; font-size: 12px; color: var(--muted); }
+.tag-button.warn { color: var(--stop); }
+.project-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.project-id { font: 600 13px var(--mono); white-space: nowrap; }
+.project-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bar { height: 5px; border-radius: 999px; background: var(--idle-soft); overflow: hidden; }
+.bar i { display: block; height: 100%; border-radius: 999px; background: var(--go); transition: width 0.4s ease; }
+
+.pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: var(--r-pill); font-size: 12px; font-weight: 600; white-space: nowrap; background: var(--idle-soft); color: var(--muted); }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.go { background: var(--go-soft); color: var(--go); }
+.pill.wait { background: var(--wait-soft); color: var(--wait); }
+.pill.stop { background: var(--stop-soft); color: var(--stop); }
+.pill.busy { background: var(--busy-soft); color: var(--busy); }
+.pill.review { background: var(--review-soft); color: var(--review); }
+
+.board-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.board-head .section-title { margin: 0; }
+.scope { flex: 1 1 8ch; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.scope-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope .tag-button { flex: none; background: var(--idle-soft); border-radius: var(--r-s); white-space: nowrap; }
+.filters { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 18px; margin-bottom: 14px; font-size: 13px; color: var(--muted); }
+.search input { width: min(280px, 60vw); padding: 6px 12px; border-radius: var(--r-pill); border: 1px solid var(--line); background: var(--surface); }
+.search input:focus-visible, .project-main:focus-visible, .tag-button:focus-visible, .link:focus-visible, .card:focus-visible, .close:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+
+.summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; min-width: 0; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.summary b { color: var(--text); font-weight: 650; }
+
+/*
+ * Columns always sit side by side in one row. When they do not fit, the row scrolls sideways; it never wraps.
+ * A column is never wider than a card reads well at, so on a wide window the columns keep to the left
+ * and are not stretched across it.
+ */
+.board { --column-widest: 380px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(270px, var(--column-widest)); justify-content: start; gap: 14px; align-items: start; overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity; }
+.board > .column { scroll-snap-align: start; }
+/* When the window is wider than the columns need, Done takes the spare room and lays its cards out side by side. */
+.board > .column.wide { grid-column: span var(--span); }
+.column.wide .cards { grid-template-columns: repeat(var(--span), minmax(0, 1fr)); }
+.column { background: var(--raised); border: 1px solid var(--line); border-radius: var(--r-l); padding: 10px; min-width: 0; }
+.column-head { display: flex; align-items: center; gap: 8px; padding: 2px 4px 10px; font-weight: 650; font-size: 13px; }
+.column-head .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--idle); }
+.column-head .count { margin-left: auto; color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.column[data-tone="go"] .column-head .dot { background: var(--go); }
+.column[data-tone="wait"] .column-head .dot { background: var(--wait); }
+.column[data-tone="stop"] .column-head .dot { background: var(--stop); }
+.column[data-tone="busy"] .column-head .dot { background: var(--busy); }
+.column[data-tone="review"] .column-head .dot { background: var(--review); }
+.column[data-tone="bug"] .column-head .dot { background: var(--bug); }
+.column[data-tone="bug"] { border-color: color-mix(in srgb, var(--bug) 45%, var(--line)); background: color-mix(in srgb, var(--bug-soft) 55%, var(--raised)); }
+.column-note { margin: -8px 4px 10px 21px; color: var(--muted); font-size: 12px; }
+.lane { display: flex; align-items: center; gap: 7px; margin: 4px 4px 0; font-size: 12px; font-weight: 650; color: var(--muted); }
+.lane:not(:first-child) { margin-top: 8px; }
+.lane .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--idle); }
+.lane .count { margin-left: auto; font-weight: 500; font-variant-numeric: tabular-nums; }
+.lane[data-tone="go"] .dot { background: var(--go); }
+.lane[data-tone="wait"] .dot { background: var(--wait); }
+.lane[data-tone="busy"] .dot { background: var(--busy); }
+.lane[data-tone="review"] .dot { background: var(--review); }
+/*
+ * With "Scroll columns" the board fills the rest of the window and each column scrolls by itself, so the
+ * header, the projects, the column titles and the sideways scrollbar stay in view. Not on a phone, where
+ * columns are stacked and the page scrolls.
+ */
+@media (min-width: 641px) {
+  body.column-scroll main { padding-bottom: 12px; }
+  body.column-scroll .board { height: var(--board-height, auto); grid-template-rows: minmax(0, 1fr); overflow-y: hidden; }
+  body.column-scroll .board > .column { display: flex; flex-direction: column; max-height: 100%; min-height: 0; }
+  /* The room around the cards keeps their focus ring and shadow from being cut off at the edge of the scrolling area. */
+  body.column-scroll .cards { overflow-y: auto; min-height: 0; margin: -4px; padding: 4px; overscroll-behavior: contain; scrollbar-width: thin; }
+  body.column-scroll .more { flex: none; }
+}
+@media (max-width: 640px) {
+  #column-scroll-choice { display: none; }
+}
+.cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.nothing { margin: 0; padding: 2px 4px 4px; color: var(--muted); font-size: 13px; }
+.more { margin-top: 8px; width: 100%; min-height: 36px; padding: 6px; border: 1px dashed var(--line); border-radius: var(--r-m); background: none; color: var(--muted); cursor: pointer; }
+
+.card {
+  /*
+   * The top line, the title, the pills. In a card stretched to the height of its neighbour the title's row takes
+   * the spare room, so the pills stay at the bottom, on one line with the neighbour's, at their own height.
+   */
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr auto; gap: 6px; width: 100%; min-width: 0; text-align: left; padding: 10px 12px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m); cursor: pointer;
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+.card:hover { box-shadow: var(--shadow); }
+/* A card that a refresh just changed is ringed for a moment; one on its way to another column floats above the page. */
+.card.changed { animation: changed 6s ease-out both; }
+@keyframes changed {
+  0%, 30% { box-shadow: 0 0 0 3px var(--busy), 0 0 0 8px color-mix(in srgb, var(--busy) 22%, transparent); }
+  100% { box-shadow: 0 0 0 3px transparent, 0 0 0 8px transparent; }
+}
+/* A card on its way floats over the board and the header, and under the panel of an open item, which it must not cover. */
+.card-ghost { position: fixed; z-index: 9; margin: 0; pointer-events: none; }
+.card:active { transform: scale(0.99); }
+.card.problem { border-color: color-mix(in srgb, var(--stop) 55%, var(--line)); }
+.card.trouble { border-left: 4px solid var(--bug); }
+.card.is-group { background: linear-gradient(var(--surface), var(--surface)) padding-box, var(--surface); box-shadow: 3px 3px 0 -1px var(--surface), 3px 3px 0 0 var(--line); }
+.type { padding: 0 6px; border-radius: var(--r-s); background: var(--bug-soft); color: var(--bug); font: 650 11px var(--sans); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+.card-top { display: flex; align-items: center; gap: 8px; }
+.id { font: 600 12px var(--mono); color: var(--muted); white-space: nowrap; }
+.priority { margin-left: auto; font: 600 11px var(--mono); padding: 0 6px; border-radius: var(--r-s); background: var(--idle-soft); color: var(--muted); }
+.priority.high { background: var(--stop-soft); color: var(--stop); }
+.card-title { align-self: start; font-weight: 550; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
+.tags { display: flex; flex-wrap: wrap; align-items: flex-start; align-self: end; gap: 4px 6px; font-size: 12px; color: var(--muted); }
+.tag { padding: 0 6px; border-radius: var(--r-s); background: var(--idle-soft); max-width: 100%; overflow-wrap: anywhere; }
+.tag.watched { background: var(--review-soft); color: var(--review); }
+.tag.who { background: var(--busy-soft); color: var(--busy); }
+.tag.waiting { background: var(--wait-soft); color: var(--wait); }
+.tag.warn { background: var(--stop-soft); color: var(--stop); }
+.tag.trouble { background: var(--bug-soft); color: var(--bug); }
+.tag.group { background: var(--go-soft); color: var(--go); font-variant-numeric: tabular-nums; }
+
+.graph-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
+.zoom { display: inline-flex; align-items: center; gap: 4px; }
+.zoom button { width: 28px; height: 28px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--surface); cursor: pointer; font-size: 16px; line-height: 1; }
+.zoom button:disabled { opacity: 0.4; cursor: default; }
+.zoom button.wide { width: auto; padding: 0 10px; font-size: 13px; }
+.zoom button[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
+
+/*
+ * Focus: the header's toggle folds away everything above the board or the graph. While a project, a group or a
+ * filter narrows what is shown, the line that says so stays.
+ */
+body.focus #projects-section, body.focus .filters, body.focus:not(.scoped) .board-head { display: none; }
+body.focus main { padding-top: 10px; gap: 8px; }
+body.focus .board-head { margin-bottom: 6px; }
+/* In the graph view the page ends just under the graph's box, which reaches the bottom of the window. */
+body.graph-view main { padding-bottom: 12px; }
+/* Full screen: only the graph, its controls and its legend. */
+body.graph-full .top, body.graph-full #projects-section, body.graph-full .board-head, body.graph-full .filters { display: none; }
+body.graph-full main { padding: 10px 12px 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 10px; padding: 0; list-style: none; font-size: 13px; color: var(--muted); }
+.legend li { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend .line { display: inline-block; width: 22px; height: 0; border-top: 2px solid var(--idle); }
+.legend .line.open { border-color: var(--wait); }
+.legend .line.met { border-color: var(--go); opacity: 0.6; }
+.legend .line.contains { border-top-style: dashed; }
+.legend .swatch { display: inline-block; width: 18px; height: 13px; border-radius: 3px; border: 2px solid var(--line); background: var(--surface); }
+.legend .swatch.problem { border: 2px dashed var(--stop); }
+.legend .swatch.trouble { border: 3px double var(--bug); background: var(--bug-soft); }
+
+/*
+ * What the page says about a large graph: that it waits to be asked for, is being worked out, or is out of date.
+ * The line lies over a corner of the graph's box and takes no room from it, so the graph is not moved by it.
+ */
+.graph-frame { position: relative; }
+.graph-status { position: absolute; z-index: 1; top: 10px; left: 10px; max-width: calc(100% - 20px); display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-m); background: var(--surface); box-shadow: var(--shadow); font-size: 13px; }
+.graph-status button { flex: none; min-height: 28px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--raised); cursor: pointer; }
+.graph-status button:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.graph { position: relative; height: min(72vh, 880px); min-height: 360px; border: 1px solid var(--line); border-radius: var(--r-l); background: var(--raised); overflow: hidden; }
+
+.empty { margin: 0; color: var(--muted); padding: 22px 16px; text-align: center; border: 1px dashed var(--line); border-radius: var(--r-m); }
+.projects .empty { grid-column: 1 / -1; }
+
+.panel { position: fixed; inset: 0; z-index: 10; display: flex; justify-content: flex-end; background: rgb(10 12 16 / 0.45); }
+.panel-card:focus { outline: none; }
+.panel-card { position: relative; width: min(580px, 100%); height: 100%; overflow-y: auto; background: var(--bg); padding: 14px clamp(12px, 3vw, 18px) 40px; box-shadow: var(--shadow); animation: slide 0.18s ease-out; }
+@keyframes slide { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .panel-card { animation: none; } .bar i, .card, .project { transition: none; } }
+.close { position: absolute; top: 22px; right: clamp(20px, 4vw, 28px); z-index: 1; width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--idle-soft); cursor: pointer; }
+
+/* The panel is a stack of blocks, one for each section, so the eye finds where one ends and the next begins. */
+.detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.block { margin: 0; padding: 12px 14px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m); min-width: 0; }
+.block h3 { margin: 0 0 8px; font-size: 11px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.detail-top { padding-top: 14px; border-top: 4px solid var(--idle); }
+.detail-top[data-tone="go"] { border-top-color: var(--go); }
+.detail-top[data-tone="wait"] { border-top-color: var(--wait); }
+.detail-top[data-tone="stop"] { border-top-color: var(--stop); }
+.detail-top[data-tone="busy"] { border-top-color: var(--busy); }
+.detail-top[data-tone="review"] { border-top-color: var(--review); }
+.detail-head { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; padding-right: 44px; min-height: 28px; }
+.detail-title { margin: 8px 0 0; font-size: 20px; line-height: 1.25; letter-spacing: -0.01em; text-wrap: balance; overflow-wrap: anywhere; }
+.back { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); border-radius: var(--r-m); background: var(--raised); cursor: pointer; text-align: left; color: var(--muted); font-size: 13px; }
+.back:hover { box-shadow: var(--shadow); color: var(--text); }
+.back:focus-visible, .fold-block summary:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+/* With a way back, the close button sits at the end of that row instead of over the block below. */
+.back { width: auto; margin-right: 46px; }
+.panel-card:has(.back) .close { top: 14px; }
+.detail:has(.back) .detail-head { padding-right: 0; }
+.back-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.open-group { margin: 12px 0 0; padding: 7px 12px; min-height: 36px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--raised); cursor: pointer; font-weight: 550; }
+.open-group:hover { box-shadow: var(--shadow); }
+/* Watching a task: the button in the panel, the count in the header, and the notice when it is done. */
+.watch { display: inline-flex; align-items: center; gap: 8px; margin: 12px 8px 0 0; padding: 7px 12px; min-height: 36px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--raised); cursor: pointer; font-weight: 550; }
+.watch:hover { box-shadow: var(--shadow); }
+.watch:focus-visible, .watching:focus-visible, .toast button:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.watch[aria-pressed="true"] { background: var(--review-soft); border-color: color-mix(in srgb, var(--review) 45%, var(--line)); color: var(--review); }
+.watch::before { content: ""; width: 8px; height: 8px; border-radius: 50%; border: 2px solid currentColor; }
+.watch[aria-pressed="true"]::before { background: currentColor; }
+.watching { padding: 1px 8px; border: 0; border-radius: var(--r-pill); background: var(--review-soft); color: var(--review); font: inherit; font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+/*
+ * The notices are stacked in a corner. In a short window the stack is no taller than the window and scrolls, and
+ * the line with the count and the button that closes them all stays at its top, always within reach.
+ */
+.toasts { position: fixed; z-index: 30; left: 10px; bottom: 10px; display: grid; gap: 8px; width: min(452px, calc(100vw - 20px)); max-height: calc(100vh - 20px); max-height: calc(100dvh - 20px); padding: 6px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.toasts:not(:has(.toast)) { display: none; }
+.toast { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-left: 4px solid var(--idle); border-radius: var(--r-m); background: var(--surface); box-shadow: var(--shadow); pointer-events: auto; animation: toast 0.2s ease-out; }
+.toast.done { border-left-color: var(--go); }
+/* Above the notices, when there are several: how many there are, and one button that closes them all. */
+.toasts-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px 6px 12px; border: 1px solid var(--line); border-radius: var(--r-m); background: var(--surface); box-shadow: var(--shadow); pointer-events: auto; font-size: 13px; color: var(--muted); }
+.toasts-head button { flex: none; min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--raised); color: var(--text); cursor: pointer; font-size: 13px; }
+.toasts-head button:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+@keyframes toast { from { transform: translateY(8px); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+.toast-mark { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--idle-soft); color: var(--muted); font-weight: 700; font-size: 13px; }
+.toast.done .toast-mark { background: var(--go-soft); color: var(--go); }
+.toast-what { font-weight: 600; overflow-wrap: anywhere; }
+.toast-title { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast button { min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--raised); cursor: pointer; font-size: 13px; }
+.toast .toast-close { border: 0; background: none; color: var(--muted); padding: 0 6px; }
+.open-group:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.description { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.description.none { color: var(--muted); }
+.block.why { background: color-mix(in srgb, var(--wait-soft) 45%, var(--surface)); border-color: color-mix(in srgb, var(--wait) 30%, var(--line)); }
+.problems { margin: 12px 0 0; padding: 10px 12px; border-radius: var(--r-m); background: var(--stop-soft); color: var(--stop); list-style: none; display: grid; gap: 4px; font-size: 14px; }
+.facts { display: grid; grid-template-columns: auto minmax(0, 1fr); margin: 0; font-size: 14px; }
+.facts dt, .facts dd { padding: 5px 0; border-top: 1px solid var(--line); }
+.facts dt { color: var(--muted); padding-right: 16px; }
+.facts dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.facts dt:first-of-type, .facts dd:first-of-type { border-top: 0; padding-top: 0; }
+.relation + .relation { margin-top: 12px; }
+.relation h4 { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 13px; font-weight: 650; }
+.relation .count, .fold-block .count { color: var(--muted); font-weight: 500; font-size: 12px; font-variant-numeric: tabular-nums; }
+.links { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; margin: 0; padding: 0; list-style: none; }
+.link {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 10px; align-items: center;
+  width: 100%; text-align: left; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--raised);
+}
+button.link { cursor: pointer; }
+button.link:hover { background: var(--idle-soft); }
+.link .name { overflow-wrap: anywhere; }
+.link .pill { justify-self: end; }
+.link .gone { text-decoration: line-through; color: var(--muted); }
+.timeline { margin: 0; padding: 0 0 0 14px; list-style: none; display: grid; gap: 8px; font-size: 14px; border-left: 2px solid var(--line); }
+.timeline li { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; }
+.timeline time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.fold-block summary { display: flex; align-items: center; gap: 10px; cursor: pointer; list-style: none; border-radius: var(--r-s); }
+.fold-block summary::-webkit-details-marker { display: none; }
+.fold-block summary::before { content: "▸"; color: var(--muted); }
+.fold-block[open] summary::before { content: "▾"; }
+.fold-block summary h3 { margin: 0; }
+.fold-block[open] summary { margin-bottom: 10px; }
+.history { margin: 0; padding: 0; list-style: none; display: grid; gap: 0; font-size: 14px; }
+.history li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 10px; padding: 7px 0; border-top: 1px solid var(--line); }
+.history li:first-child { border-top: 0; padding-top: 0; }
+.history .what { font-weight: 600; white-space: nowrap; }
+.history .change { overflow-wrap: anywhere; }
+.history time { grid-column: 1 / -1; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.panel .empty { background: var(--surface); }
+
+@media (max-width: 640px) {
+  /* Two rows: name and controls, then the view switch and who is connected. Long names shrink; controls never do. */
+  .top { gap: 0 12px; }
+  .top::after { content: ""; order: 3; flex-basis: 100%; height: 0; }
+  .meta { display: contents; }
+  .brand { order: 1; flex: 1 1 0; flex-wrap: nowrap; overflow: hidden; }
+  .brand h1, .signal { flex: none; }
+  .brand .instance { flex: 0 1 auto; min-width: 6ch; }
+  .controls { order: 2; flex: none; }
+  .views { order: 4; flex: none; margin: 8px 0 0; }
+  /* The state of the page sits at the end of the second row when it fits there, and on a row of its own when not. */
+  .status { order: 6; flex: 0 1 auto; margin: 8px 0 0 auto; justify-content: flex-end; text-align: right; }
+  #sync { white-space: nowrap; }
+  /* Who is connected is left out on a phone, to make room. */
+  #you { display: none; }
+  /* Many projects would push the tasks far down a phone screen: they become one row that scrolls sideways. */
+  .projects { display: flex; overflow-x: auto; scroll-snap-type: x proximity; padding-bottom: 6px; margin-right: calc(-1 * clamp(14px, 3vw, 28px)); padding-right: clamp(14px, 3vw, 28px); -webkit-overflow-scrolling: touch; }
+  .projects .project { flex: 0 0 min(240px, 78vw); scroll-snap-align: start; }
+  .projects .empty { flex: 1; }
+  /* On a phone the board's columns stack, each as wide as the screen. */
+  .board { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: minmax(0, 1fr); overflow-x: visible; padding-bottom: 0; }
+  .search { width: 100%; }
+  .search input { width: 100%; }
+}
+
+/*
+ * What sets the themes apart. A list of colours is not enough: the products these are named after use much the
+ * same colours, and are told apart by their shapes. So each theme also draws its own header bar, columns, cards
+ * and state labels.
+ */
+
+/* Dado, after Azure DevOps: a blue bar, columns divided by rules, cards with a coloured edge, states as a dot and plain text. */
+:root[data-theme="dado"] {
+  --top-bg: #0078d4; --top-text: #ffffff; --top-muted: #ffffff; --top-line: rgb(255 255 255 / 0.5); --top-well: rgb(0 0 0 / 0.22);
+  --top-chip: #ffffff; --top-chip-text: #005a9e; --top-button: transparent; --top-pressed: #005a9e;
+  --top-warn: #ffffff; --top-signal: #ffffff; --top-focus: #ffffff;
+}
+/* The dot's own colour is for when all is well. Out of date or not connected, the warning colours take over. */
+:root[data-theme="dado"] .sync:not(.old):not(.stale)::before { background: #a4f2a4; }
+:root[data-theme="dado"] .sync.old::before { background: #ffd966; }
+:root[data-theme="dado"] .sync.stale::before { background: #ffb4ab; }
+:root[data-theme="dado"] .board { gap: 0; }
+:root[data-theme="dado"] .column { background: transparent; border: 0; border-left: 1px solid var(--line); border-radius: 0; padding: 0 10px 10px; }
+:root[data-theme="dado"] .column[data-tone="bug"] { background: transparent; border-color: var(--line); }
+:root[data-theme="dado"] .column-head { padding: 8px 4px; margin-bottom: 10px; border-bottom: 2px solid var(--line); font-size: 14px; }
+:root[data-theme="dado"] .card { border-left: 4px solid #f2cb1d; box-shadow: 0 1px 3px rgb(0 0 0 / 0.12); }
+:root[data-theme="dado"] .card.is-group { border-left-color: #773b93; box-shadow: 0 1px 3px rgb(0 0 0 / 0.12); }
+:root[data-theme="dado"] .card.trouble { border-left-color: #cc293d; }
+:root[data-theme="dado"] .pill { padding: 0; background: none; color: var(--text); font-weight: 400; }
+:root[data-theme="dado"] .pill::before { width: 8px; height: 8px; background: var(--idle); }
+:root[data-theme="dado"] .pill.go::before { background: var(--go); }
+:root[data-theme="dado"] .pill.wait::before { background: var(--wait); }
+:root[data-theme="dado"] .pill.stop::before { background: var(--stop); }
+:root[data-theme="dado"] .pill.busy::before { background: var(--busy); }
+:root[data-theme="dado"] .pill.review::before { background: var(--review); }
+:root[data-scheme="dark"][data-theme="dado"] { --top-bg: #005a9e; }
+
+/* Jeev, after Jira: a white bar with a blue name, grey columns without a border under small capitals, cards that float on a shadow, states as lozenges. */
+:root[data-theme="jeev"] { --top-bg: var(--surface); }
+:root[data-theme="jeev"] .top { box-shadow: 0 1px 1px rgb(9 30 66 / 0.14); }
+:root[data-theme="jeev"] .brand h1 { color: var(--busy); }
+:root[data-theme="jeev"] .column { border: 0; background: var(--raised); }
+:root[data-theme="jeev"] .column[data-tone="bug"] { background: color-mix(in srgb, var(--bug-soft) 55%, var(--raised)); }
+:root[data-theme="jeev"] .column-head { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+:root[data-theme="jeev"] .column-head .dot { display: none; }
+:root[data-theme="jeev"] .card { border-color: transparent; box-shadow: 0 1px 1px rgb(9 30 66 / 0.25), 0 0 1px rgb(9 30 66 / 0.31); }
+:root[data-theme="jeev"] .card.trouble { border-left-color: var(--bug); }
+:root[data-theme="jeev"] .card .id::before { content: ""; display: inline-block; width: 12px; height: 12px; margin-right: 6px; border-radius: 2px; background: #4c9aff; vertical-align: -2px; }
+:root[data-theme="jeev"] .card.is-group .id::before { background: #904ee2; }
+:root[data-theme="jeev"] .card.trouble .id::before { background: #e5493a; }
+:root[data-theme="jeev"] .pill { padding: 1px 5px; font-size: 11px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; }
+:root[data-theme="jeev"] .pill::before { display: none; }
+:root[data-scheme="dark"][data-theme="jeev"] .card { box-shadow: 0 0 0 1px var(--line); }
+
+/* Gito, after GitHub: a near-black bar, bordered grey columns with a ring and a counter, flat bordered cards, states as solid labels. */
+:root[data-theme="gito"] {
+  --top-bg: #24292f; --top-text: #ffffff; --top-muted: #d0d7de; --top-line: #57606a; --top-well: rgb(255 255 255 / 0.12);
+  --top-chip: rgb(255 255 255 / 0.24); --top-chip-text: #ffffff; --top-button: transparent; --top-pressed: #24292f;
+  --top-warn: #e3b341; --top-signal: #ffffff; --top-focus: #ffffff;
+  --label-idle: #59636e; --label-go: #1a7f37; --label-wait: #9a6700; --label-stop: #cf222e; --label-busy: #0969da; --label-review: #8250df;
+}
+:root[data-theme="gito"] .sync:not(.old):not(.stale)::before { background: #3fb950; }
+:root[data-theme="gito"] .sync.old::before { background: #d29922; }
+:root[data-theme="gito"] .sync.stale::before { background: #f85149; }
+:root[data-theme="gito"] .column-head .dot { width: 13px; height: 13px; border: 2px solid var(--idle); background: none; }
+:root[data-theme="gito"] .column[data-tone="go"] .column-head .dot { border-color: var(--go); background: none; }
+:root[data-theme="gito"] .column[data-tone="wait"] .column-head .dot { border-color: var(--wait); background: none; }
+:root[data-theme="gito"] .column[data-tone="busy"] .column-head .dot { border-color: var(--busy); background: none; }
+:root[data-theme="gito"] .column[data-tone="review"] .column-head .dot { border-color: var(--review); background: none; }
+:root[data-theme="gito"] .column[data-tone="bug"] .column-head .dot { border-color: var(--bug); background: none; }
+:root[data-theme="gito"] .column-head .count { margin-left: 0; padding: 0 7px; border-radius: 2em; background: color-mix(in srgb, var(--idle) 24%, transparent); color: var(--text); font-size: 12px; }
+:root[data-theme="gito"] .card { box-shadow: none; }
+:root[data-theme="gito"] .card:hover { box-shadow: none; border-color: var(--muted); }
+:root[data-theme="gito"] .card.is-group { box-shadow: 3px 3px 0 -1px var(--surface), 3px 3px 0 0 var(--line); }
+:root[data-theme="gito"] .pill { padding: 2px 9px; background: var(--label-idle); color: #ffffff; }
+:root[data-theme="gito"] .pill::before { display: none; }
+:root[data-theme="gito"] .pill.go { background: var(--label-go); color: #ffffff; }
+:root[data-theme="gito"] .pill.wait { background: var(--label-wait); color: #ffffff; }
+:root[data-theme="gito"] .pill.stop { background: var(--label-stop); color: #ffffff; }
+:root[data-theme="gito"] .pill.busy { background: var(--label-busy); color: #ffffff; }
+:root[data-theme="gito"] .pill.review { background: var(--label-review); color: #ffffff; }
+:root[data-theme="gito"] .tag { padding: 0 8px; border: 1px solid color-mix(in srgb, currentColor 28%, transparent); }
+:root[data-scheme="dark"][data-theme="gito"] {
+  --top-bg: #010409; --top-line: #3d444d; --top-pressed: #010409;
+  --label-idle: #656c76; --label-go: #238636; --label-wait: #9e6a03; --label-stop: #d1242f; --label-busy: #1a63d9; --label-review: #8250df;
+}
+
+/* A card on its way keeps its ring and shadow in every theme: this comes after the themes' own card shadows. */
+:root[data-theme] .card.card-ghost { box-shadow: 0 0 0 3px var(--busy), 0 14px 34px rgb(0 0 0 / 0.28); }
+
+/*
+ * With one project selected, the others are greyed out: no colour, no surface of their own, quieter text. They
+ * stay readable and can still be chosen, and come back to life under the pointer. This comes after the themes,
+ * whose own project cards it must grey out too.
+ */
+:root .project.dimmed, :root .project-chip.dimmed { background: var(--bg); box-shadow: none; filter: grayscale(1); }
+:root .project.dimmed .project-title, :root .project.dimmed .project-id, :root .project-chip.dimmed .project-id, :root .project-chip.dimmed { color: var(--muted); }
+:root .project.dimmed:hover, :root .project.dimmed:focus-within, :root .project-chip.dimmed:hover, :root .project-chip.dimmed:focus-visible { filter: none; }
+
+/*
+ * Without motion the ring on a changed card does not fade: it is there, then gone. This comes last and names the
+ * theme, so that it holds against the shadows the themes and the groups give their cards.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] .card.changed { animation: none; box-shadow: 0 0 0 3px var(--busy); }
+}
+/* The one rule the graph library would write into the page itself; see LIBRARY_STYLE in graph.js. */
+.__________cytoscape_container { position: relative; }
