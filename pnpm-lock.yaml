@@ -97,6 +97,9 @@ importers:
 
   packages/web:
     dependencies:
+      '@vigile/core':
+        specifier: workspace:*
+        version: link:../core
       cytoscape:
         specifier: ^3.35.0
         version: 3.35.0

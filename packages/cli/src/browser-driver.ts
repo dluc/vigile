@@ -275,8 +275,21 @@ export class Page {
 
   async close(): Promise<void> {
     this.socket.close();
-    this.child.kill("SIGKILL");
-    await new Promise((resolve) => this.child.once("exit", resolve));
-    rmSync(this.profile, { recursive: true, force: true });
+    // A browser that has ended already says so no second time: waiting for it would never end.
+    if (this.child.exitCode === null && this.child.signalCode === null) {
+      this.child.kill("SIGKILL");
+      await new Promise((resolve) => this.child.once("exit", resolve));
+    }
+    // The processes the browser started may write to its profile for a moment after it is gone: a folder that
+    // one of them has just filled again is not empty when it is to be removed. It is tried again until they are done.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rmSync(this.profile, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (attempt >= 50) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
   }
 }

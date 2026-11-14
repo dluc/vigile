@@ -231,8 +231,15 @@ get_guide with topic "examples" shows complete sequences of calls for these shap
 - Not found or ambiguous: the error says how to name the item, for example by adding kind.
 
 ## Looking back
-- get with history returns every recorded change to an item: when, by whom and what.
-- A task's timeline shows each status it went through.`,
+- get with history returns the recorded changes to an item: when, by whom and what.
+- A task's timeline shows each status it went through.
+- Both show the latest 100 entries, oldest first. When there are more, "more" in the answer says how many and gives a continuation token: get with the same id and that token returns the 100 before.
+
+## Long lists
+- No answer holds more than 100 entries of anything. The list operations return a continuation token for the next page; send it with the same operation and the same filters.
+- get returns at most 100 of each kind of link, in the order of their IDs. "more.links" names the kinds that have more, with their total and a continuation token: get with the same id and that token returns the next page of that kind of link alone.
+- Every answer of get carries unchanged_since: the revision of the plan since which nothing that get shows of the item has changed, which includes what its lists show of the items at their other end. Pages of one item belong together when they say the same. When a page says another, something came, went or changed in between: read the item again from the start instead of putting the two together. A group or a project says another after any change to any task. The item's version does not tell this: taking a task out of a group, or changing a task in it, changes what the group's list shows, not the group's version.
+- A refusal names at most 20 of the items in the way; "blocking_total" says how many there are when those are not all.`,
   },
   examples: {
     title: "Examples to copy",

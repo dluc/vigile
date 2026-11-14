@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { Engine, areKeyMarks, storedAs } from "@vigile/core";
+import { Engine, areKeyMarks, readAll, storedAs } from "@vigile/core";
 import { assertTenantName, type StorageAdapter } from "@vigile/storage";
 import { flushFolder, historyOwners, holdTenantFiles, readTenantFile } from "@vigile/storage-sqlite";
 import { samePlace } from "./paths.js";
@@ -197,13 +197,15 @@ export async function openAsPlan(tenant: string, file: string): Promise<{ why: s
       commit: async () => {
         throw new Error("This is only a look: nothing is stored.");
       },
+      readRevision: async () => snapshot.head.revision,
       readText: async () => null,
       readHistory: async () => [],
+      readHistoryPage: async () => ({ records: [], total: 0 }),
       close: async () => {},
     };
     const engine = await Engine.open({ storage, tenant });
     // The first thing the service does with its plan: it looks up who there is.
-    const { users } = (await engine.execute("list_users", "admin", {})) as { users: Array<{ username: string }> };
+    const users = await readAll<{ username: string }>((operation, input) => engine.execute(operation, "admin", input), "list_users");
     // The next: whether each key in the config is its user's own, by the marks the user carries.
     const odd = users.find((user) => !areKeyMarks(engine.user(user.username)?.key_marks));
     if (odd) return { why: `the user ${odd.username} has key marks that are not a list of marks` };

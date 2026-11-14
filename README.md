@@ -223,7 +223,14 @@ Selecting a project or typing in the filter narrows both views. The board
 follows the filter letter by letter; the graph is drawn again once the typing
 pauses. Clicking a task or a project opens a panel with its description,
 reason, links, details, status timeline and history. Following a link in the
-panel opens the linked item, with a button back to the one you came from.
+panel opens the linked item, with a button back to the one you came from. The
+panel shows the first 100 links of each kind and the latest 100 entries of the
+timeline and of the history; where there are more it says how many, with a
+button that reads on. When the panel cannot read an item, or more of it, it
+says so, keeps what it had read, and offers to try again. What it draws is an
+item and pages of one state of it: when the item or one of its lists changes
+while it is read, it is read again, and an item that goes on changing is shown
+by itself, with a note that its further pages are not shown.
 
 ![A task open in the panel: its state, description, reason, links grouped by kind, and details](images/task.webp)
 
@@ -324,7 +331,7 @@ ended first. A change that was sent may then have been stored, or may be
 stored yet: the service carries out a request it has taken even after the
 connection has ended, and possibly after requests that were sent later. The
 message says so, with how to look: `vigile get <id> --history` shows an item
-with every change made to it. The request is over when the service's log has
+with the latest changes made to it. The request is over when the service's log has
 the line of its operation, or when the service has been stopped and started
 again; one that does not reach the service in full within 30 seconds is
 dropped. Until then nothing is certain about a second try, with one
@@ -691,7 +698,7 @@ it prints while it runs is the service's log.
 | `vigile config unset <setting>` | Removes a setting so its default applies. |
 | `vigile config path` | Prints which config file is in use. |
 | `vigile user add <username> [--type <agent\|person>]` | Creates a user and prints its API key and MCP settings. An agent unless `--type person`. |
-| `vigile user list` | Shows the users and how each connects. |
+| `vigile user list` | Shows the users, all of them, and how each connects. It reads up to 100,000 users. |
 | `vigile user reset-key <username>` | Issues a new key and cancels the old one. For `admin` it also works when no service runs on the config's data (nothing was sent to anyone, and nothing holds the data folder), or when the service refuses the admin key: the new key is then written straight to the config file. With no service running, the command holds the data folder while it writes: a service that is started in that moment is refused, and starts once the command is done. The key is not written when a service may be running and was not reached, or when what answers was not taken for it. When the service is there and does not answer, no key is written: the reset may still be carried out. |
 | `vigile user remove <username> [--permanent]` | Deletes a user; its key stops working. With `--permanent` the user cannot be brought back. |
 | `vigile help [command]` | Lists the commands, or what one command takes: `vigile help user`, `vigile help config set`, `vigile help create-task`. `vigile <command> --help` does the same. A name that is no command, such as `vigile help config nonsense`, is an error that lists what there is. |
@@ -712,19 +719,87 @@ act as `admin` unless given `--as <username>`.
 | `vigile set-task-status` | Changes a task's status, within the allowed moves and only when its dependencies allow. |
 | `vigile list-tasks` | Lists tasks, filtered by project, group, top level, status, type, user or problems. |
 | `vigile list-next-tasks` | Lists the tasks that can start now, most important first. |
-| `vigile get` | Reads one project, task or user in full; `--history` adds every recorded change. |
+| `vigile get` | Reads one project, task or user in full; `--history` adds the recorded changes. A list of more than 100 entries says so and gives the `--continuation` that reads on. |
 | `vigile delete` | Deletes a project, task or user. |
 | `vigile restore` | Brings a deleted item back. |
 | `vigile override-timestamp` | For imports: sets when an item was really created, or when a done task was really completed. Checked, and recorded in the history. |
 | `vigile add-link` | Links two items: "contains", "depends on" or "assigned to". |
 | `vigile remove-link` | Removes a link. |
 | `vigile list-link-types` | Lists the link types and what each one does. |
-| `vigile list-users` | Lists the users, to find who work can be assigned to. |
+| `vigile list-users` | Lists the users, to find who work can be assigned to, 100 at a time, with the `--continuation` for the next 100. `vigile user list` shows them all. |
 | `vigile create-user` | Creates a user and its API key. Admin only. |
 | `vigile reset-user-key` | Issues a new API key for a user. Admin only. |
 | `vigile get-guide` | Prints the guide: `--topic overview`, `organising`, `working` or `examples`. |
 
-Lists return at most 100 items and a continuation token for the next page.
+No answer holds more than 100 entries of anything:
+
+- **Lists** (`list_projects`, `list_tasks`, `list_next_tasks`, `list_users`)
+  return at most 100 items and a `continuation` token for the next page. The
+  token belongs to the list it came from: the same operation and the same
+  filters are sent with it, and for `list_next_tasks` by the same user. A token
+  is a word to hand back as it came: letters, digits, `-` and `_`, which can be
+  put into a command as it is. A page never holds more than 100 items, and
+  there is a token after every item, never longer than a thousand characters:
+  an ID too long to be written into one, which only damaged data has, is named
+  in the token by a short mark, and the next page finds the item by it. Should
+  that item be gone by then, the token is refused with `invalid_input`, and the
+  list is read again from the start. The command line prints a token only when
+  it is one of the list that was asked for, and reports an answer that goes on
+  without one, or with another list's, as not the service's.
+  What reads a list to its end by itself, the web page, `vigile user list` and
+  the commands that check users, and the service when it starts, takes a page
+  only when every entry of it is further on in the list than the place the
+  page was asked from, none was in a page before, and the token names the
+  place of its furthest entry. It reads at most 1,000 pages and 100,000
+  entries: a plan with more users than that does not start, and one with more
+  tasks or projects is not shown by the page. A task whose priority changes
+  while `list_next_tasks` is read moves in that list; whoever reads the list
+  to its end finds the same task twice and reads it again from the start.
+- **`get`** returns at most 100 entries of each list of the item: its links of
+  each kind, in the order of their IDs; the latest entries of its status
+  timeline and of its history, oldest first; and `contained_in`, `depends_on`,
+  `assigned_to` and `waiting_for`. When a list has more, `more` says how many
+  it has (`total`) and, for links, timeline and history, gives a `continuation`
+  token: `get` with the same ID and that token returns the next page of that
+  one list. For the timeline and the history, the next page holds the entries
+  before the ones already read. A list that `more` does not name is whole.
+  Each entry of the timeline and of the history says its `place` in the list:
+  for a status its number counted from the item's first status, for a change
+  the revision that recorded it and its number in that revision. The token
+  after a page names the place of the furthest entry of that page, so a page
+  holds only entries beyond the place it was asked from, and a reader can
+  tell that none was passed over or returned twice.
+  Every answer of `get`, the first and each further page, carries
+  `unchanged_since`: the revision of the plan since which nothing that `get`
+  shows of the item has changed. That is the item itself, its links in either
+  direction, its timeline and its history, and what its lists show of the
+  items and users at their other end: a title, a status, whether it is deleted.
+  Pages belong together when they say the same. When a page says another,
+  something was added, removed or changed in between, and what was read before
+  no longer holds: a client reads the item again from the start. The web page
+  does so by itself, and the command line prints the revision with each page.
+  A group or a project says another revision after any change to any task,
+  because its progress and its problems are worked out from every task in it.
+  The item's `version` does not tell any of this: a task that is taken out of
+  a group, or that changes its status, changes what the group shows and not
+  the group's version. A list counts and returns only links whose other end
+  exists. Every answer is of one state
+  of the item, also when the item changes while it is read: it is then read
+  again. Should the plan be changed by another writer on the same data faster
+  than the item can be read, `get` is refused with `too_many_requests`, to be
+  called again.
+  ```json
+  "more": { "links": { "contains": { "total": 250, "continuation": "…" } },
+            "history": { "total": 431, "continuation": "…" } }
+  ```
+- **A refusal** names at most 20 of the items in the way in `blocking`, and
+  says in `blocking_total` how many there are when those are not all. The path
+  of a refused loop shows its two ends and how many steps lie between. Input
+  that a message repeats is cut after 80 characters.
+
+A task in a list (`list_tasks`, `list_next_tasks`) and in the answer to a
+change carries all of its `contained_in`, `depends_on`, `assigned_to` and
+`waiting_for`.
 
 ## Licence
 

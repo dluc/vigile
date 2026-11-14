@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { SETTINGS, initConfig, loadConfig, masked, setValue, unsetValue, type Config } from "@vigile/config";
-import { usersOf } from "../answers.js";
+import { allUsers } from "../answers.js";
 import { UsageError, configPath, flag, type Args } from "../args.js";
 import { ANSWER_WITHIN_MS, NoAnswerError } from "../client.js";
 import { connect, inTheServicesPlace } from "../reach.js";
@@ -90,7 +90,7 @@ export async function config(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
         const loaded = loadConfig(path);
         try {
           const client = await connect(loaded, "admin", answerWithinMs);
-          const users = usersOf(client.base, await client.call("list_users"));
+          const users = await allUsers(client);
           if (!users.some((user) => user.username === value)) {
             throw new UsageError(`There is no user called "${value}".`, [`Users: ${users.map((user) => user.username).join(", ")}`, "Create one with: vigile user add <username>"]);
           }

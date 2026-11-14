@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { isIP } from "node:net";
 import { join } from "node:path";
 import { LiveAuth, masked, staleKeys, type LoadedConfig } from "@vigile/config";
-import { Engine, VERSION, VigileError, type OperationLog } from "@vigile/core";
+import { Engine, VERSION, VigileError, echo, readAll, type OperationLog } from "@vigile/core";
 import { createApiHandler, sendError } from "@vigile/http-api";
 import { createMcpHandler } from "@vigile/mcp";
 import { SqliteStorage, everHeld, holdFolder } from "@vigile/storage-sqlite";
@@ -289,8 +289,8 @@ export async function startService(options: ServiceOptions): Promise<Service> {
         log(formatLog(entry));
       },
     });
-    const users = (await engine.execute("list_users", "admin", {})) as { users: Array<{ username: string }> };
-    const usernames = users.users.map((u) => u.username);
+    const users = await readAll<{ username: string }>((operation, input) => engine.execute(operation, "admin", input), "list_users");
+    const usernames = users.map((u) => u.username);
     // A key for a user that does not exist lets nobody in: said, and no reason not to start. A keyless user that
     // does not exist would have every connection without a key refused, which is a mistake in the config.
     for (const username of staleKeys(config, usernames)) {
@@ -397,7 +397,7 @@ export async function startService(options: ServiceOptions): Promise<Service> {
       if (url.pathname === "/mcp") return mcp(request, response);
       if (url.pathname === "/health" || guarded) return api(request, response, url);
       if ((request.method === "GET" || request.method === "HEAD") && serveWeb(response, url.pathname, request.method === "HEAD", (error) => warn(`The page's file ${url.pathname} could not be read: ${explain(error)}`))) return;
-      sendError(response, new VigileError("not_found", `Nothing is served at ${url.pathname}.`));
+      sendError(response, new VigileError("not_found", `Nothing is served at ${echo(url.pathname)}.`));
     })();
     handled.catch((error: unknown) => {
       warn(`${request.method} ${request.url} failed unexpectedly: ${explain(error)}`);

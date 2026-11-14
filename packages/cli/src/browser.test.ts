@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { initConfig, loadConfig, setValue } from "@vigile/config";
+import { paging } from "@vigile/core";
+import { adversary, type Target } from "./adversary.js";
 import { Page, findBrowser } from "./browser-driver.js";
 import { seedDemoPlan } from "./demo-plan.js";
 import { startService, type Service } from "./service.js";
@@ -669,6 +671,82 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       }
     });
 
+    it("says of a list in the panel that it is not whole, how many there are, and reads on at the click of a button", async () => {
+      await page.scheme("light");
+      await page.size(1280, 900);
+      const made: string[] = [];
+      const create = async (title: string, extra: Record<string, unknown> = {}) => {
+        const id = (await run("create_task", { title, description: "d", ...extra })).id as string;
+        made.push(id);
+        return id;
+      };
+      try {
+        // A group of 105 tasks, and a task that changed status 105 times: more than the service returns at once.
+        const group = await create("A group of very many");
+        for (let n = 1; n <= 105; n++) await create(`Member ${n}`, { parent: group });
+        const busy = await create("Back and forth");
+        for (let n = 1; n <= 105; n++) await run("set_task_status", { id: busy, version: n, status: n % 2 ? "draft" : "open" });
+
+        await load(`/#board/${group}`);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'A group of very many'", "the panel");
+        const contains = () =>
+          page.run<{ heading: string; links: number; last: string; button: string | null }>(`
+            const relation = document.querySelector('#detail .relation[data-relation="contains"]');
+            return { heading: relation.querySelector('h4').textContent, links: relation.querySelectorAll('.link').length, last: [...relation.querySelectorAll('.link .name')].at(-1).textContent, button: relation.querySelector('.further')?.textContent ?? null };
+          `);
+        assert.deepEqual(await contains(), { heading: "Contains100 of 105", links: 100, last: "Member 100", button: "Show more" }, "a part is shown as a part");
+        await layout("in a panel with a list that goes on");
+        // With the keyboard: the button is reached like any other, and Enter reads on.
+        await page.run("document.querySelector('#detail .relation[data-relation=\"contains\"] .further').focus()");
+        await page.key("Enter");
+        await page.until("return document.querySelectorAll('#detail .relation[data-relation=\"contains\"] .link').length === 105", "the rest of the links");
+        assert.deepEqual(await contains(), { heading: "Contains105", links: 105, last: "Member 105", button: null }, "shown whole, the list says so and offers nothing more");
+        assert.equal(await page.run<boolean>("return document.querySelector('.panel-card').contains(document.activeElement)"), true, "the keyboard stays in the panel when the button it was on is gone");
+
+        // Drawn again after a change, the list is read as far as it was shown: the task that came is there.
+        await create("Member 106", { parent: group });
+        await page.run("document.getElementById('refresh').click()");
+        await page.until("return document.querySelectorAll('#detail .relation[data-relation=\"contains\"] .link').length === 106", "the new member in the panel");
+        assert.deepEqual(await contains(), { heading: "Contains106", links: 106, last: "Member 106", button: null });
+
+        // Opened anew, an item starts with its first page again.
+        await load(`/#board/${busy}`);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Back and forth'", "the task that changed often");
+        const records = () =>
+          page.run<{ timeline: number; timelineNote: string | null; changes: string; history: number; historyNote: string | null; first: string; buttons: string[] }>(`
+            const timeline = document.querySelector('#detail .timeline').closest('.block');
+            const history = document.querySelector('#detail .fold-block');
+            return {
+              timeline: timeline.querySelectorAll('.timeline li').length, timelineNote: timeline.querySelector('.partial')?.textContent ?? null,
+              changes: history.querySelector('summary .count').textContent, history: history.querySelectorAll('.history li').length, historyNote: history.querySelector('.partial')?.textContent ?? null,
+              first: history.querySelector('.history li .what').textContent, buttons: [...document.querySelectorAll('#detail .further')].map((b) => b.dataset.list + ': ' + b.textContent),
+            };
+          `);
+        assert.deepEqual(await records(), {
+          timeline: 100, timelineNote: "The latest 100 of 106.", changes: "106 changes", history: 100, historyNote: "The latest 100 of 106.", first: "status changed",
+          buttons: ["timeline: Show earlier ones", "history: Show earlier ones"],
+        });
+        await page.run("document.querySelector('#detail .fold-block').open = true");
+        await layout("in a panel whose timeline and history go on");
+        await page.click("#detail .fold-block .further");
+        await page.until("return document.querySelectorAll('#detail .history li').length === 106", "the earlier changes");
+        assert.deepEqual(await records(), {
+          timeline: 100, timelineNote: "The latest 100 of 106.", changes: "106 changes", history: 106, historyNote: null, first: "created",
+          buttons: ["timeline: Show earlier ones"],
+        }, "one list read on leaves the other as it was");
+        assert.equal(await page.run<boolean>("return document.querySelector('#detail .fold-block').open"), true, "the history stays unfolded");
+        await page.click("#detail .further[data-list='timeline']");
+        await page.until("return document.querySelectorAll('#detail .timeline li').length === 106", "the earlier statuses");
+        assert.deepEqual([(await records()).timelineNote, (await records()).buttons], [null, []]);
+        assert.equal(await text("#detail .timeline li:first-child .pill"), "open", "the timeline starts where the task started");
+        await layout("in a panel whose lists were read to their end");
+        await page.key("Escape");
+      } finally {
+        for (const id of made.reverse()) await run("delete", { id, version: (await run("get", { id })).version });
+        await load();
+      }
+    });
+
     it("sets the panel's sections apart as blocks, and folds the history", async () => {
       for (const [width, scheme] of [[1280, "light"], [1280, "dark"], [360, "light"], [360, "dark"]] as const) {
         await page.scheme(scheme);
@@ -1108,6 +1186,686 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.tap("#view-board");
       await page.until("return document.querySelectorAll('.card').length > 0 && document.getElementById('board').getBoundingClientRect().height > 0", "the board");
       await page.size(1280, 900);
+    });
+  });
+
+  describe("reading on in the panel, while other things happen", () => {
+    /** A group of 205 tasks: three pages of what it contains, and a history of 206 changes. */
+    let group: string;
+    const made: string[] = [];
+    const create = async (title: string, extra: Record<string, unknown> = {}) => {
+      const id = (await run("create_task", { title, description: "d", ...extra })).id as string;
+      made.push(id);
+      return id;
+    };
+
+    before(async () => {
+      group = await create("A group to read on in");
+      for (let n = 1; n <= 205; n++) await create(`Part ${n}`, { parent: group });
+    });
+    after(async () => {
+      for (const id of made.reverse()) await run("delete", { id, version: (await run("get", { id })).version }).catch(() => {});
+      await load();
+    });
+
+    /**
+     * Puts a gate in front of the page's requests, for a test to hold an answer back, to keep a request from
+     * being sent until the test lets it go, to make a request fail, to answer in the service's place or to change
+     * what is sent. `whole` is a reading of an item from the start,
+     * `further` one of a next page; `once` lets a test apply to the first request it fits and to no later one.
+     */
+    const GATE = `
+      window.realFetch ??= window.fetch;
+      const get = (call) => call.path === '/api/get';
+      window.whole = (call) => get(call) && !call.body.continuation;
+      window.further = (call) => get(call) && Boolean(call.body.continuation);
+      window.once = (test) => { let done = false; return (call) => !done && Boolean(test(call)) && (done = true); };
+      window.gate = { hold: null, wait: null, fail: null, answer: null, change: null, held: [], waiting: [], calls: [] };
+      window.fetch = async (url, options) => {
+        const call = { path: new URL(String(url), location.href).pathname, body: options?.body ? JSON.parse(options.body) : null };
+        window.gate.calls.push(call);
+        if (window.gate.fail?.(call)) throw new TypeError('Failed to fetch');
+        const made = window.gate.answer?.(call, url, options);
+        if (made) return made;
+        const changed = window.gate.change?.(call);
+        if (window.gate.wait?.(call)) await new Promise((go) => window.gate.waiting.push(go));
+        const response = await window.realFetch(url, changed ? { ...options, body: JSON.stringify(changed) } : options);
+        if (window.gate.hold?.(call)) await new Promise((release) => window.gate.held.push(release));
+        return response;
+      };
+    `;
+    const gate = (set: string) => page.run(`window.gate.${set}`);
+    const held = (answers: number) => page.until(`return window.gate.held.length === ${answers}`, `${answers} answer(s) to be held back`);
+    const release = () => page.run("window.gate.held.splice(0).forEach((release) => release())");
+    const waiting = (requests: number) => page.until(`return window.gate.waiting.length === ${requests}`, `${requests} request(s) to wait before being sent`);
+    const letGo = () => page.run("window.gate.waiting.splice(0).forEach((go) => go())");
+    const asked = (which: "whole" | "further") => page.run<number>(`return window.gate.calls.filter(window.${which}).length`);
+    const press = (selector: string) => page.run(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    const MORE = '#detail .relation[data-relation="contains"] .further';
+    const EARLIER = "#detail .fold-block .further";
+    const shown = () =>
+      page.run<{ hidden: boolean; title: string | null; version: string | null; priority: string | null; contains: string | null; links: number; more: string | null; history: number; changes: string | null; trouble: string | null; empty: string | null; retry: boolean }>(`
+        const detail = document.getElementById('detail');
+        const relation = detail.querySelector('.relation[data-relation="contains"]');
+        const fact = (name) => [...detail.querySelectorAll('.facts dt')].find((dt) => dt.textContent === name)?.nextElementSibling.textContent ?? null;
+        const history = detail.querySelector('.fold-block');
+        return {
+          hidden: document.getElementById('panel').hidden,
+          title: detail.querySelector('.detail-title')?.textContent ?? null,
+          version: fact('Version'), priority: fact('Priority'),
+          contains: relation?.querySelector('h4 .count').textContent ?? null,
+          links: relation ? relation.querySelectorAll('.link').length : 0,
+          more: relation?.querySelector('.further')?.textContent ?? null,
+          history: history ? history.querySelectorAll('.history li').length : 0,
+          changes: history?.querySelector('summary .count').textContent ?? null,
+          trouble: detail.querySelector('.not-read p')?.textContent ?? null,
+          empty: detail.querySelector('.empty')?.textContent ?? null,
+          retry: Boolean(detail.querySelector('.retry')),
+        };
+      `);
+    const links = (count: number, what: string) => page.until(`return document.querySelectorAll('#detail .relation[data-relation="contains"] .link').length === ${count} && !document.getElementById('panel').hidden`, what);
+    /** Opens the group in a page that was loaded anew, at its first page, with the gate in place. */
+    const open = async (id = group) => {
+      await page.scheme("light");
+      await page.size(1280, 900);
+      await load(`/#board/${id}`);
+      await page.until("return Boolean(document.querySelector('#detail .detail-title'))", "the panel");
+      await page.run(GATE);
+      return (await shown()).title!;
+    };
+    const rename = async (title: string) => (await run("update_task", { id: group, version: (await run("get", { id: group })).version, title })).version as number;
+    /** The panel as it opens: the first page of each list, each saying that it is a part. A change to the group adds to its history, which is counted where it matters. */
+    const first = { contains: "100 of 205", links: 100, more: "Show more", history: 100, trouble: null, empty: null, retry: false };
+    const part = (state: Awaited<ReturnType<typeof shown>>) => ({ contains: state.contains, links: state.links, more: state.more, history: state.history, trouble: state.trouble, empty: state.empty, retry: state.retry });
+    const changes = async () => (await run("get", { id: group, history: true })).more.history.total as number;
+
+    it("shows the item as it is now, with the page that was asked for, when \"Show more\" is clicked while the panel is being read again", async () => {
+      const was = await open();
+      assert.deepEqual(part(await shown()), first);
+      // The item changes, and the reading of it that the refresh sets off is on its way when more is asked for.
+      await gate("hold = window.once(window.whole)");
+      const version = await rename(`${was}, renamed while read`);
+      await press("#refresh");
+      await held(1);
+      await press(MORE);
+      await page.wait(300);
+      assert.deepEqual([(await shown()).title, (await shown()).links, await asked("further")], [was, 100, 0], "the page that was asked for waits for the reading that is under way");
+      await release();
+      await links(200, "the item as it is now, with two pages");
+      const now = await shown();
+      assert.deepEqual([now.title, now.version, now.contains, now.more, now.trouble], [`${was}, renamed while read`, String(version), "200 of 205", "Show more", null]);
+      assert.deepEqual([await asked("whole"), await asked("further")], [1, 1], "one reading read the item and the page");
+      await rename(was);
+    });
+
+    it("never draws a page that was asked for earlier over the item as it was read since, nor over the panel opened anew", async () => {
+      const was = await open();
+      // A page is on its way when the item changes and the panel is read again: the later reading has the page too.
+      await gate("hold = window.once(window.further)");
+      await press(MORE);
+      await held(1);
+      const version = await rename(`${was}, renamed since`);
+      await press("#refresh");
+      await page.until(`return document.querySelector('#detail .detail-title')?.textContent === ${JSON.stringify(`${was}, renamed since`)}`, "the item as it is now");
+      await links(200, "with the page that was asked for");
+      await release();
+      await page.wait(400);
+      const now = await shown();
+      assert.deepEqual([now.title, now.version, now.contains], [`${was}, renamed since`, String(version), "200 of 205"], "the earlier answer changed nothing when it came");
+      await rename(was);
+
+      // The panel is closed while a page is on its way: the answer is dropped, and nothing opens by itself.
+      await gate("hold = window.once(window.further)");
+      await press(MORE);
+      await held(1);
+      await page.key("Escape");
+      await release();
+      await page.wait(300);
+      assert.equal((await shown()).hidden, true);
+      // Opened again, the item starts at its first page.
+      await page.click(`.card[data-id="${group}"]`);
+      await links(100, "the group opened again");
+      assert.deepEqual(part(await shown()), first);
+
+      // Closed and opened again while a page is on its way: the page belongs to the panel that was closed.
+      await gate("hold = window.once(window.further)");
+      await press(MORE);
+      await held(1);
+      await page.key("Escape");
+      await page.click(`.card[data-id="${group}"]`);
+      await links(100, "the group opened anew");
+      await release();
+      await page.wait(400);
+      assert.deepEqual(part(await shown()), first, "the page that was asked for in the panel that was closed is not added to this one");
+
+      // Another item is opened while a page is on its way: it stays, and coming back starts at the first page.
+      await gate("hold = window.once(window.further)");
+      await press(MORE);
+      await held(1);
+      await press('#detail .relation[data-relation="contains"] .link');
+      await page.until("return document.querySelector('#detail .detail-title')?.textContent === 'Part 1'", "the task that was opened from the panel");
+      await release();
+      await page.wait(300);
+      assert.equal((await shown()).title, "Part 1");
+      await press("#detail .back");
+      await links(100, "the group again");
+      assert.deepEqual([(await shown()).title, part(await shown())], [was, first]);
+    });
+
+    it("reads every page that was asked for while another was on its way, of the same list and of another, and reads nothing twice", async () => {
+      await open();
+      const recorded = await changes();
+      await gate("hold = window.once(window.further)");
+      await press(MORE);
+      await held(1);
+      // Twice more of what the group contains, which is all there is of it, and once more of its history.
+      await press(MORE);
+      await press(EARLIER);
+      await release();
+      await page.until("return document.querySelectorAll('#detail .history li').length === 200", "the earlier changes");
+      await links(205, "all that the group contains");
+      const now = await shown();
+      assert.deepEqual([part(now), now.changes], [{ contains: "205", links: 205, more: null, history: 200, trouble: null, empty: null, retry: false }, `${recorded} changes`]);
+      assert.equal(await text("#detail .fold-block .partial"), `The latest 200 of ${recorded}.`);
+      assert.deepEqual([await asked("whole"), await asked("further")], [0, 3], "three pages were read, and what the panel showed was not read again");
+      // A list that has ended is asked for no further, however often it was asked for: the rest of the history comes alone.
+      await press(EARLIER);
+      await page.until(`return document.querySelectorAll('#detail .history li').length === ${recorded}`, "the history to its beginning");
+      assert.deepEqual([(await shown()).links, await asked("further"), await count("#detail .further")], [205, 4, 0]);
+    });
+
+    it("says so when a further page cannot be read, keeps what was read, and reads on when asked again or at the next refresh", async () => {
+      const was = await open();
+      await gate("fail = window.further");
+      // With the keyboard, from the button under the list.
+      await page.run(`document.querySelector(${JSON.stringify(MORE)}).focus()`);
+      await page.key("Enter");
+      await page.until("return Boolean(document.querySelector('#detail .not-read'))", "the panel to say that it could not read on");
+      const failed = await shown();
+      assert.deepEqual([failed.title, part(failed)], [was, { ...first, trouble: "Cannot reach the service. This is the item as it was read before.", retry: true }], "what was read is all there, and the list still says that it is a part");
+      assert.equal(await page.run<string>("return document.activeElement.className"), "further", "the keyboard is where it was");
+      // The message is in sight wherever the panel is scrolled to.
+      for (const top of [0, 1_000_000]) {
+        const inSight = await page.run<boolean>(`
+          const card = document.querySelector('.panel-card'); card.scrollTop = ${top};
+          const note = document.querySelector('#detail .not-read').getBoundingClientRect(); const box = card.getBoundingClientRect();
+          return note.top >= box.top && note.bottom <= box.bottom && note.height > 20;
+        `);
+        assert.equal(inSight, true, `the message is in sight with the panel scrolled to ${top}`);
+      }
+      await layout("in a panel that could not read on");
+      // Asked again while it still cannot: said again, once, and nothing is lost.
+      await press("#detail .retry");
+      await page.wait(300);
+      assert.deepEqual([part(await shown()), await count("#detail .not-read")], [{ ...first, trouble: "Cannot reach the service. This is the item as it was read before.", retry: true }, 1]);
+      // Asked again when it can: the item with the page that was asked for, and no message.
+      await gate("fail = null");
+      await page.run("document.querySelector('#detail .retry').focus()");
+      await page.key("Enter");
+      await links(200, "the page that could not be read before");
+      assert.deepEqual([(await shown()).contains, (await shown()).trouble, (await shown()).retry], ["200 of 205", null, false]);
+      assert.equal(await page.run<boolean>("return document.querySelector('.panel-card').contains(document.activeElement)"), true, "the keyboard stays in the panel when the button it was on is gone");
+
+      // The service answers with an error of its own: said in its words. The refresh button then reads the panel
+      // again although nothing on the board has changed.
+      await gate(`answer = (call) => window.further(call) && new Response(JSON.stringify({ error: { code: 'internal', message: 'The service hit an unexpected error.' } }), { status: 500, headers: { 'content-type': 'application/json' } })`);
+      await press(MORE);
+      await page.until("return Boolean(document.querySelector('#detail .not-read'))", "the panel to say that the service failed");
+      assert.deepEqual([(await shown()).trouble, (await shown()).links, (await shown()).contains], ["The service answered with an error: The service hit an unexpected error. This is the item as it was read before.", 200, "200 of 205"]);
+      await gate("answer = null");
+      await press("#refresh");
+      await links(205, "the rest, read at the refresh");
+      assert.deepEqual([(await shown()).contains, (await shown()).more, (await shown()).trouble], ["205", null, null]);
+
+      // The item changes and cannot be read again: the panel says so beside the item as it was read, pages and
+      // all, and shows it as it is once it can be read.
+      await gate("fail = window.whole");
+      const version = await rename(`${was}, renamed out of reach`);
+      await press("#refresh");
+      await page.until("return Boolean(document.querySelector('#detail .not-read'))", "the panel to say that it could not read the item again");
+      assert.deepEqual([(await shown()).title, (await shown()).links, (await shown()).trouble], [was, 205, "Cannot reach the service. This is the item as it was read before."]);
+      await gate("fail = null");
+      await press("#refresh");
+      await page.until(`return document.querySelector('#detail .detail-title')?.textContent === ${JSON.stringify(`${was}, renamed out of reach`)}`, "the item as it is now");
+      assert.deepEqual([(await shown()).version, (await shown()).links, (await shown()).trouble, (await shown()).retry], [String(version), 205, null, false]);
+      await rename(was);
+    });
+
+    it("says so when an item cannot be read at all, and reads it when asked again or at the next refresh", async () => {
+      const was = await open();
+      await page.key("Escape");
+      for (const again of ["#detail .retry", "#refresh"]) {
+        await gate("fail = (call) => call.path === '/api/get'");
+        await page.click(`.card[data-id="${group}"]`);
+        await page.until("return Boolean(document.querySelector('#detail .empty'))", "the panel to say that it could not read the item");
+        const failed = await shown();
+        assert.deepEqual([failed.hidden, failed.title, failed.empty, failed.retry, failed.links], [false, null, "Cannot reach the service.", true, 0]);
+        assert.equal(await page.run<boolean>("return document.querySelector('.panel-card').contains(document.activeElement)"), true, "the keyboard is in the panel");
+        if (again === "#refresh") await layout("in a panel that could not read its item");
+        await gate("fail = null");
+        await press(again);
+        await links(100, `the item, read after ${again}`);
+        assert.deepEqual([(await shown()).title, part(await shown())], [was, first]);
+        await page.key("Escape");
+      }
+    });
+
+    it("reads the item again from the start when the service does not take a token, and when the item has changed since it was read", async () => {
+      const was = await open();
+      // A token that the service refuses: the page asks for the item anew and reads on with the token it then gets.
+      await gate("change = window.once((call) => window.further(call) && { ...call.body, continuation: 'bm90IGEgdG9rZW4' })");
+      await press(MORE);
+      await links(200, "the page, read with a token that is taken");
+      assert.deepEqual([(await shown()).title, (await shown()).contains, (await shown()).trouble, await asked("whole"), await asked("further")], [was, "200 of 205", null, 1, 2]);
+
+      // The item changes while the page neither listens nor asks. The next page says so by its version: the
+      // panel does not put it beside the item as it was, it reads the item as it is.
+      const moved = await run("update_task", { id: group, version: (await run("get", { id: group })).version, priority: 7 });
+      await press(MORE);
+      await links(205, "the item as it is now, with all its pages");
+      const now = await shown();
+      assert.deepEqual([now.version, now.priority, now.contains, now.trouble], [String(moved.version), "7", "205", null]);
+      await run("update_task", { id: group, version: moved.version, priority: 0 });
+    });
+
+    it("restarts an already-open page when its continuation boundary disappeared before a refresh", async () => {
+      const was = await open();
+      await press(MORE);
+      await links(200, "two pages before the boundary disappears");
+      await gate(`answer = (() => { let done = false; return (call) => !done && window.further(call) ? (done = true, new Response(JSON.stringify({ error: { code: 'invalid_input', message: 'The continuation token names an entry that is no longer in the list.' } }), { status: 400, headers: { 'content-type': 'application/json' } })) : null; })()`);
+      const before = await run("get", { id: group });
+      try {
+        await run("update_task", { id: group, version: before.version, priority: before.priority + 1 });
+        await press("#refresh");
+        await page.until(`return [...document.querySelectorAll('#detail .facts dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling.textContent === ${JSON.stringify(String(before.priority + 1))} && !document.querySelector('#detail .not-read') && document.querySelectorAll('#detail .relation[data-relation="contains"] .link').length === 200`, "the rejected continuation to be replaced by a fresh one");
+        await links(200, "the already-open page after a fresh reading");
+        const [whole, further] = [await asked("whole"), await asked("further")];
+        assert.deepEqual([(await shown()).title, (await shown()).trouble], [was, null]);
+        assert.ok(whole >= 1 && further === whole + 1, `${whole} fresh item reads and ${further} page reads: the rejected continuation alone is extra`);
+      } finally {
+        const current = await run("get", { id: group });
+        await run("update_task", { id: group, version: current.version, priority: before.priority });
+      }
+    });
+
+    it("draws an item and its pages of one version: an item that changes between its reading and that of a page is read again from the start, whichever way the reading began", async () => {
+      const was = await open();
+      await press(MORE);
+      await links(200, "two pages of what the group contains");
+      const titled = (title: string) => page.until(`return document.querySelector('#detail .detail-title')?.textContent === ${JSON.stringify(title)}`, `the item called ${title}`);
+      /** A test for the gate that fits the request for a page that is the given one of those sent from now on. */
+      const nth = (which: number) => `(() => { let sent = 0; return (call) => window.further(call) && ++sent === ${which}; })()`;
+
+      // A refresh reads the item, and the item changes before its second page is asked for: the page is of a
+      // later version than the item in hand. The two are not drawn together: the item is read again.
+      await gate(`wait = ${nth(1)}`);
+      await rename(`${was}, first`);
+      await press("#refresh");
+      await waiting(1);
+      assert.equal((await shown()).title, was, "nothing is drawn of a reading that is not whole");
+      const second = await rename(`${was}, second`);
+      await letGo();
+      await titled(`${was}, second`);
+      assert.deepEqual([(await shown()).version, (await shown()).contains, (await shown()).links, (await shown()).trouble], [String(second), "200 of 205", 200, null]);
+      assert.deepEqual([await asked("whole"), await asked("further")], [2, 3], "the item was read twice, each time with its second page");
+
+      // "Show more" on an item that has changed without the page knowing: the page says so by its version and
+      // the item is read from the start. It changes again while that is done, and is read from the start again.
+      await run("update_task", { id: group, version: second, priority: 5 });
+      await gate(`wait = ${nth(2)}`);
+      await press(MORE);
+      await waiting(1);
+      const third = await rename(`${was}, third`);
+      await letGo();
+      await titled(`${was}, third`);
+      await links(205, "all three pages, of the item as it is");
+      assert.deepEqual([(await shown()).version, (await shown()).priority, (await shown()).contains, (await shown()).trouble], [String(third), "5", "205", null]);
+
+      // A token that the service does not take sends the reading to the start as well, and the same holds there.
+      await gate("change = window.once((call) => window.further(call) && { ...call.body, continuation: 'bm90IGEgdG9rZW4' })");
+      await gate(`wait = ${nth(2)}`);
+      await press(EARLIER);
+      await waiting(1);
+      const fourth = await rename(`${was}, fourth`);
+      await letGo();
+      await titled(`${was}, fourth`);
+      await page.until("return document.querySelectorAll('#detail .history li').length === 200", "two pages of the history");
+      assert.deepEqual([(await shown()).version, (await shown()).links, (await shown()).trouble], [String(fourth), 205, null]);
+      await run("update_task", { id: group, version: fourth, priority: 0, title: was });
+    });
+
+    it("shows an item that goes on changing as it was read last, by itself, says that its further pages are not shown, and stops reading", async () => {
+      const was = await open();
+      await press(MORE);
+      await links(200, "two pages of what the group contains");
+      const before = [await asked("whole"), await asked("further")];
+      // Every request for a page waits, and the item is changed before each is sent: as an agent would that
+      // changes the task again and again while someone looks at it.
+      await gate("wait = window.further");
+      let version = await rename(`${was}, changed 0 times more`);
+      await press("#refresh");
+      for (let times = 1; times <= 3; times++) {
+        await waiting(1);
+        assert.equal((await shown()).title, was, "nothing is drawn while the item and its page do not belong together");
+        version = await rename(`${was}, changed ${times} times more`);
+        await letGo();
+      }
+      await page.until("return Boolean(document.querySelector('#detail .not-read'))", "the panel to say that the item is changing");
+      const given = await shown();
+      assert.deepEqual(
+        [given.title, given.version, part(given)],
+        [`${was}, changed 3 times more`, String(version), { ...first, trouble: "The item is being changed while it is read. This is the item as it was read last; the further pages of its lists are not shown.", retry: true }],
+        "the item as it was read last, with the first page of each list, each saying that it is a part",
+      );
+      // Three readings with a page each, and one of the item by itself: then no more, however long one waits.
+      assert.deepEqual([(await asked("whole")) - before[0]!, (await asked("further")) - before[1]!], [4, 3]);
+      await page.wait(500);
+      assert.deepEqual([(await asked("whole")) - before[0]!, (await asked("further")) - before[1]!, await page.run<number>("return window.gate.waiting.length")], [4, 3, 0]);
+      await layout("in a panel whose item goes on changing");
+      // Left alone, the item is read with the pages that were opened, when asked again.
+      await gate("wait = null");
+      await press("#detail .retry");
+      await links(200, "the pages that were opened");
+      assert.deepEqual([(await shown()).title, (await shown()).contains, (await shown()).trouble, (await shown()).retry], [`${was}, changed 3 times more`, "200 of 205", null, false]);
+      await rename(was);
+    });
+
+    /** One list of links in the panel: what its heading counts, how many it shows, whether it offers more, and whether a given item is in it. */
+    const listed = (relation: string, id: string) =>
+      page.run<{ count: string | null; links: number; more: boolean; has: boolean }>(`
+        const relation = document.querySelector('#detail .relation[data-relation=${JSON.stringify(relation)}]');
+        return {
+          count: relation?.querySelector('h4 .count').textContent ?? null,
+          links: relation ? relation.querySelectorAll('.link').length : 0,
+          more: Boolean(relation?.querySelector('.further')),
+          has: Boolean(relation && [...relation.querySelectorAll('.link .id')].some((id) => id.textContent === ${JSON.stringify(id)})),
+        };
+      `);
+
+    it("does not show a list as whole that has changed since its first page was read: a link of the first page that went before \"Show more\" sends the reading back to the start", async () => {
+      // 105 tasks in a group, all waiting for one task: one page and five more of what the group contains and
+      // of what needs the task. Neither the group nor the task changes its version when one of them leaves.
+      const small = await create("A group of 105");
+      const needed = await create("Needed by 105");
+      const members: string[] = [];
+      for (let n = 1; n <= 105; n++) members.push(await create(`One of 105, number ${n}`, { parent: small, depends_on: [needed] }));
+      for (const [item, relation, gone, remove] of [
+        [small, "contains", members[0]!, () => run("remove_link", { from: small, type: "contains", to: members[0] })],
+        [needed, "is depended on by", members[1]!, () => run("remove_link", { from: members[1], type: "depends on", to: needed })],
+      ] as const) {
+        await open(item);
+        assert.deepEqual(await listed(relation, gone), { count: "100 of 105", links: 100, more: true, has: true }, relation);
+        const version = (await shown()).version;
+        // The page neither listens nor asks, and does not know of the change. The next page tells it: it was
+        // read of the item as it is after the change, and the five it holds do not make the list whole.
+        await remove();
+        await press(`#detail .relation[data-relation="${relation}"] .further`);
+        await page.until(`return document.querySelectorAll('#detail .relation[data-relation="${relation}"] .link').length === 104`, `the ${relation} list as it is now`);
+        assert.deepEqual(await listed(relation, gone), { count: "104", links: 104, more: false, has: false }, `${relation}: the 104 that are left, and not the one that went`);
+        assert.deepEqual([(await shown()).version, (await shown()).trouble], [version, null], "the item's version is what it was: it did not tell");
+        assert.deepEqual([await asked("whole"), await asked("further")], [1, 2], "the page that did not fit was dropped, and the item read once from the start with its second page");
+      }
+    });
+
+    it("reads the item again from the start when a task on one of its pages has changed since the first page was read: no two pages are shown that never were together", async () => {
+      await open();
+      const first = await run("get", { id: group });
+      const onFirst = first.links.contains[0].id as string;
+      const onSecond = (await run("get", { id: group, continuation: first.more.links.contains.continuation })).links.contains[0].id as string;
+      const pill = (id: string) => page.run<string | null>(`
+        const link = [...document.querySelectorAll('#detail .relation[data-relation="contains"] .link')].find((link) => link.querySelector('.id').textContent === ${JSON.stringify(id)});
+        return link?.querySelector('.pill')?.textContent ?? null;
+      `);
+      assert.deepEqual([await pill(onFirst), await pill(onSecond)], ["open", null], "the first page shows its first task as open, and the second page is not read yet");
+      try {
+        // A task of the first page becomes a draft, then one of the second. The page neither listens nor asks,
+        // and the group is at the version it was. The second page alone would show its task as a draft beside
+        // the first page's task as open, which the group never was.
+        await move(onFirst, "draft");
+        await move(onSecond, "draft");
+        await press(MORE);
+        await links(200, "two pages of the group as it is now");
+        assert.deepEqual([await pill(onFirst), await pill(onSecond), (await shown()).contains, (await shown()).trouble], ["draft", "draft", "200 of 205", null]);
+        assert.deepEqual([await asked("whole"), await asked("further")], [1, 2], "the page that did not fit was dropped, and the group read once from the start with its second page");
+      } finally {
+        await move(onFirst, "open");
+        await move(onSecond, "open");
+      }
+    });
+
+    it("shows the links that lead somewhere when most of an item's links lead nowhere, as damage to the data leaves them", async () => {
+      const waits = await create("Waits for what is partly gone");
+      for (let n = 0; n < 5; n++) await run("add_link", { from: waits, type: "depends on", to: await create(`Is there, number ${n + 1}`) });
+      // 120 links to projects that are not there, which stand before every task in a list: a page of them and more.
+      const { storage, engine } = service;
+      const gone = Array.from({ length: 120 }, (_, n) => ({ fromKind: "task", fromId: waits, type: "depends on", toKind: "project", toId: `GONE${String.fromCharCode(65 + Math.floor(n / 26))}${String.fromCharCode(65 + (n % 26))}` }));
+      const written = async (changes: Array<{ op: "put_link"; record: any } | { op: "delete_link"; key: any }>) => {
+        for (let from = 0; from < changes.length; from += 90) {
+          const { head } = (await storage.load("default"))!;
+          await storage.commit("default", { expectedRevision: head.revision, counters: head.counters, changes: changes.slice(from, from + 90) });
+        }
+        await engine.reload();
+      };
+      await written(gone.map((key) => ({ op: "put_link" as const, record: { ...key, data: { at: "2026-01-01T00:00:00.000Z", by: "1" } } })));
+      try {
+        await open(waits);
+        assert.deepEqual(await listed("depends on", "nothing"), { count: "5", links: 5, more: false, has: false }, "the five that are there, counted as five, with nothing more to ask for");
+        assert.deepEqual([(await shown()).trouble, await count("#detail .further")], [null, 0]);
+      } finally {
+        await written(gone.map((key) => ({ op: "delete_link" as const, key })));
+      }
+    });
+
+    it("reads no list on that is none of the service's, on the board or in the panel: it stops at the answer that shows it, says that what answered is not the service, keeps what it had, and asks for nothing more", async () => {
+      // The table of ways in which a list can be none, which is held against every reader of lists, is run in
+      // the page with the rules the page itself reads by: the service's own, handed over as they are.
+      const source = readFileSync(new URL("./adversary.js", import.meta.url), "utf8").replace(/^export /gm, "").replace(/^\/\/# sourceMappingURL=.*$/m, "");
+      const mark = (question: unknown, key: unknown) => paging.sealToken({ q: paging.questionMark(question), k: key });
+      const arm = async (target: Target) => {
+        await page.run(`const paging = await import('/shared/paging.js'); ${source}; window.attacks = adversary(paging, ${JSON.stringify(target)});`);
+        // The same table here, for what each of its ways is called and is to be told.
+        return adversary(paging, target).map((attack, at) => ({ ...attack, at })).filter((attack) => attack.why !== null);
+      };
+      const answered = (body: string) => `new Response(JSON.stringify(${body}), { status: 200, headers: { 'content-type': 'application/json' } })`;
+      const said = "The service answered with an error: What answered ";
+      const changed = (which: string, change: string) =>
+        gate(`answer = (call, url, options) => ${which}(call) && window.realFetch(url, options).then((real) => real.json()).then((body) => { ${change}; return ${answered("body")}; })`);
+
+      // The board, which reads the list of tasks to its end by itself.
+      await open();
+      const cards = await count(".card");
+      const board = await arm({
+        list: "tasks",
+        entries: "tasks",
+        question: paging.questionOfList("list_tasks"),
+        owner: "nobody",
+        remembers: true,
+        first: 0,
+        held: 0,
+        foreign: {
+          "the list of projects": mark(paging.questionOfList("list_projects"), "ZZZ-1001"),
+          "the list of tasks asked with a filter": mark(paging.questionOfList("list_tasks", { status: "open" }), "ZZZ-1001"),
+          "a list of an item": mark(paging.itemListQuestion({ kind: "task", id: group }, ["links", "contains"]), "task:ZZZ-1001"),
+          "the list of tasks, as a service gives it under a filter": (await run("list_tasks", { status: "open" })).continuation,
+        },
+      });
+      assert.ok(board.length > 25, `${board.length} ways`);
+      const notice = () => page.run<string | null>("const notice = document.getElementById('notice'); return notice.hidden ? null : notice.textContent");
+      for (const attack of board) {
+        await page.run(`window.attack = window.attacks[${attack.at}]; window.attackAsked = 0`);
+        await gate(`answer = (call) => call.path === '/api/list-tasks' && (() => { const made = window.attack.page(++window.attackAsked, call.body.continuation); return ${answered("{ tasks: made.entries, ...(Object.hasOwn(made, 'continuation') ? { continuation: made.continuation } : {}) }")}; })()`);
+        await press("#refresh");
+        await page.until("return !document.getElementById('notice').hidden", `the page to say that the list of tasks is none: ${attack.name}`, 30000);
+        const [text, requests] = [await notice(), await page.run<number>("return window.attackAsked")];
+        assert.ok(text?.startsWith(`${said}list-tasks did not answer as this Vigile service does: ${attack.why}. Trying again every few seconds. Showing what was loaded at `), `${attack.name}: ${text}`);
+        assert.equal(requests, attack.requests, `${attack.name}: ${requests} pages were asked for`);
+        assert.equal(await count(".card"), cards, `${attack.name}: the board is as it was loaded`);
+        // The service answers as it does again: the page reads the plan, and says nothing more.
+        await gate("answer = null");
+        await press("#refresh");
+        await page.until("return document.getElementById('notice').hidden", "the notice to go");
+      }
+      assert.equal(await count(".card"), cards);
+
+      // The panel, which reads a list of the item on when the person asks for it: its links, and its history.
+      const item = await run("get", { id: group, history: true });
+      const other = made.find((id) => id !== group)!;
+      const ref = { kind: "task", id: group };
+      const ofLinks: Target = {
+        list: "links",
+        entries: "links",
+        question: paging.itemListQuestion(ref, ["links", "contains"]),
+        owner: "nobody",
+        remembers: true,
+        first: 1,
+        held: 100,
+        seen: item.links.contains[0],
+        foreign: {
+          "the list of tasks": (await run("list_tasks", {})).continuation,
+          "that list of another item": mark(paging.itemListQuestion({ kind: "task", id: other }, ["links", "contains"]), "task:ZZZ-1001"),
+          "another list of links of the item": mark(paging.itemListQuestion(ref, ["links", "depends on"]), "task:ZZZ-1001"),
+          "the history of the item": item.more.history.continuation,
+          "that list of a project of the same ID": mark(paging.itemListQuestion({ kind: "project", id: group }, ["links", "contains"]), "task:ZZZ-1001"),
+        },
+      };
+      const ofHistory: Target = {
+        list: "history",
+        entries: "changes",
+        question: paging.itemListQuestion(ref, ["history"]),
+        owner: "nobody",
+        remembers: true,
+        first: 1,
+        held: 100,
+        seen: item.history[0],
+        foreign: {
+          "the list of tasks": ofLinks.foreign["the list of tasks"]!,
+          "the history of another item": mark(paging.itemListQuestion({ kind: "task", id: other }, ["history"]), [0, 5]),
+          "the links of the item": item.more.links.contains.continuation,
+          "the timeline of the item": mark(paging.itemListQuestion(ref, ["timeline"]), 5),
+        },
+      };
+      const inPanel: Array<[target: Target, button: string, shape: string]> = [
+        [ofLinks, MORE, "links: { contains: made.entries }, ...(Object.hasOwn(made, 'continuation') ? { more: { links: { contains: { total: 205, continuation: made.continuation } } } } : {})"],
+        [ofHistory, EARLIER, "history: made.entries, ...(Object.hasOwn(made, 'continuation') ? { more: { history: { total: 900, continuation: made.continuation } } } : {})"],
+      ];
+      let was = await open();
+      for (const [target, button, shape] of inPanel) {
+        const table = await arm(target);
+        assert.ok(table.length > 35, `${target.entries}: ${table.length} ways`);
+        for (const attack of table) {
+          was = await open();
+          await arm(target);
+          await page.run(`window.attack = window.attacks[${attack.at}]; window.attackAsked = 0`);
+          await gate(`answer = (call) => window.further(call) && (() => { const made = window.attack.page(++window.attackAsked, call.body.continuation); return ${answered(`{ kind: 'task', id: ${JSON.stringify(group)}, version: ${item.version}, unchanged_since: ${item.unchanged_since}, ${shape} }`)}; })()`);
+          // As many pages are asked for as the way takes, and more: the reading that is under way reads them all.
+          await page.run(`for (let clicks = 0; clicks < ${attack.requests + 2}; clicks++) document.querySelector(${JSON.stringify(button)})?.click()`);
+          await page.until("return Boolean(document.querySelector('#detail .not-read'))", `the panel to say that the list of ${target.entries} is none: ${attack.name}`, 30000);
+          const state = await shown();
+          assert.deepEqual(
+            [state.title, part(state), await page.run<number>("return window.attackAsked")],
+            [was, { ...first, trouble: `${said}for a list of ${group} did not answer as this Vigile service does: ${attack.why}. This is the item as it was read before.`, retry: true }, attack.requests],
+            `${target.entries}, ${attack.name}: what was read stays, the list still says that it is a part, and no page more was asked for`,
+          );
+        }
+      }
+
+      // A continuation page that names another list as going on is not the end of the requested list, nor can
+      // unrelated continuation metadata be ignored beside the right metadata. In either case the old panel stays.
+      for (const [what, change] of [
+        ["another list instead", "body.more.links = { 'depends on': body.more.links.contains }"],
+        ["another list as well", "body.more.links['depends on'] = body.more.links.contains"],
+      ] as const) {
+        was = await open();
+        await changed("window.further", change);
+        await press(MORE);
+        await page.until("return Boolean(document.querySelector('#detail .not-read'))", `the panel to reject continuation metadata for ${what}`);
+        assert.deepEqual([(await shown()).contains, (await shown()).links, (await shown()).more, (await shown()).trouble], ["100 of 205", 100, "Show more", `${said}for a list of ${group} did not answer as this Vigile service does: it names another list among those that go on. This is the item as it was read before.`], what);
+        await gate("answer = null");
+      }
+
+      was = await open();
+      await page.run(`document.querySelector(${JSON.stringify(MORE)}).click()`);
+      await links(200, "the next page, as the service gives it");
+      // As the service answers, the same clicks read on: the reader that refuses what is none takes what is one.
+      assert.deepEqual([(await shown()).contains, (await shown()).trouble], ["200 of 205", null]);
+
+      // The item itself, read with a list that goes on in a way no list of the service's does: the button is
+      // there, and what it finds is said before anything is sent. It is not a list that has ended, and what was
+      // given as a token is not sent to be refused.
+      const firstPages: Array<[what: string, change: string, why: string]> = [
+        ["no token", "delete body.more.links.contains.continuation", "it goes on with what is no continuation token"],
+        ["words where the token is", "body.more.links.contains.continuation = 'the next page'", "it goes on with what is no continuation token"],
+        ["the token of its history", "body.more.links.contains.continuation = body.more.history.continuation", "it goes on with the token of another list"],
+        ["the token of that list of another item", `body.more.links.contains.continuation = ${JSON.stringify(ofLinks.foreign["that list of another item"])}`, "it goes on with the token of another list"],
+        ["the token of the list of tasks", `body.more.links.contains.continuation = ${JSON.stringify(ofLinks.foreign["the list of tasks"])}`, "it goes on with the token of another list"],
+        ["a link twice in its first page", "body.links.contains[7] = body.links.contains[3]", `it holds task:${item.links.contains[3].id} twice`],
+      ];
+      for (const [what, change, why] of firstPages) {
+        await open();
+        await changed("window.whole", change);
+        await rename(`${was}, read with ${what}`);
+        await press("#refresh");
+        await page.until(`return document.querySelector('#detail .detail-title')?.textContent === ${JSON.stringify(`${was}, read with ${what}`)}`, "the item as it was read again");
+        assert.deepEqual([(await shown()).contains, (await shown()).more, (await shown()).trouble], ["100 of 205", "Show more", null], what);
+        await press(MORE);
+        await page.until("return Boolean(document.querySelector('#detail .not-read'))", `the panel to say that the list goes on with ${what}`);
+        assert.deepEqual([(await shown()).trouble, (await shown()).contains, (await shown()).links], [`${said}for a list of ${group} did not answer as this Vigile service does: ${why}. This is the item as it was read before.`, "100 of 205", 100], what);
+        assert.equal(await asked("further"), 0, `${what}: nothing was sent`);
+        await gate("answer = null");
+      }
+      await rename(was);
+    });
+
+    it("shows that the item is gone when it was deleted for good while its panel was open, whichever reading finds out", async () => {
+      // A task of its own, with a timeline longer than a page.
+      const busy = (await run("create_task", { title: "Soon gone", description: "d" })).id as string;
+      let version = 1;
+      for (let n = 1; n <= 105; n++) version = (await run("set_task_status", { id: busy, version, status: n % 2 ? "draft" : "open" })).version;
+      await open(busy);
+      assert.equal(await text("#detail .partial"), "The latest 100 of 106.");
+      await run("delete", { id: busy, version });
+      await service.engine.execute("delete", "admin", { id: busy, version: version + 1, permanent: true });
+      await press("#detail .further[data-list='timeline']");
+      await page.until("return Boolean(document.querySelector('#detail .empty'))", "the panel to say that the task is not there");
+      const gone = await shown();
+      assert.deepEqual([gone.title, gone.retry, gone.trouble], [null, true, null]);
+      assert.match(gone.empty!, /^No task matches/);
+      assert.equal(await count("#detail .timeline li"), 0, "nothing of the task is left in the panel");
+    });
+
+    it("empties the panel when the key is refused while a page is asked for, and opens the item at its first page once the page is let in again", async () => {
+      const was = await open();
+      const locked = () => page.until("return Boolean(document.querySelector('#notice input')) && document.getElementById('main').hidden", "the key form");
+      const nothing = async (why: string) => assert.deepEqual([(await shown()).hidden, await page.run<number>("return document.getElementById('detail').childElementCount")], [true, 0], why);
+      const letIn = async () => {
+        await page.click("#notice input");
+        await page.type(adminKey);
+        await page.click("#notice button");
+        await links(100, "the item named in the address, once let in");
+        assert.deepEqual([(await shown()).title, part(await shown())], [was, first]);
+      };
+      try {
+        // The page is locked out while a page of a list is on its way: the answer, which was given before, shows nothing.
+        await gate("hold = window.once(window.further)");
+        await press(MORE);
+        await held(1);
+        setValue(config, "auth.keyless_user", "");
+        await press("#refresh");
+        await locked();
+        await release();
+        await page.wait(300);
+        await nothing("the answer that was on its way puts nothing of the item into the page");
+        await letIn();
+        // The key is refused to the request for the page itself.
+        await page.run("localStorage.removeItem('vigile.key')");
+        await press(MORE);
+        await locked();
+        await nothing("nothing of the item stays in the page");
+        await letIn();
+      } finally {
+        setValue(config, "auth.keyless_user", "agent1");
+        await page.run("localStorage.clear()");
+      }
     });
   });
 
@@ -3032,21 +3790,23 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
           await run("add_link", { from: "WEB", type: "contains", to: moved });
           for (const project of ["LONGNAME", "EMPTY"]) await run("remove_link", { from: project, type: "contains", to: moved });
         });
-        const listed = async (id: string) => (await run("get", { id })).links;
-        assert.deepEqual((await listed(moved))["is contained"].map((link: { id: string }) => link.id), ["LONGNAME", "EMPTY"]);
+        // The order in which the service lists a task's links is that of the task's summary, which is what the
+        // page draws from: the links of `get` are in the order of their IDs whatever was linked first.
+        const listed = async (id: string) => (await run("get", { id })) as { contained_in: string[]; depends_on: string[] };
+        assert.deepEqual((await listed(moved)).contained_in, ["EMPTY", "LONGNAME"]);
         await load("/#graph");
         await graphReady();
         const first = await numbered();
         const home = await page.run<string>(`return ${item(moved)}.parent().id()`);
 
-        // Its projects are listed the other way round, and so are two of the twelve tasks another one waits for.
+        // Removing and adding links in another order leaves the service's deterministic ID order unchanged.
         await run("remove_link", { from: "LONGNAME", type: "contains", to: moved });
         await run("add_link", { from: "LONGNAME", type: "contains", to: moved });
-        assert.deepEqual((await listed(moved))["is contained"].map((link: { id: string }) => link.id), ["EMPTY", "LONGNAME"]);
-        const waited = (await listed(ids.many!))["depends on"].map((link: { id: string }) => link.id) as string[];
+        assert.deepEqual((await listed(moved)).contained_in, ["EMPTY", "LONGNAME"]);
+        const waited = (await listed(ids.many!)).depends_on;
         await run("remove_link", { from: ids.many, type: "depends on", to: waited[0] });
         await run("add_link", { from: ids.many, type: "depends on", to: waited[0] });
-        assert.deepEqual((await listed(ids.many!))["depends on"].map((link: { id: string }) => link.id), [...waited.slice(1), waited[0]]);
+        assert.deepEqual((await listed(ids.many!)).depends_on, waited);
         // The plan is the same, and so is the drawing: not another one, and the task in the box it was in.
         await reread(moved, "In two other projects, listed the other way round");
         assert.deepEqual([await numbered(), await page.run<string>(`return ${item(moved)}.parent().id()`)], [first, home]);
@@ -4692,6 +5452,13 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await press(extra.id);
         await page.until("return !document.getElementById('panel').hidden && Boolean(document.querySelector('#detail .empty'))", "the panel opened from the box of a task that does not exist");
         assert.match(await nothing(), new RegExp(`No .* matches "${extra.id}"`));
+        // The panel offers to read again, as it does whenever it could not read: asked, it says the same, and
+        // the drawing with its greyed box stays as it is.
+        const numbered = await page.run<number>("return window.vigileGraph.scratch('drawing')");
+        await page.run("document.querySelector('#detail .retry').click()");
+        await page.wait(300);
+        assert.match(await nothing(), new RegExp(`No .* matches "${extra.id}"`));
+        assert.deepEqual([await page.run<number>("return document.querySelectorAll('#detail .retry').length"), await page.run<number>("return window.vigileGraph.scratch('drawing')"), (await box(extra.id)).gone], [1, numbered, true]);
         await page.key("Escape");
 
         // Another theme, dark, and reduced motion: the box is as grey in that theme's colours, and the line says the same.
@@ -5038,7 +5805,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         // A task that waits for two others, drawn as that.
         await plan("add_link", { from: M[71]!, type: "depends on", to: M[68]! });
         undo.push(() => plan("remove_link", { from: M[71]!, type: "depends on", to: M[68]! }));
-        assert.deepEqual(await waitsFor(M[71]!), [M[70], M[68]]);
+        assert.deepEqual(await waitsFor(M[71]!), [M[68], M[70]]);
         const first = await drawMid();
         const drawnAs = { task: await box(M[71]!), one: await arrow(M[70]!, M[71]!), other: await arrow(M[68]!, M[71]!) };
 
@@ -5051,8 +5818,8 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await plan("add_link", { from: M[71]!, type: "depends on", to: M[68]! });
         await says("1 arrow is no longer there and greyed out");
         await plan("add_link", { from: M[71]!, type: "depends on", to: M[70]! });
-        // The service lists them the other way round now. That is the plan that was drawn all the same: the line
-        // goes, with its button, and nothing in the drawing is greyed out.
+        // Link insertion order changed, but the service's deterministic ID order did not. The line goes, with
+        // its button, and nothing in the drawing is greyed out.
         assert.deepEqual(await waitsFor(M[71]!), [M[68], M[70]]);
         await says(null);
         assert.equal(await button(), null);

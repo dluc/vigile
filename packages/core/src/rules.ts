@@ -1,13 +1,33 @@
 import { containedTasks, isLive, unfinishedDependencies } from "./calc.js";
-import { VigileError, invalidInput, notFound, refused, type ErrorItem } from "./errors.js";
+import { VigileError, echo, invalidInput, notFound, refused, type ErrorDetails, type ErrorItem } from "./errors.js";
 import { sameRef, type GraphView } from "./graph.js";
 import { normalizeId, refText, splitRef } from "./ids.js";
 import { CONTAINS, DEPENDS_ON, type LinkType } from "./link-types.js";
-import { TASK_FINISHED, TASK_MOVES, type Kind, type Node, type NodeOf, type Ref, type TaskNode, type TaskStatus } from "./model.js";
+import { LIMITS, TASK_FINISHED, TASK_MOVES, type Kind, type Node, type NodeOf, type Ref, type TaskNode, type TaskStatus } from "./model.js";
+import { shortened, type Summary } from "./views.js";
 
 export function errorItem(node: Node): ErrorItem {
   if (node.kind === "user") return { kind: "user", id: node.id, title: node.username };
   return { kind: node.kind, id: node.id, title: node.title, status: node.status };
+}
+
+/**
+ * What is in the way, as a refusal names it: the first few, and how many there are in all when those are not
+ * every one. A refusal says what to do next; it is not the place to read a list of any length.
+ */
+export function blockedBy(nodes: Node[]): Pick<ErrorDetails, "blocking" | "blocking_total"> {
+  if (nodes.length <= LIMITS.blocking) return { blocking: nodes.map(errorItem) };
+  return { blocking: nodes.slice(0, LIMITS.blocking).map(errorItem), blocking_total: nodes.length };
+}
+
+/** How many steps of a path a message shows at each of its ends, when the path is too long to show whole. */
+const PATH_ENDS = 5;
+
+/** A path as a message shows it: whole when it is short, and otherwise its two ends and how many steps lie between. */
+export function pathText(path: Ref[]): string {
+  const steps = path.map(refText);
+  if (steps.length <= 2 * PATH_ENDS + 1) return steps.join(" → ");
+  return [...steps.slice(0, PATH_ENDS), `… ${steps.length - 2 * PATH_ENDS} more …`, ...steps.slice(-PATH_ENDS)].join(" → ");
 }
 
 /**
@@ -17,7 +37,7 @@ export function errorItem(node: Node): ErrorItem {
 export function resolveRef<K extends Kind>(graph: GraphView, input: string, kinds: readonly K[]): NodeOf<K> {
   const { kind: stated, rest } = splitRef(input);
   if (stated && !(kinds as readonly Kind[]).includes(stated)) {
-    throw invalidInput(`"${input}" is a ${stated}, but a ${list(kinds)} is expected here.`);
+    throw invalidInput(`"${echo(input)}" is a ${stated}, but a ${list(kinds)} is expected here.`);
   }
   const candidates = stated ? [stated] : kinds;
   const found: Node[] = [];
@@ -32,12 +52,12 @@ export function resolveRef<K extends Kind>(graph: GraphView, input: string, kind
   }
   if (found.length === 1) return found[0] as NodeOf<K>;
   if (found.length > 1) {
-    throw invalidInput(`"${input}" matches more than one item: ${found.map((n) => `${n.kind}:${n.id}`).join(", ")}.`, [
+    throw invalidInput(`"${echo(input)}" matches more than one item: ${found.map((n) => `${n.kind}:${n.id}`).join(", ")}.`, [
       `Put the kind in front, as in "${found[0]!.kind}:${found[0]!.id}".`,
     ]);
   }
   const onlyUsers = candidates.length === 1 && candidates[0] === "user";
-  throw notFound(`No ${list(candidates)} matches "${input}".`, [
+  throw notFound(`No ${list(candidates)} matches "${echo(input)}".`, [
     onlyUsers ? "Call list_users to see the users." : "Call list_projects or list_tasks to see what exists.",
   ]);
 }
@@ -54,12 +74,12 @@ export function requireLive(node: Node): void {
 }
 
 /** Optimistic concurrency: the change is made only if the client saw the latest version. */
-export function requireVersion(node: Node, version: number, current: () => unknown): void {
+export function requireVersion(node: Node, version: number, current: () => Summary): void {
   if (node.version === version) return;
   throw new VigileError(
     "version_conflict",
     `${describe(node)} changed since you read it: it is at version ${node.version}, you sent ${version}.`,
-    { current: current(), actions: ["Check the current item, then repeat the call with its version."] },
+    { current: shortened(current()), actions: ["Check the current item, then repeat the call with its version."] },
   );
 }
 
@@ -87,7 +107,7 @@ export function checkTaskMove(graph: GraphView, task: TaskNode, to: TaskStatus):
         "unfinished_dependencies",
         `${describe(task)} cannot be ${to === "done" ? "marked done" : "started"}: it is waiting for ${open.length === 1 ? "a dependency" : `${open.length} dependencies`} to finish.`,
         {
-          blocking: open.map(errorItem),
+          ...blockedBy(open),
           actions: [
             "Finish or cancel the items it depends on.",
             `Or call remove_link with type "${DEPENDS_ON}" if the dependency no longer applies.`,
@@ -102,7 +122,7 @@ export function checkTaskMove(graph: GraphView, task: TaskNode, to: TaskStatus):
     const open = containedTasks(graph, task).filter((t) => !TASK_FINISHED.includes(t.status));
     if (open.length) {
       throw refused("unfinished_contents", `${describe(task)} cannot be marked done: it contains ${open.length} unfinished task${open.length === 1 ? "" : "s"}.`, {
-        blocking: open.map(errorItem),
+        ...blockedBy(open),
         actions: ["Finish or cancel the tasks it contains.", `Or call remove_link with type "${CONTAINS}" to move them out.`],
       });
     }
@@ -143,6 +163,15 @@ export function loopPath(graph: GraphView, from: Ref, to: Ref): Ref[] | null {
   return null;
 }
 
+/**
+ * The items on a path as a refusal names them: the first few, and how many there are when those are not all. A
+ * step that leads through an item that is not there, in data that was damaged, is neither named nor counted:
+ * the count is of what could be named.
+ */
+function between(graph: GraphView, steps: Ref[]): Pick<ErrorDetails, "blocking" | "blocking_total"> {
+  return blockedBy(steps.flatMap((ref) => graph.node(ref) ?? []));
+}
+
 export function checkNewLink(graph: GraphView, linkType: LinkType, from: Node, to: Node): void {
   if (!linkType.from.includes(from.kind) || !linkType.to.includes(to.kind)) {
     throw invalidInput(
@@ -154,11 +183,9 @@ export function checkNewLink(graph: GraphView, linkType: LinkType, from: Node, t
   if (linkType.effect === "groups" || linkType.effect === "holds_back") {
     const path = loopPath(graph, from, to);
     if (path) {
-      throw refused("loop", `This link would create a loop, so none of these could ever finish: ${path.map(refText).join(" → ")}.`, {
-        blocking: path.slice(1, -1).flatMap((ref) => {
-          const node = graph.node(ref);
-          return node ? [errorItem(node)] : [];
-        }),
+      throw refused("loop", `This link would create a loop, so none of these could ever finish: ${pathText(path)}.`, {
+        // The items between the two ends of the new link.
+        ...between(graph, path.slice(1, -1)),
         actions: ["Remove one of the links on that path first, or link different items."],
       });
     }

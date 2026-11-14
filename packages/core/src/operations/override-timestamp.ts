@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { invalidInput, refused } from "../errors.js";
+import { echo, invalidInput, refused } from "../errors.js";
 import type { StatusEntry } from "../model.js";
 import { defineWrite } from "../operation.js";
 import { describe, requireLive, requireVersion, resolveRef } from "../rules.js";
@@ -46,12 +46,12 @@ export const overrideTimestamp = defineWrite({
 
     const at = moment(input.value);
     if (at === null) {
-      throw invalidInput(`"${input.value}" is not a date and time.`, [`Give a real date, the time and the zone, for example ${EXAMPLE}.`]);
+      throw invalidInput(`"${echo(input.value)}" is not a date and time.`, [`Give a real date, the time and the zone, for example ${EXAMPLE}.`]);
     }
     // The service writes moments in one form, which years before 1970 and after 9999 do not fit; no work that is
     // carried over is that old.
     if (before(at, EARLIEST)) {
-      throw invalidInput(`"${input.value}" is before 1970, which is earlier than any date the service keeps.`, ["Give the date and time it really happened."]);
+      throw invalidInput(`"${echo(input.value)}" is before 1970, which is earlier than any date the service keeps.`, ["Give the date and time it really happened."]);
     }
     if (before(ctx.now, at)) {
       throw refused("timestamp_in_future", `${describe(node)} cannot have its ${input.name} set to ${at}: that is in the future. It is now ${ctx.now}.`, {

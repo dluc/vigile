@@ -1,11 +1,14 @@
 import { z } from "zod";
 import { assignees, containedTasks, hasParentTask, isLive, taskCalc, type Known } from "../calc.js";
-import { compareTaskIds } from "../ids.js";
 import { TASK_STATUSES, TASK_TYPES } from "../model.js";
 import { defineRead } from "../operation.js";
 import { resolveRef } from "../rules.js";
 import { taskSummary } from "../views.js";
-import { continuation, isId, paginate } from "./shared.js";
+import { describeList } from "../paging.js";
+import { continuation, cursor, paginate, type Cursor } from "./shared.js";
+
+/** The tokens of a list of tasks, for the filters it was asked with. The list is in the order of the IDs, and a token carries the ID of the last task returned. */
+export const tasksCursor = (input: Record<string, unknown> = {}): Cursor<string> => cursor(describeList("list_tasks", input));
 
 export const listTasks = defineRead({
   name: "list_tasks",
@@ -38,9 +41,9 @@ export const listTasks = defineRead({
     // One reading of the plan: what is learnt about a group for one task is not found out again for the next.
     const known: Known = new Map();
     if (input.has_problems !== undefined) tasks = tasks.filter((t) => taskCalc(ctx.graph, t, known).has_problems === input.has_problems);
-    tasks.sort((a, b) => compareTaskIds(a.id, b.id));
-    const { continuation: token, ...filters } = input;
-    const page = paginate(tasks, (t) => t.id, compareTaskIds, token, { question: ["list_tasks", filters], isKey: isId });
+    const tokens = tasksCursor(input);
+    tasks.sort((a, b) => tokens.list.compare(a.id, b.id));
+    const page = paginate(tasks, (t) => t.id, input.continuation, tokens);
     return { tasks: page.items.map((t) => taskSummary(ctx.graph, t, known)), ...(page.continuation ? { continuation: page.continuation } : {}) };
   },
 });

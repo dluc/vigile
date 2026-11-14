@@ -1,4 +1,4 @@
-import { invalidInput } from "../errors.js";
+import { echo, invalidInput } from "../errors.js";
 import type { GraphView } from "../graph.js";
 import { refText } from "../ids.js";
 import { sameRef } from "../graph.js";
@@ -21,7 +21,7 @@ export interface LinkEnds {
 export function resolveLink(graph: GraphView, input: { from: string; type: string; to: string }): LinkEnds {
   const found = findLinkType(input.type);
   if (!found) {
-    throw invalidInput(`"${input.type}" is not a link type.`, [
+    throw invalidInput(`"${echo(input.type)}" is not a link type.`, [
       `Use one of: ${LINK_TYPES.map((t) => `"${t.type}" (or its reverse, "${t.reverse}")`).join(", ")}.`,
       "Call list_link_types to see what each one connects and does.",
     ]);

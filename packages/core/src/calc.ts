@@ -1,5 +1,5 @@
 import type { GraphView } from "./graph.js";
-import { refText } from "./ids.js";
+import { comparePlaces, placeOf, refText } from "./ids.js";
 import { ASSIGNED_TO, CONTAINS, DEPENDS_ON } from "./link-types.js";
 import {
   PROJECT_FINISHED,
@@ -103,7 +103,13 @@ export function assignees(graph: GraphView, task: TaskNode): UserNode[] {
   return found;
 }
 
-const names = (items: Ref[]) => items.map(refText).join(", ");
+/** Stable in every store and after every reload: insertion order is not part of an answer. */
+const ordered = <T extends Ref>(items: T[]): T[] => [...items].sort((a, b) => comparePlaces(placeOf(a), placeOf(b)));
+
+/** The first few of the items a problem is about, by name: a problem says that there are more, not which. */
+const names = (items: Ref[]) => `${items.slice(0, 10).map(refText).join(", ")}${items.length > 10 ? ", …" : ""}`;
+/** The same, with how many there are in all, for a message that does not say so itself. */
+const namesOfAll = (items: Ref[]) => `${names(items)}${items.length > 10 ? ` (${items.length} in all)` : ""}`;
 
 /**
  * What one reading of the plan has found out so far about which tasks hold unfinished work. A reading that goes
@@ -166,10 +172,10 @@ const TASK_CHECKS: TaskCheck[] = [
   {
     has: (graph, task) => TASK_ADVANCED.includes(task.status) && unfinishedDependencies(graph, task).length > 0,
     describe: (graph, task) => {
-      const open = unfinishedDependencies(graph, task);
+      const open = ordered(unfinishedDependencies(graph, task));
       return {
         code: "unfinished_dependency",
-        message: `Status is ${task.status}, but it depends on work that is not finished: ${names(open)}.`,
+        message: `Status is ${task.status}, but it depends on work that is not finished: ${namesOfAll(open)}.`,
         items: open.map(toRef),
       };
     },
@@ -180,10 +186,10 @@ const TASK_CHECKS: TaskCheck[] = [
     // once for each group in one reading of the plan; which tasks they are is gathered only to say so.
     has: (graph, task, known) => task.status === "done" && hasUnfinishedInside(graph, task, known),
     describe: (graph, task) => {
-      const open = containedTasks(graph, task).filter((t) => !TASK_FINISHED.includes(t.status));
+      const open = ordered(containedTasks(graph, task).filter((t) => !TASK_FINISHED.includes(t.status)));
       return {
         code: "done_with_unfinished_contents",
-        message: `Status is done, but ${open.length} of the tasks it contains ${open.length === 1 ? "is" : "are"} not finished: ${names(open.slice(0, 10))}${open.length > 10 ? ", …" : ""}.`,
+        message: `Status is done, but ${open.length} of the tasks it contains ${open.length === 1 ? "is" : "are"} not finished: ${names(open)}.`,
         items: open.map(toRef),
       };
     },
@@ -191,8 +197,8 @@ const TASK_CHECKS: TaskCheck[] = [
   {
     has: (graph, task) => !TASK_FINISHED.includes(task.status) && brokenProjects(graph, task).length > 0,
     describe: (graph, task) => {
-      const broken = brokenProjects(graph, task);
-      return { code: "depends_on_broken_project", message: `Depends on a broken project: ${names(broken)}.`, items: broken.map(toRef) };
+      const broken = ordered(brokenProjects(graph, task));
+      return { code: "depends_on_broken_project", message: `Depends on a broken project: ${namesOfAll(broken)}.`, items: broken.map(toRef) };
     },
   },
 ];
@@ -245,19 +251,19 @@ export function projectCalc(graph: GraphView, project: ProjectNode, known: Known
     if (project.status === "broken") {
       problems.push({ code: "project_broken", message: "The project is marked broken.", items: [] });
     }
-    const open = tasks.filter((t) => !TASK_FINISHED.includes(t.status));
+    const open = ordered(tasks.filter((t) => !TASK_FINISHED.includes(t.status)));
     if (project.status === "ready" && open.length) {
       problems.push({
         code: "ready_with_unfinished_tasks",
-        message: `The project is marked ready, but ${open.length} of its tasks are not finished: ${names(open.slice(0, 10))}${open.length > 10 ? ", …" : ""}.`,
+        message: `The project is marked ready, but ${open.length} of its tasks are not finished: ${names(open)}.`,
         items: open.map(toRef),
       });
     }
-    const troubled = tasks.filter((t) => taskHasProblems(graph, t, known));
+    const troubled = ordered(tasks.filter((t) => taskHasProblems(graph, t, known)));
     if (troubled.length) {
       problems.push({
         code: "contains_task_with_problems",
-        message: `Contains tasks that have problems: ${names(troubled.slice(0, 10))}${troubled.length > 10 ? ", …" : ""}.`,
+        message: `Contains tasks that have problems: ${names(troubled)}.`,
         items: troubled.map(toRef),
       });
     }

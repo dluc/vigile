@@ -1,3 +1,4 @@
+import { paging } from "@vigile/core";
 import { ServiceError } from "./client.js";
 import { printable } from "./render.js";
 import type { Ui } from "./ui.js";
@@ -55,6 +56,28 @@ export function usersOf(base: string, answer: unknown): ListedUser[] {
   const isUser = (user: unknown): user is ListedUser => isRecord(user) && typeof user.id === "string" && typeof user.username === "string" && typeof user.type === "string";
   if (!Array.isArray(users) || !users.every(isUser)) throw notAsVigile(base, "POST /api/list-users", '"users" is not a list of users with an id, a username and a type');
   return users;
+}
+
+/**
+ * Every user there is. `list_users` answers with a page of them and where the next begins: each page is looked
+ * at as an answer of `list_users` before it is read, and the pages are asked for to the last.
+ *
+ * The list is read by the steps that hold for whoever reads one (`takePage` in core's `paging.ts`): what says
+ * where the next page begins is sent on once, and only when it is a token of the list of users, after a page
+ * that brings users that were not there before and are further on in the list. The reading holds at most a
+ * hundred thousand users, however they are spread over pages, and asks for at most a thousand pages. So it
+ * ends, with every user or with a word about what answered, before anything more is asked for or kept.
+ */
+export async function allUsers(client: { base: string; call(operation: string, input?: Record<string, unknown>): Promise<unknown> }): Promise<ListedUser[]> {
+  try {
+    return await paging.readToEnd<ListedUser>(paging.describeList("list_users"), async (continuation) => {
+      const answer = await client.call("list_users", continuation === undefined ? {} : { continuation });
+      return { entries: usersOf(client.base, answer), continuation: isRecord(answer) && Object.hasOwn(answer, "continuation") ? answer.continuation : paging.ENDS };
+    });
+  } catch (error) {
+    if (error instanceof paging.NotAList) throw notAsVigile(client.base, "POST /api/list-users", error.why);
+    throw error;
+  }
 }
 
 /** Text that came with an answer, as one line of a report: nothing in it steers the terminal, and it has an end. */

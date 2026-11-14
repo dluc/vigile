@@ -7,10 +7,12 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { initConfig, loadConfig, setValue } from "@vigile/config";
-import { Engine, OPERATIONS, PROJECT_STATUSES, TASK_STATUSES, TASK_TYPES } from "@vigile/core";
+import { Engine, OPERATIONS, LIMITS as SIZES, PROJECT_STATUSES, TASK_STATUSES, TASK_TYPES, paging, readAll } from "@vigile/core";
 import { MemoryStorage, type Snapshot, type StorageAdapter } from "@vigile/storage";
 import { backupTenantFile, everHeld, folderIsHeld, holdFile, holdFolder, holdTenantFiles } from "@vigile/storage-sqlite";
 import { FLAGS, UsageError, configPath, nothingElse, parseArgs, take } from "./args.js";
+import { adversary, type Case, type Target } from "./adversary.js";
+import { allUsers } from "./answers.js";
 import { NoAnswerError, NotRunningError, ServiceClient } from "./client.js";
 import { BUILTINS, calledAs } from "./commands/builtin.js";
 import { config as configCommand } from "./commands/config.js";
@@ -20,7 +22,7 @@ import { optionsOf } from "./commands/operation.js";
 import { EXPECTED, judge } from "./expected.js";
 import { NotReachedError, inTheServicesPlace, onThisMachine, whoAnswers } from "./reach.js";
 import { isPrinted, printable, renderError, renderResult } from "./render.js";
-import { forgetRestore, noteRestore, putBackOrder, putInPlace, recoverRestore, restoreInterrupted } from "./restore.js";
+import { forgetRestore, noteRestore, openAsPlan, putBackOrder, putInPlace, recoverRestore, restoreInterrupted } from "./restore.js";
 import { LIMITS, startService, type Service } from "./service.js";
 import type { Ui } from "./ui.js";
 import { createServer as createHttpServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
@@ -37,6 +39,33 @@ function run(args: string[], env: Record<string, string> = {}): Promise<{ code: 
   });
 }
 
+/**
+ * A token of each list operation as a service makes it, asked without filters, from a plan that has more than
+ * a page of everything; and one of a list of an item. What a token is made of is the service's own: a test that
+ * needs one of a certain list takes a real one.
+ */
+let tokensOfLists: Promise<{ users: string; tasks: string; nextTasks: string; projects: string; ofItem: string }> | undefined;
+function realTokens(): NonNullable<typeof tokensOfLists> {
+  return (tokensOfLists ??= (async () => {
+    const engine = await Engine.open({ storage: new MemoryStorage() });
+    const admin = (name: string, input: Record<string, unknown> = {}): Promise<any> => engine.execute(name, "admin", input);
+    const group = (await admin("create_task", { title: "Group", description: "d" })).id as string;
+    for (let n = 0; n <= SIZES.page; n++) {
+      await admin("create_user", { username: `u${n}`, type: "agent" });
+      await admin("create_task", { title: `T${n}`, description: "d", parent: group });
+      await admin("create_project", { title: `P${n}`, prefix: `Q${String.fromCharCode(65 + Math.floor(n / 26))}${String.fromCharCode(65 + (n % 26))}` });
+    }
+    const tokens = {
+      users: (await admin("list_users")).continuation as string,
+      tasks: (await admin("list_tasks")).continuation as string,
+      nextTasks: (await admin("list_next_tasks")).continuation as string,
+      projects: (await admin("list_projects")).continuation as string,
+      ofItem: (await admin("get", { id: group })).more.links.contains.continuation as string,
+    };
+    assert.ok(Object.values(tokens).every((token) => typeof token === "string" && token !== ""));
+    return tokens;
+  })());
+}
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const probe = createServer();
@@ -143,6 +172,71 @@ describe("what is printed", () => {
     assert.deepEqual(printable({ text: "line one\n\tline two", n: 3, none: null, list: ["a\u0000b"] }), { text: "line one\n\tline two", n: 3, none: null, list: ["a\ufffdb"] });
     // The names of fields are text from the store as much as their values: those of a history entry's changes are printed.
     assert.deepEqual(printable({ changes: { "title\u001b[2J": ["a", "b"] } }), { changes: { "title\ufffd[2J": ["a", "b"] } });
+  });
+
+  it("says of each list that is not whole how much of it is shown and how to read on, also on a page that continues one", () => {
+    const lines: string[] = [];
+    const ui = { fancy: false, paint: (_style: unknown, text: string) => text, out: (line = "") => void lines.push(line), err: (line = "") => void lines.push(line) } as Ui;
+    const printed = () => lines.splice(0).join("\n");
+    // Tokens as the service makes them: what else is not printed into a command.
+    const token = (key: unknown) => Buffer.from(JSON.stringify({ q: "abcdefghijkl", k: key })).toString("base64url");
+    const tok = { links: token("task:WEB-002"), timeline: token(100), history: token([7, 0]), earlier: token([3, 0]), users: token(100) };
+    const entry = (action: string) => ({ at: "2026-01-01T00:00:00.000Z", by: "agent1", action, data: {} });
+    const item = { kind: "task", id: "WEB-001", title: "Many of everything", type: "task", status: "open", priority: 0, value: null, size: null, version: 7, assigned_to: ["ann", "bob"], created_at: "c", created_by: "agent1", updated_at: "u", unchanged_since: 57 };
+    renderResult(
+      ui,
+      "get",
+      {
+        ...item,
+        links: { contains: [{ kind: "task", id: "WEB-002", title: "Inside", status: "open" }], "depends on": [{ kind: "task", id: "WEB-003", title: "First", status: "done" }] },
+        timeline: [{ status: "open", at: "t", by: "agent1" }],
+        history: [entry("created")],
+        more: { assigned_to: { total: 150 }, links: { contains: { total: 250, continuation: tok.links } }, timeline: { total: 300, continuation: tok.timeline }, history: { total: 400, continuation: tok.history } },
+      },
+      "http://x",
+    );
+    const full = printed();
+    assert.match(full, /Assigned to\s+ann, bob, … \(150 in all\)/);
+    assert.match(full, new RegExp(`contains\\s+WEB-002\\s+Inside\\s+open\\n\\s+contains\\s+These are 1 of 250\\. Next page: add --continuation ${tok.links}\\n\\s+depends on\\s+WEB-003`), "the note stands under the list it is about, and only there");
+    assert.match(full, new RegExp(`\\n {2}The latest 1 of 300\\. The ones before: add --continuation ${tok.timeline}\\n\\s+t\\s+open`));
+    assert.match(full, new RegExp(`History\\n {2}The latest 1 of 400\\. The ones before: add --continuation ${tok.history}\\n`));
+
+    // The first page says since which revision of the plan the item and its lists are unchanged, for the pages
+    // after it to be held against.
+    assert.match(full, /\n {2}Version {10}7\n {2}Unchanged since {2}revision 57\n/);
+    // A page that continues a list is the item's ID and version and that list: not the latest entries any more.
+    // It says the revision too, and what another one than the first page's means. What is printed as a page is
+    // the answer to a call with a continuation: it goes by what was called, and not by what the answer looks like.
+    const continued = { id: "WEB-001", continuation: tok.history };
+    renderResult(ui, "get", { kind: "task", id: "WEB-001", version: 7, unchanged_since: 61, history: [entry("created")], more: { history: { total: 400, continuation: tok.earlier } } }, "http://x", continued);
+    const page = printed();
+    assert.match(page, new RegExp(String.raw`^\n {2}WEB-001 {2}v7\n {2}A page of the item as it is unchanged since revision 61\. If the first page said "Unchanged since" another revision, the item or one of its lists has changed in between: read it again from the start\.\n\n {2}History\n {2}A further 1 of 400\. The ones before: add --continuation ${tok.earlier}\n`));
+    assert.equal(/undefined|The latest/.test(page), false, page);
+    // A list whose name is a word every object answers to has no note unless the service gave one.
+    renderResult(ui, "get", { kind: "task", id: "WEB-001", version: 7, unchanged_since: 61, links: { constructor: [{ kind: "task", id: "WEB-009", title: "Odd", status: "open" }] }, more: { links: {} } }, "http://x", continued);
+    assert.equal(/These are|undefined/.test(printed()), false);
+    renderResult(ui, "get", { kind: "task", id: "WEB-001", version: 7, unchanged_since: 61, links: { contains: [] } }, "http://x", continued);
+    assert.match(printed(), /WEB-001 {2}v7\n {2}A page of the item as it is unchanged since revision 61\.[^\n]*\n\n {2}Nothing more\.\n/, "a page that holds nothing says so");
+    renderResult(ui, "list_users", { users: [{ id: "USER-001", username: "admin", type: "admin", built_in: true }], you: "admin", continuation: tok.users }, "http://x");
+    assert.match(printed(), new RegExp(`There are more\\. Next page: add --continuation ${tok.users}\n`));
+
+    // What a command to read on is made with is a token, or nothing is printed: an answer is looked at before it
+    // is printed, and what is no token is not put into a command whatever let it through.
+    assert.match(full, /--continuation [A-Za-z][A-Za-z0-9_-]*\n/);
+    const item0 = { ...item, links: {}, timeline: [{ status: "open", at: "t", by: "agent1" }], history: [entry("created")] };
+    for (const none of [undefined, "", "x y", "$(reboot)", "tok-1", `-${tok.history}`, 5]) {
+      assert.throws(() => renderResult(ui, "get", { ...item0, more: { history: { total: 150, continuation: none } } }, "http://x"), TypeError, `a history that goes on from ${String(none)}`);
+      assert.throws(() => renderResult(ui, "get", { ...item0, more: { timeline: { total: 150, continuation: none } } }, "http://x"), TypeError);
+      assert.throws(() => renderResult(ui, "get", { ...item0, links: { contains: [{ kind: "task", id: "WEB-002", title: "Inside", status: "open" }] }, more: { links: { contains: { total: 150, continuation: none } } } }, "http://x"), TypeError);
+      if (none !== undefined) assert.throws(() => renderResult(ui, "list_users", { users: [{ id: "USER-001", username: "admin", type: "admin", built_in: true }], you: "admin", continuation: none }, "http://x"), TypeError);
+    }
+    lines.length = 0;
+
+    const blocking = [{ kind: "task", id: "WEB-002", title: "Inside", status: "open" }];
+    renderError(ui, { code: "rule_violation", message: "In the way.", blocking, blocking_total: 31 });
+    assert.match(printed(), /· WEB-002 {2}Inside {2}open\n\s+· and 30 more\n/);
+    renderError(ui, { code: "rule_violation", message: "In the way.", blocking });
+    assert.equal(/more/.test(printed()), false);
   });
 });
 
@@ -354,6 +448,174 @@ describe("command line", () => {
     assert.equal(loadConfig(config, {}).config.listen.port, service.server.address() && (service.server.address() as { port: number }).port);
     const shown = await cli("config", "show");
     assert.equal(shown.out.includes(loadConfig(config, {}).config.auth.keys.admin!), false, "keys are masked");
+  });
+});
+
+describe("lists longer than a page, at the command line", () => {
+  let directory: string;
+  let config: string;
+  let service: Service;
+  let group: string;
+  let busy: string;
+  const cli = (...args: string[]) => run([...args, "--config", config]);
+  const as = (username: string) => (operation: string, input: Record<string, unknown>) => service.engine.execute(operation, username, input) as Promise<any>;
+  const names = Array.from({ length: 105 }, (_, n) => `u${String(n).padStart(3, "0")}`);
+
+  before(async () => {
+    directory = mkdtempSync(join(tmpdir(), "vigile-cli-pages-"));
+    config = join(directory, "config.toml");
+    initConfig(config, { name: "cli-pages-test", port: await freePort() });
+    service = await startService({ loaded: loadConfig(config, {}), log: () => {}, warn: () => {} });
+    // 105 users beside the three that are built in, a group of 105 tasks, and a task that changed status 105 times.
+    for (const username of names) await as("admin")("create_user", { username, type: "agent" });
+    group = (await as("agent1")("create_task", { title: "A group of many", description: "d" })).id;
+    for (let n = 1; n <= 105; n++) await as("agent1")("create_task", { title: `Step ${n}`, description: "d", parent: group, assigned_to: ["u000"] });
+    busy = (await as("agent1")("create_task", { title: "Back and forth", description: "d" })).id;
+    for (let n = 1; n <= 105; n++) await as("agent1")("set_task_status", { id: busy, version: n, status: n % 2 ? "draft" : "open" });
+  });
+  after(async () => {
+    await service.stop();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("shows a page of users with list-users and how to read on, and every user with user list", async () => {
+    const first = (await cli("list-users")).out;
+    assert.match(first, /USER-100\s+u096\s+agent/);
+    assert.equal(first.includes("u097"), false, "the first page ends at 100 users");
+    const token = /There are more\. Next page: add --continuation (\S+)/.exec(first)?.[1];
+    assert.ok(token, first);
+    const second = (await cli("list-users", "--continuation", token)).out;
+    assert.deepEqual(second.match(/u\d{3}/g), names.slice(97));
+    assert.equal(second.includes("There are more"), false);
+
+    // Whoever manages the users sees them all, and each with how it connects.
+    const listed = await cli("user", "list");
+    assert.deepEqual(listed.out.match(/\bu\d{3}\b/g), names);
+    assert.match(listed.out, /u104\s+agent\s+API key/);
+    assert.equal(JSON.parse((await cli("user", "list", "--json")).out).length, 108);
+  });
+
+  it("knows a user beyond the first page as a user: in the config, in the doctor's check, at the next start and in a backup", async () => {
+    // The last user of all may be the one a connection without a key acts as.
+    const set = await cli("config", "set", "auth.keyless_user", "u104");
+    assert.equal(set.code, 0, set.err);
+    assert.equal((await cli("config", "set", "auth.keyless_user", "u105")).code, 1);
+    const report = JSON.parse((await cli("doctor", "--json")).out);
+    const check = report.checks.find((c: any) => c.title === "config users exist");
+    assert.deepEqual([check.level, check.detail], ["ok", "106 users with a key"]);
+
+    // Started again, the service finds every user its keys are for, and the one without a key.
+    await service.stop();
+    const warnings: string[] = [];
+    service = await startService({ loaded: loadConfig(config, {}), log: () => {}, warn: (line) => warnings.push(line) });
+    assert.deepEqual(warnings.filter((line) => /there is no user called/.test(line)), []);
+    // A backup of this plan is one the service would start on, with all its users.
+    const backup = JSON.parse((await cli("backup", join(directory, "backups"), "--json")).out);
+    const plan = await openAsPlan("default", backup.files[0].file);
+    assert.equal("users" in plan && plan.users.length, 108, JSON.stringify(plan).slice(0, 300));
+  });
+
+  it("shows the first 100 of an item's links with get, says how many there are, and reads on with the token it gives", async () => {
+    const first = (await cli("get", group)).out;
+    assert.equal(first.match(/^\s+contains\s+\d+\s+Step \d+\s+open$/gm)?.length, 100);
+    const more = /contains\s+These are 100 of 105\. Next page: add --continuation (\S+)/.exec(first);
+    assert.ok(more, first);
+    const rest = await cli("get", group, "--continuation", more[1]!);
+    assert.equal(rest.code, 0, rest.err);
+    assert.deepEqual(rest.out.match(/Step \d+/g), ["Step 101", "Step 102", "Step 103", "Step 104", "Step 105"]);
+    assert.match(rest.out, new RegExp(`^\\s+${group}\\s+v1$`, "m"), "a continued page says which item it is of");
+    assert.equal(/undefined|These are|NaN/.test(rest.out), false, rest.out);
+    // As JSON the same answer is the service's own.
+    const json = JSON.parse((await cli("get", group, "--json")).out);
+    assert.deepEqual([json.links.contains.length, json.more.links.contains.total], [100, 105]);
+    // Each page says since which revision of the plan the item and its lists are unchanged: the first and the
+    // one after it say the same while nothing changes.
+    const since = (out: string) => Number(/(?:Unchanged since\s+revision|unchanged since revision) (\d+)/.exec(out)?.[1]);
+    assert.ok(since(first) > 0, first);
+    assert.equal(since(rest.out), since(first));
+    assert.match(rest.out, /\n\s+A page of the item as it is unchanged since revision \d+\. If the first page said "Unchanged since" another revision, the item or one of its lists has changed in between: read it again from the start\.\n/);
+    // One of the tasks of the first page is taken out of the group. The group's version stays, and the page
+    // that is read with the token from before has the five that follow: put beside the first page they would
+    // make 105 where 104 are left. The page says that it was read after a change.
+    const out = /contains\s+(\d+)\s+Step 1\s/.exec(first)![1]!;
+    await as("agent1")("remove_link", { from: group, type: "contains", to: out });
+    const later = await cli("get", group, "--continuation", more[1]!);
+    assert.match(later.out, new RegExp(`^\\s+${group}\\s+v1$`, "m"), "the group's version has not moved");
+    assert.ok(since(later.out) > since(first), `the first page said revision ${since(first)}, the page read after the change ${since(later.out)}`);
+    assert.equal(later.out.match(/Step \d+/g)?.length, 5);
+    const again = JSON.parse((await cli("get", group, "--json")).out);
+    assert.deepEqual([again.unchanged_since, again.more.links.contains.total, again.version], [since(later.out), 104, 1], "read from the start, the item says the same revision and counts what is left");
+    await as("agent1")("add_link", { from: group, type: "contains", to: out });
+
+    // The same for the tasks a user has: one of the first page is given back.
+    const person = (await cli("get", "u000")).out;
+    const given = /is assigned\s+These are 100 of 105\. Next page: add --continuation (\S+)/.exec(person);
+    assert.ok(given, person);
+    await as("agent1")("remove_link", { from: out, type: "assigned to", to: "u000" });
+    const further = (await cli("get", "u000", "--continuation", given[1]!)).out;
+    assert.ok(since(further) > since(person), `the user's first page said revision ${since(person)}, the page read after the change ${since(further)}`);
+    assert.equal(JSON.parse((await cli("get", "u000", "--json")).out).more.links["is assigned"].total, 104);
+    await as("agent1")("add_link", { from: out, type: "assigned to", to: "u000" });
+    // A token that is of another item is refused, with what to do.
+    const wrong = await cli("get", busy, "--continuation", more[1]!);
+    assert.equal(wrong.code, 1);
+    assert.match(wrong.err, /belongs to another list/);
+  });
+
+  it("shows the latest 100 entries of an item's timeline and history with get, and the ones before on request", async () => {
+    const first = (await cli("get", busy, "--history")).out;
+    const timeline = /The latest 100 of 106\. The ones before: add --continuation (\S+)\n\s+\S+\s+(?:open|draft)\s+by agent1/.exec(first);
+    const history = /History\n\s+The latest 100 of 106\. The ones before: add --continuation (\S+)/.exec(first);
+    assert.ok(timeline && history, first);
+    assert.equal(first.match(/status changed\s+by agent1/g)?.length, 100);
+    assert.equal(/\screated\s+by agent1/.test(first), false, "the creation is before the latest 100");
+    const before = (await cli("get", busy, "--continuation", history[1]!)).out;
+    assert.match(before, /History\n\s+\S+\s+created\s+by agent1\s+as open/);
+    assert.equal(before.match(/status changed\s+by agent1/g)?.length, 5);
+    assert.equal(/undefined|The latest|A further/.test(before), false, before);
+    const earlier = (await cli("get", busy, "--continuation", timeline[1]!)).out;
+    assert.equal(earlier.match(/^\s+\S+T\S+\s+(open|draft)\s+by agent1$/gm)?.length, 6);
+  });
+
+  it("names the first 20 items in the way of a change, and says how many more there are", async () => {
+    const refused = await cli("set-task-status", group, "--version", "1", "--status", "done");
+    assert.equal(refused.code, 1);
+    assert.match(refused.err, /contains 105 unfinished tasks/);
+    assert.equal(refused.err.match(/Step \d+\s+open/g)?.length, 20);
+    assert.match(refused.err, /· and 85 more\n/);
+    // A long word that names nothing is not printed back whole.
+    const unknown = await cli("get", "x".repeat(5000));
+    assert.equal(unknown.code, 1);
+    assert.ok(unknown.err.length < 400, `${unknown.err.length} characters`);
+    assert.match(unknown.err, /matches "x{80}… \(5000 characters\)"/);
+  });
+  it("shows the links that lead somewhere when most of an item's links lead nowhere, as damage to the data leaves them", async () => {
+    const waits = (await as("agent1")("create_task", { title: "Waits for what is partly gone", description: "d" })).id as string;
+    const there = ((await as("agent1")("get", { id: group })).links.contains as Array<{ id: string }>).slice(0, 5).map((item) => item.id);
+    for (const id of there) await as("agent1")("add_link", { from: waits, type: "depends on", to: id });
+    // 120 links to projects that are not there, which stand before every task in a list: a page of them and more.
+    const gone = Array.from({ length: 120 }, (_, n) => ({ fromKind: "task", fromId: waits, type: "depends on", toKind: "project", toId: `GONE${String.fromCharCode(65 + Math.floor(n / 26))}${String.fromCharCode(65 + (n % 26))}` }));
+    const written = async (changes: Array<{ op: "put_link"; record: any } | { op: "delete_link"; key: any }>) => {
+      for (let from = 0; from < changes.length; from += 90) {
+        const { head } = (await service.storage.load("default"))!;
+        await service.storage.commit("default", { expectedRevision: head.revision, counters: head.counters, changes: changes.slice(from, from + 90) });
+      }
+      await service.engine.reload();
+    };
+    await written(gone.map((key) => ({ op: "put_link" as const, record: { ...key, data: { at: "2026-01-01T00:00:00.000Z", by: "1" } } })));
+    try {
+      const shown = await cli("get", waits);
+      assert.equal(shown.code, 0, shown.err);
+      assert.deepEqual(shown.out.match(/^\s+depends on\s+(\d+)\s+Step \d+/gm)?.map((line) => /(\d+)\s+Step/.exec(line)![1]), there, "the five that are there, and nothing that says there is more");
+      assert.equal(/These are|Next page|GONE/.test(shown.out), false, shown.out);
+      const json = JSON.parse((await cli("get", waits, "--json")).out);
+      assert.deepEqual([json.links["depends on"].length, json.depends_on.length, "more" in json], [5, 5, false]);
+      // Whoever checks the instance is told of the damage.
+      const report = JSON.parse((await cli("doctor", "--json")).out);
+      assert.equal(report.checks.find((c: any) => c.title === "graph is consistent").level, "fail");
+    } finally {
+      await written(gone.map((key) => ({ op: "delete_link" as const, key })));
+    }
   });
 });
 
@@ -1783,6 +2045,44 @@ describe("a service that answers in another shape than a Vigile service does", (
       assert.equal(asJson.code, 1, what);
       assert.equal((JSON.parse(asJson.err) as { error: { code: string } }).error.code, "internal", what);
     }
+    // A list of users that is none of the service's, in each way in which a list can be none: the commands
+    // that read all users stop at the first answer that is not one, say what answered wrongly, and have asked
+    // for no page more. The whole table is held against what they read with further down; here, through the
+    // commands, the ways that take a few answers.
+    const real = await realTokens();
+    const users: Target = { list: "users", entries: "users", question: paging.questionOfList("list_users"), owner: "nobody", remembers: true, first: 0, held: 0, foreign: { "the list of tasks": real.tasks, "the list of projects": real.projects, "a list of an item": real.ofItem } };
+    const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\/"]/g, "\\$&");
+    for (const attack of adversary(paging, users).filter((one) => one.why !== null && one.requests <= 3 && !one.limit && !/no list|nothing where|no place in the list$/.test(one.name))) {
+      const says = new RegExp(`answered POST \\/api\\/list-users, but not as a Vigile service does: ${escaped(attack.why!)}\\.`);
+      let asked = 0;
+      swap = (request, body) => {
+        if (request !== USERS) return undefined;
+        const answer = attack.page(++asked, (JSON.parse(body) as { continuation?: unknown }).continuation);
+        return json({ users: answer.entries, you: "admin", ...(Object.hasOwn(answer, "continuation") ? { continuation: answer.continuation } : {}) });
+      };
+      reported(await cli("user", "list"), says, attack.name);
+      assert.equal(asked, attack.requests, `user list, ${attack.name}: ${asked} pages were asked for`);
+      asked = 0;
+      reported(await cli("config", "set", "auth.keyless_user", "agent1"), says, attack.name);
+      assert.equal(asked, attack.requests, `config set, ${attack.name}: ${asked} pages were asked for`);
+      asked = 0;
+      const check = of((await examine()).checks, "config users exist");
+      assert.equal(check?.level, "fail", `${attack.name}: ${JSON.stringify(check)}`);
+      assert.ok(check?.detail?.includes(`the users could not be asked for: `) && check.detail.includes(`but not as a Vigile service does: ${attack.why!.slice(0, 150)}`), `${attack.name}: ${check?.detail}`);
+      assert.equal(asked, attack.requests, `the doctor, ${attack.name}: ${asked} pages were asked for`);
+    }
+    // Users without end, through the command: a thousand pages are asked for, and no more.
+    const endless = adversary(paging, users).find((one) => one.name === "pages without end, each new and each with a new token")!;
+    let through = 0;
+    swap = (request, body) => {
+      if (request !== USERS) return undefined;
+      const answer = endless.page(++through, (JSON.parse(body) as { continuation?: unknown }).continuation);
+      return json({ users: answer.entries, you: "admin", continuation: answer.continuation });
+    };
+    reported(await cli("user", "list"), /answered POST \/api\/list-users, but not as a Vigile service does: it goes on after 1000 pages\./, "users without end, one to a page");
+    assert.equal(through, 1000, `${through} pages were asked for`);
+    swap = () => undefined;
+    swap = () => undefined;
     assert.equal(loadConfig(config, {}).config.auth.keyless_user, "agent1");
     answering("GET /api/admin/status", { change: (status) => ({ ...status, auth: { ...status.auth, keys_of_someone_else: 5 } }) });
     reported(await cli("user", "list"), /answered GET \/api\/admin\/status, but not as a Vigile service does: "auth\.keys_of_someone_else" is not a list of texts\./, "refused keys as a number");
@@ -2263,6 +2563,352 @@ describe("a service that answers in another shape than a Vigile service does", (
     assert.notEqual(loadConfig(config, {}).config.auth.keys.keeper, key);
     assert.match((await cli("user", "remove", "keeper")).out, /✓ User keeper deleted; its API key no longer works/);
   });
+
+  it("reports a list that goes on without the token to read on with as an answer that is not the operation's, and prints no command made of anything else", async () => {
+    // A task with more than a page of tasks in it, and more than two of statuses and of recorded changes.
+    const execute = (name: string, input: Record<string, unknown>): Promise<any> => service.engine.execute(name, "admin", input);
+    const long: string = (await execute("create_task", { title: "Long", description: "A task.", project: "SHP" })).id;
+    let version = 1;
+    for (let n = 0; n <= 2 * SIZES.page; n++) version = (await execute("set_task_status", { id: long, version, status: n % 2 ? "paused" : "in_progress" })).version;
+    for (let n = 0; n <= SIZES.page; n++) await execute("create_task", { title: `Inside ${n}`, description: "A task.", project: "SHP", parent: long });
+    const real = await execute("get", { id: long, history: true });
+    const tokens: Record<string, string> = { history: real.more.history.continuation, timeline: real.more.timeline.continuation, "links.contains": real.more.links.contains.continuation };
+
+    // As the service answers, the command says how to read on in each list, with the token of that list: letters,
+    // digits, "-" and "_", which a shell passes on as they are.
+    const asIs = await cli("get", long, "--history");
+    assert.equal(asIs.code, 0, asIs.err);
+    const printed = [...asIs.out.matchAll(/add --continuation (\S+)/g)].map((found) => found[1]!);
+    assert.deepEqual(printed.sort(), Object.values(tokens).sort());
+    for (const token of printed) assert.match(token, /^[A-Za-z][A-Za-z0-9_-]*$/);
+    const further = await cli("get", long, "--continuation", tokens.history!);
+    assert.equal(further.code, 0, further.err);
+    assert.match(further.out, /A further 100 of \d+\. The ones before: add --continuation [A-Za-z][A-Za-z0-9_-]*\n/);
+
+    // Answered with a list that goes on and no token, or with something else where the token is, nothing is
+    // printed of the answer: no command to read on that names "undefined", and none made of what came.
+    const part = (more: any, list: string) => (list === "links.contains" ? more.links.contains : more[list]);
+    const notThese: Array<[what: string, set: (part: any, list: string) => void]> = [
+      ["no token", (cut) => void delete cut.continuation],
+      ["a token that is empty", (cut) => void (cut.continuation = "")],
+      ["a token that is nothing", (cut) => void (cut.continuation = null)],
+      ["words where the token is", (cut) => void (cut.continuation = "the next page")],
+      ["what a shell would act on where the token is", (cut) => void (cut.continuation = "x; touch /tmp/vigile-was-here; $(reboot)")],
+      ["an option where the token is", (cut) => void (cut.continuation = "--permanent")],
+      ["the token of another list", (cut, list) => void (cut.continuation = list === "history" ? tokens.timeline : tokens.history)],
+      // A token that says it is of this very list, and names nothing a place of the list can be.
+      ...[{}, -1, "nowhere", [1, 2, 3], null].map((none): [string, (part: any, list: string) => void] => [
+        `a token of that list with ${JSON.stringify(none)} for its place`,
+        (cut, list) => void (cut.continuation = paging.sealToken({ q: paging.questionMark(paging.itemListQuestion({ kind: "task", id: long }, list === "links.contains" ? ["links", "contains"] : [list as "timeline" | "history"])), k: none })),
+      ]),
+    ];
+    const nothingOfIt = (result: { out: string; err: string }, what: string) => assert.doesNotMatch(result.out + result.err, /--continuation|undefined|the next page|reboot|--permanent/, what);
+    for (const list of Object.keys(tokens)) {
+      for (const [what, set] of notThese) {
+        answering("POST /api/get", { change: (answer) => (set(part(answer.more, list), list), answer) });
+        const result = await cli("get", long, "--history");
+        reported(result, new RegExp(`answered POST \\/api\\/get, but not as get does: "more\\.${list}\\.continuation" of the task is not the token that reads on in that list`), `${list} with ${what}`);
+        nothingOfIt(result, `${list} with ${what}`);
+      }
+      // As many as there are, and no more than are shown: then nothing goes on.
+      answering("POST /api/get", { change: (answer) => ((part(answer.more, list).total = SIZES.page), answer) });
+      reported(await cli("get", long, "--history"), new RegExp(`but not as get does: "more\\.${list}" of the task does not say how many entries the list has in all, more than the 100 that are shown`), list);
+    }
+    // The same of a page that continues a list.
+    for (const [what, set] of notThese) {
+      answering("POST /api/get", { change: (answer) => (set(answer.more.history, "history"), answer) });
+      const result = await cli("get", long, "--continuation", tokens.history!);
+      reported(result, /answered POST \/api\/get, but not as get does: "more\.history\.continuation" of a page of the task is not the token that reads on in that list/, `a page with ${what}`);
+      nothingOfIt(result, `a page with ${what}`);
+    }
+    // A page of another list than the one that was asked for is not printed as that one.
+    const ofTimeline = await execute("get", { id: long, continuation: tokens.timeline });
+    answering("POST /api/get", json(ofTimeline));
+    reported(await cli("get", long, "--continuation", tokens.history!), /but not as get does: it is a page of timeline of the task SHP-\d+, and not of the list the continuation of the call reads on in/, "a page of the timeline for one of the history");
+    // A list of items that goes on from what is no token.
+    const lists = await realTokens();
+    for (const [command, asked, field] of [["list-users", USERS, "users"], ["list-tasks", "POST /api/list-tasks", "tasks"], ["list-projects", "POST /api/list-projects", "projects"], ["list-next-tasks", "POST /api/list-next-tasks", "tasks"]] as const) {
+      for (const none of ["", "the next page", "$(reboot)", "--permanent", 5, null]) {
+        answering(asked, { change: (answer) => ({ ...answer, continuation: none }) });
+        const result = await cli(command);
+        reported(result, new RegExp(`answered ${asked.replace(/[/]/g, "\\/")}, but not as ${command} does: "continuation" of a list is not a continuation token`), `${command} that goes on from ${JSON.stringify(none)}`);
+        nothingOfIt(result, command);
+      }
+      answering(asked, { change: (answer) => ({ ...answer, [field]: [], continuation: tokens.history }) });
+      reported(await cli(command), /"continuation" of a list says that there is more, after a page that holds nothing/, command);
+      // A token that is one, of another list: of an item, of another operation, of this one asked otherwise.
+      const own = { "list-users": lists.users, "list-tasks": lists.tasks, "list-projects": lists.projects, "list-next-tasks": lists.nextTasks }[command];
+      for (const [what, token] of [["a list of an item", tokens.history], ...Object.entries(lists).filter(([, token]) => token !== own)] as Array<[string, string]>) {
+        answering(asked, { change: (answer) => ({ ...answer, continuation: token }) });
+        const result = await cli(command);
+        reported(result, new RegExp(`but not as ${command} does: "continuation" of a list is not a token of the list that was asked for`), `${command} that goes on with a token of ${what}`);
+        nothingOfIt(result, command);
+      }
+      // Its own token is printed, and so is the token of the list as it was asked for, and no other.
+      // Its own token is printed: the token of the list as it was asked for, which names the place of the last entry shown.
+      const list: paging.ListDescriptor = paging.describeList(command.replaceAll("-", "_") as paging.PagedOperation);
+      // A list of tasks to start is its user's own: its token names a user, which one the command line does not know.
+      const owned = { q: paging.questionMark(list.question), ...(list.owner === paging.SOMEONE ? { w: paging.whoMark("USER-001") } : {}) };
+      const after = (answer: any) => paging.sealToken({ ...owned, k: list.keyOf(answer[field].at(-1)) });
+      let given = "";
+      answering(asked, { change: (answer) => ({ ...answer, continuation: (given = after(answer)) }) });
+      const goesOn = await cli(command);
+      assert.equal(goesOn.code, 0, `${command}: ${goesOn.err}`);
+      assert.match(goesOn.out, new RegExp(`Next page: add --continuation ${given}\n`), command);
+      // The token of its own list for another place than that is not: it would pass entries over, or lead back.
+      for (const [what, key] of [["a place beyond the last entry", list.keyOf({ id: "ZZZZZZZZ-999999", priority: -1e300 })], ["a place before it", list.keyOf({ id: "", priority: 1e300 })], ["no place of the list", {}]] as const) {
+        answering(asked, { change: (answer) => ({ ...answer, continuation: paging.sealToken({ ...owned, k: key }) }) });
+        const result = await cli(command);
+        reported(result, new RegExp(`but not as ${command} does: ${what === "no place of the list" ? `"continuation" of a list is not a token of the list that was asked for` : `"${field}" of a list is not a page of that list: it goes on from another place than the furthest of its entries`}`), `${command} that goes on from ${what}`);
+        nothingOfIt(result, command);
+      }
+      // Whose the list is, the token says as the list has it: a user where the list is nobody's own, or none where it is a user's, is another list's token.
+      answering(asked, { change: (answer) => ({ ...answer, continuation: paging.sealToken({ q: owned.q, ...(list.owner === paging.SOMEONE ? {} : { w: paging.whoMark("USER-001") }), k: list.keyOf(answer[field].at(-1)) }) }) });
+      reported(await cli(command), new RegExp(`but not as ${command} does: "continuation" of a list is not a token of the list that was asked for`), `${command} with a token that says another owner`);
+    }
+    answering("POST /api/list-tasks", { change: (answer) => ({ ...answer, continuation: lists.tasks }) });
+    reported(await cli("list-tasks", "--status", "open"), /but not as list-tasks does: "continuation" of a list is not a token of the list that was asked for/, "the token of all tasks for the list of the open ones");
+    swap = () => undefined;
+    assert.equal((await cli("list-tasks")).code, 0);
+  });
+});
+
+describe("a list that is none of the service's", () => {
+  /**
+   * Holds the table against one reader: each way of not being a list ends the reading at the answer that shows
+   * it, with what is wrong said in the reader's own words, and a list that is one is read whole. `read` reads
+   * the list from what answers; `said` is what the reader says of a reason.
+   */
+  async function against(what: string, target: Target, read: (answer: (sent: unknown) => { entries: unknown; continuation?: unknown }) => Promise<unknown[]>, said: (attack: Case) => string): Promise<number> {
+    const table = adversary(paging, target);
+    for (const attack of table) {
+      let asked = 0;
+      const reading = read((sent) => attack.page(++asked, sent));
+      if (attack.why === null) {
+        const all = await reading;
+        // What a reading returns is what it was given, at most as much as anyone reads.
+        assert.ok(all.length === attack.holds && all.length <= paging.READING.entries, `${what}, ${attack.name}: ${all.length} entries`);
+      } else {
+        await assert.rejects(reading, (error: unknown) => {
+          assert.ok(error instanceof Error, `${what}, ${attack.name}`);
+          assert.equal(error.message, said(attack), `${what}, ${attack.name}`);
+          return true;
+        });
+      }
+      // Nothing is asked for after the answer that was not one, and never more than a thousand pages.
+      assert.equal(asked, attack.requests, `${what}, ${attack.name}: ${asked} pages were asked for`);
+      assert.ok(asked <= paging.READING.pages);
+    }
+    return table.length;
+  }
+  const mark = (question: unknown, key: unknown, who?: string) => paging.sealToken({ q: paging.questionMark(question), ...(who === undefined ? {} : { w: paging.whoMark(who) }), k: key });
+
+  it("is not read on by the engine's own reader, which the service starts and restores with: users, tasks under filters, and a user's own tasks to start", async () => {
+    const real = await realTokens();
+    const call = (field: string, answer: (sent: unknown) => { entries: unknown; continuation?: unknown }) => async (_operation: string, input: Record<string, unknown>) => {
+      const page = answer(input.continuation);
+      return { [field]: page.entries, ...(Object.hasOwn(page, "continuation") ? { continuation: page.continuation } : {}) };
+    };
+    const filters = { status: "open", project: "ALP" };
+    const readers: Array<[operation: string, field: string, input: Record<string, unknown>, who: string | undefined, target: Target]> = [
+      ["list_users", "users", {}, undefined, { list: "users", entries: "users", question: paging.questionOfList("list_users"), owner: "nobody", remembers: true, first: 0, held: 0, foreign: { "the list of tasks": real.tasks, "the list of projects": real.projects, "a list of an item": real.ofItem, "the list of users asked in another way": mark(["list_users", { type: "agent" }], "USER-5000001") } }],
+      [
+        "list_tasks",
+        "tasks",
+        filters,
+        undefined,
+        {
+          list: "tasks",
+          entries: "tasks",
+          question: paging.questionOfList("list_tasks", filters),
+          owner: "nobody",
+          remembers: true,
+          first: 0,
+          held: 0,
+          foreign: {
+            "the list of users": real.users,
+            "the list of all tasks": real.tasks,
+            "the list of tasks to start": real.nextTasks,
+            "the list of tasks under one of its filters": mark(paging.questionOfList("list_tasks", { status: "open" }), "ZZZ-1"),
+            "the list of tasks under one filter more": mark(paging.questionOfList("list_tasks", { ...filters, top_level: true }), "ZZZ-1"),
+            "the list of tasks of another project": mark(paging.questionOfList("list_tasks", { ...filters, project: "BET" }), "ZZZ-1"),
+          },
+        },
+      ],
+      [
+        "list_next_tasks",
+        "tasks",
+        {},
+        "USER-001",
+        {
+          list: "next_tasks",
+          entries: "tasks",
+          question: paging.questionOfList("list_next_tasks"),
+          owner: { who: "USER-001" },
+          remembers: true,
+          first: 0,
+          held: 0,
+          foreign: { "the list of all tasks": real.tasks, "another user's list of tasks to start": mark(paging.questionOfList("list_next_tasks"), [-1e300, "ZZZ-1"], "USER-002"), "the list of tasks to start in a project": mark(paging.questionOfList("list_next_tasks", { project: "ALP" }), [-1e300, "ZZZ-1"], "USER-001") },
+        },
+      ],
+    ];
+    let held = 0;
+    for (const [operation, field, input, who, target] of readers) {
+      held += await against(`readAll of ${operation}`, target, (answer) => readAll(call(field, answer), operation, input, who), (attack) => `${operation} did not answer as its list does: ${attack.why}.`);
+    }
+    assert.ok(held > 90, `${held} ways`);
+    // The filters are the same question in whatever order they are written.
+    assert.equal((await readAll(call("tasks", () => ({ entries: [] })), "list_tasks", { project: "ALP", status: "open" })).length, 0);
+  });
+
+  it("is not read on by the command line where it reads all users: it stops at the first answer that is none, with a hundred thousand users or a thousand pages at most", async () => {
+    const real = await realTokens();
+    const target: Target = { list: "users", entries: "users", question: paging.questionOfList("list_users"), owner: "nobody", remembers: true, first: 0, held: 0, foreign: { "the list of tasks": real.tasks, "the list of projects": real.projects, "the list of tasks to start": real.nextTasks, "a list of an item": real.ofItem, "the list of users asked in another way": mark(["list_users", { type: "agent" }], "USER-5000001") } };
+    // Whether what is listed are users, with an ID, a name and a type, is looked at first, by what the command line has for that.
+    const notUsers = '"users" is not a list of users with an id, a username and a type';
+    const client = (answer: (sent: unknown) => { entries: unknown; continuation?: unknown }) => ({
+      base: "http://x",
+      call: async (_operation: string, input: Record<string, unknown> = {}) => {
+        const page = answer(input.continuation);
+        return { users: page.entries, you: "admin", ...(Object.hasOwn(page, "continuation") ? { continuation: page.continuation } : {}) };
+      },
+    });
+    const ways = await against("allUsers", target, (answer) => allUsers(client(answer)), (attack) => `http://x answered POST /api/list-users, but not as a Vigile service does: ${/no list|nothing where|no place in the list$/.test(attack.name) ? notUsers : attack.why}.`);
+    assert.ok(ways > 30);
+    // A hundred thousand users are read, however they come: in one page, in a thousand, in two.
+    for (const sizes of [[100_000], [99_999, 1], [50_000, 50_000], Array.from({ length: 1000 }, () => 100)]) {
+      const pages = sizes.map((size, n) => Array.from({ length: size }, (_, i) => ({ id: `USER-${sizes.slice(0, n).reduce((sum, earlier) => sum + earlier, 0) + i + 1}`, username: `u${n}x${i}`, type: "agent" })));
+      let asked = 0;
+      const all = await allUsers(client(() => {
+        const n = asked++;
+        return { entries: pages[n]!, ...(n + 1 < pages.length ? { continuation: mark(target.question, pages[n]!.at(-1)!.id) } : {}) };
+      }));
+      assert.deepEqual([all.length, asked], [100_000, sizes.length], `in pages of ${sizes.slice(0, 3).join(", ")}`);
+    }
+    // One more is not: whichever page brings it, the last one or one that goes on, nothing of that page is kept.
+    for (const sizes of [[100_001], [100_000, 1], [99_999, 2], [1, 100_000]]) {
+      const pages = sizes.map((size, n) => Array.from({ length: size }, (_, i) => ({ id: `USER-${sizes.slice(0, n).reduce((sum, earlier) => sum + earlier, 0) + i + 1}`, username: `u${n}x${i}`, type: "agent" })));
+      let asked = 0;
+      await assert.rejects(allUsers(client(() => {
+        const n = asked++;
+        return { entries: pages[n]!, ...(n + 1 < pages.length ? { continuation: mark(target.question, pages[n]!.at(-1)!.id) } : {}) };
+      })), /but not as a Vigile service does: it holds more than 100000 users\.$/, `in pages of ${sizes.join(", ")}`);
+      assert.equal(asked, sizes.length, `in pages of ${sizes.join(", ")}`);
+    }
+  });
+
+  it("is not printed on by the command line: of no answer that is none of a list's own does it print how to read on, for the list operations and for each list of an item", async () => {
+    const real = await realTokens();
+    // Answers of a service, for what an entry of each list carries beside its key.
+    const engine = await Engine.open({ storage: new MemoryStorage() });
+    const admin = (name: string, input: Record<string, unknown> = {}): Promise<any> => engine.execute(name, "admin", input);
+    await admin("create_project", { title: "A project", prefix: "ALP" });
+    const made = await admin("create_task", { title: "A task", description: "d", project: "ALP" });
+    const like = {
+      users: (await admin("list_users")).users[0],
+      tasks: (await admin("list_tasks")).tasks[0],
+      projects: (await admin("list_projects")).projects[0],
+      next_tasks: (await admin("list_next_tasks")).tasks[0],
+    };
+    const item = await admin("get", { id: made.id });
+    const ref = { kind: "task", id: made.id as string };
+    const dressed = (entry: unknown, template: object) => (isRecord(entry) && typeof entry.id === "string" ? { ...template, ...entry } : entry);
+    const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+    /** Reads a list as the command does: one page for each call, each judged before anything of it is printed. The reading ends where a page is not printed. */
+    const printed = (shape: (page: { entries: unknown; continuation?: unknown }, sent: unknown) => [operation: string, input: Record<string, unknown>, answer: unknown], from?: string) => async (answer: (sent: unknown) => { entries: unknown; continuation?: unknown }) => {
+      const all: unknown[] = [];
+      for (let sent: unknown = from; ; ) {
+        const page = answer(sent);
+        const [operation, input, shaped] = shape(page, sent);
+        const why = judge(operation, input, JSON.parse(JSON.stringify(shaped)));
+        if (why !== null) throw new Error(why);
+        all.push(...(page.entries as unknown[]));
+        if (!Object.hasOwn(page, "continuation")) return all;
+        sent = page.continuation;
+      }
+    };
+    /** What the command line says of an answer it does not print. Where the rules of a list say what is wrong, in their words; where the answer is no list of its operation at all, in those of the operation. */
+    const inItsWords = /no continuation token|token of another list|names no place in the list|page that holds nothing|holds no list|no place in the list$/;
+    const said = (attack: Case): RegExp => (inItsWords.test(attack.why!) ? /./s : new RegExp(attack.why!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    const held = async (what: string, target: Target, read: ReturnType<typeof printed>) => {
+      let ways = 0;
+      for (const attack of adversary(paging, target).filter((one) => !one.limit)) {
+        let asked = 0;
+        const reading = read((sent) => attack.page(++asked, sent));
+        if (attack.why === null) assert.equal((await reading).length, attack.holds, `${what}, ${attack.name}`);
+        else {
+          await assert.rejects(reading, (error: unknown) => {
+            assert.match((error as Error).message, said(attack), `${what}, ${attack.name}`);
+            return true;
+          });
+          ways++;
+        }
+        // The page that is none is not printed, and the one after it is never asked for.
+        assert.equal(asked, attack.requests, `${what}, ${attack.name}: ${asked} pages`);
+      }
+      return ways;
+    };
+    const mark = (question: unknown, key: unknown, who?: string) => paging.sealToken({ q: paging.questionMark(question), ...(who === undefined ? {} : { w: paging.whoMark(who) }), k: key });
+    let ways = 0;
+
+    // The list operations.
+    const operations: Array<[operation: paging.PagedOperation, list: Target["list"], input: Record<string, unknown>, foreign: Record<string, string>]> = [
+      ["list_users", "users", {}, { "the list of tasks": real.tasks, "a list of an item": real.ofItem }],
+      ["list_tasks", "tasks", { status: "open" }, { "the list of all tasks": real.tasks, "the list of users": real.users, "the list of tasks under another filter": mark(paging.questionOfList("list_tasks", { status: "done" }), "ZZZ-1001") }],
+      ["list_projects", "projects", {}, { "the list of tasks": real.tasks, "the list of projects with problems": mark(paging.questionOfList("list_projects", { has_problems: true }), "9000000000000001") }],
+      ["list_next_tasks", "next_tasks", { project: "ALP" }, { "the list of all tasks": real.tasks, "the list of tasks to start anywhere": real.nextTasks }],
+    ];
+    for (const [operation, list, input, foreign] of operations) {
+      const described = paging.describeList(operation, input);
+      const field = paging.PAGED[operation];
+      const target: Target = { list, entries: described.entries, question: described.question, owner: list === "next_tasks" ? "someone" : "nobody", remembers: false, first: 0, held: 0, foreign };
+      const shape = (page: { entries: unknown; continuation?: unknown }, sent: unknown): [string, Record<string, unknown>, unknown] => [
+        operation,
+        { ...input, ...(sent === undefined ? {} : { continuation: sent }) },
+        { [field]: Array.isArray(page.entries) ? page.entries.map((entry) => dressed(entry, like[list as keyof typeof like])) : page.entries, ...(operation === "list_users" ? { you: "admin" } : {}), ...(Object.hasOwn(page, "continuation") ? { continuation: page.continuation } : {}) },
+      ];
+      ways += await held(operation, target, printed(shape));
+    }
+
+    // Each list of an item, read on from a page of it: its links under a name, its timeline, its history.
+    const lists: Array<[at: paging.At, list: Target["list"], from: unknown]> = [
+      [["links", "contains"], "links", "task:000"],
+      [["links", "is depended on by"], "links", "project:ALP"],
+      [["timeline"], "timeline", 1_000_000_000],
+      [["history"], "history", [5, 0]],
+    ];
+    for (const [at, list, from] of lists) {
+      const described: paging.ListDescriptor = paging.describeItemList(ref, at);
+      const others = lists.filter(([other]) => other !== at).map(([other, , place]): [string, string] => [`the item's ${other.join(" ")}`, mark(paging.itemListQuestion(ref, other), place)]);
+      const target: Target = {
+        list,
+        entries: described.entries,
+        question: described.question,
+        owner: "nobody",
+        remembers: false,
+        first: 1,
+        held: 0,
+        foreign: { "the list of tasks": real.tasks, "that list of another item": mark(paging.itemListQuestion({ kind: "task", id: "ALP-999" }, at), from), "that list of a project of the same ID": mark(paging.itemListQuestion({ kind: "project", id: ref.id }, at), from), ...Object.fromEntries(others) },
+      };
+      const shape = (page: { entries: unknown; continuation?: unknown }, sent: unknown): [string, Record<string, unknown>, unknown] => {
+        const goesOn = Object.hasOwn(page, "continuation") ? { total: (Array.isArray(page.entries) ? page.entries.length : 0) + 5, continuation: page.continuation } : undefined;
+        return [
+          "get",
+          { id: ref.id, continuation: sent },
+          {
+            kind: "task",
+            id: ref.id,
+            version: item.version,
+            unchanged_since: item.unchanged_since,
+            ...(at[0] === "links" ? { links: { [at[1]]: page.entries } } : { [at[0]]: page.entries }),
+            ...(goesOn ? { more: at[0] === "links" ? { links: { [at[1]]: goesOn } } : { [at[0]]: goesOn } } : {}),
+          },
+        ];
+      };
+      ways += await held(`get, ${at.join(" ")}`, target, printed(shape, mark(described.question, from)));
+    }
+    assert.ok(ways > 250, `${ways} ways`);
+  });
 });
 
 describe("the answer of each operation", () => {
@@ -2459,42 +3105,32 @@ describe("the answer of each operation", () => {
     assert.match(judge("get_guide", { topic: "examples" }, answerOf("get_guide")) ?? "", /"topic" of a guide is not "examples"/);
     assert.equal(judge("get_guide", {}, answerOf("get_guide")), null);
   });
-  it("has every field the service sends, of the kind the service sends it as: one that is missing or of another kind is turned away", async () => {
-    // Items that carry all a service can say of an item: a task that contains another, waits for one, is
-    // assigned, has a problem and is finished or deleted; a project with a problem; every kind of link.
-    await call("add_link", { from: "ALP-005", type: "assigned to", to: "resetme" });
-    await call("create_task", { title: "Inside", description: "A task.", project: "ALP", parent: "ALP-005" });
-    await call("add_link", { from: "ALP-005", type: "depends on", to: "ALP-008" });
-    await call("set_project_status", { id: "ALP", version: 1, status: "ready" });
-    const started = await call("set_task_status", { id: "ALP-004", version: 2, status: "in_progress" });
-    await call("set_task_status", { id: "ALP-004", version: started.version, status: "done" });
-    const answers: Array<[what: string, name: string, input: Record<string, unknown>, answer: any]> = [];
-    for (const { name, input, answer } of calls) answers.push([`the answer of ${name}`, name, input, answer]);
-    for (const [name, input] of [
-      ["list_tasks", {}],
-      ["list_next_tasks", {}],
-      ["list_projects", {}],
-      ["list_users", {}],
-      ["get", { id: "ALP-005", history: true }],
-      ["get", { id: "ALP-004", history: true }],
-      ["get", { id: "ALP-006" }],
-      ["get", { id: "ALP", history: true }],
-      ["get", { id: "resetme", history: true }],
-    ] as Array<[string, Record<string, unknown>]>) {
-      answers.push([`${name} ${JSON.stringify(input)}`, name, input, await call(name, input)]);
-    }
-    // What the items show between them: every field that is sent only when there is something to say.
-    const tasks: any[] = (await call("list_tasks", {})).tasks;
-    const read = await call("get", { id: "ALP-005", history: true });
-    assert.ok(tasks.some((task) => task.problems?.length) || (await call("list_projects", {})).projects.some((project: any) => project.problems?.length), "an item with a problem");
-    assert.ok(tasks.some((task) => task.progress) && tasks.some((task) => task.completed_at) && tasks.some((task) => task.is_waiting && task.waiting_for.length && task.depends_on.length) && tasks.some((task) => task.assigned_to.length && task.contained_in.length));
-    assert.ok((await call("get", { id: "ALP-006" })).deleted_at, "a deleted item");
-    assert.ok(Object.keys(read.links).length >= 3 && read.timeline.length && read.history.length, JSON.stringify(read.links));
-
+  /**
+   * Holds answers of a real service against what is expected of them, field by field: each is taken as it is,
+   * turned away without a field the service always sends, taken without one it sends only when there is
+   * something to say, and turned away with any field as another kind than it is. Says how many were tried.
+   */
+  const held = (answers: Array<[what: string, name: string, input: Record<string, unknown>, answer: any]>): number => {
     // The fields the service sends only when there is something to say, and what a history entry says in a shape
     // of its own, which is not looked into.
-    const mayBeAbsent = (path: string[], of: { kind?: unknown }): boolean => {
+    const mayBeAbsent = (path: string[], of: { kind?: unknown }, input: Record<string, unknown>, answer: any): boolean => {
       const last = path.at(-1)!;
+      // The next page of one list, which get answers to a call with a continuation, is that list: without it
+      // there is no page. A page of links is under the one name those links read by.
+      if (input.continuation !== undefined && ["links", "timeline", "history"].includes(path[0]!) && path.length <= (path[0] === "links" ? 2 : 1)) return false;
+      // What says that lists go on is there only when one does, and names only those that do: it may be absent,
+      // and so may any list in it but the last, without which it would name none. Of a list that is named,
+      // how many it has is always said, and of one that can be read on the token that does: never one without
+      // the other.
+      if (path[0] === "more") {
+        if (path.length === 1) return true;
+        if (last === "total" || last === "continuation") return false;
+        return Object.keys(of).length > 1;
+      }
+      // A list that is said to go on is there.
+      const cut = answer?.more ?? {};
+      if (path.length === 1 && Object.hasOwn(cut, last)) return false;
+      if (path.length === 2 && path[0] === "links" && Object.hasOwn(cut.links ?? {}, last)) return false;
       if (["problems", "completed_at", "deleted_at", "continuation", "warning", "history"].includes(last)) return true;
       // How far a task has come is said only of one that contains others. Of a project it is always said.
       if (last === "progress") return of.kind === "task";
@@ -2528,7 +3164,7 @@ describe("the answer of each operation", () => {
           const without = copy(answer);
           delete at(without, path.slice(0, -1))[path.at(-1)!];
           const why = judge(name, input, without);
-          if (mayBeAbsent(path, parent)) assert.equal(why, null, `${where} may be absent`);
+          if (mayBeAbsent(path, parent, input, answer)) assert.equal(why, null, `${where} may be absent`);
           else assert.ok(typeof why === "string", `${where} is required: without it the answer is turned away`);
           tried++;
         }
@@ -2540,6 +3176,42 @@ describe("the answer of each operation", () => {
         }
       }
     }
+    return tried;
+  };
+
+  it("has every field the service sends, of the kind the service sends it as: one that is missing or of another kind is turned away", async () => {
+    // Items that carry all a service can say of an item: a task that contains another, waits for one, is
+    // assigned, has a problem and is finished or deleted; a project with a problem; every kind of link.
+    await call("add_link", { from: "ALP-005", type: "assigned to", to: "resetme" });
+    await call("create_task", { title: "Inside", description: "A task.", project: "ALP", parent: "ALP-005" });
+    await call("add_link", { from: "ALP-005", type: "depends on", to: "ALP-008" });
+    await call("set_project_status", { id: "ALP", version: 1, status: "ready" });
+    const started = await call("set_task_status", { id: "ALP-004", version: 2, status: "in_progress" });
+    await call("set_task_status", { id: "ALP-004", version: started.version, status: "done" });
+    const answers: Array<[what: string, name: string, input: Record<string, unknown>, answer: any]> = [];
+    for (const { name, input, answer } of calls) answers.push([`the answer of ${name}`, name, input, answer]);
+    for (const [name, input] of [
+      ["list_tasks", {}],
+      ["list_next_tasks", {}],
+      ["list_projects", {}],
+      ["list_users", {}],
+      ["get", { id: "ALP-005", history: true }],
+      ["get", { id: "ALP-004", history: true }],
+      ["get", { id: "ALP-006" }],
+      ["get", { id: "ALP", history: true }],
+      ["get", { id: "resetme", history: true }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      answers.push([`${name} ${JSON.stringify(input)}`, name, input, await call(name, input)]);
+    }
+    // What the items show between them: every field that is sent only when there is something to say.
+    const tasks: any[] = (await call("list_tasks", {})).tasks;
+    const read = await call("get", { id: "ALP-005", history: true });
+    assert.ok(tasks.some((task) => task.problems?.length) || (await call("list_projects", {})).projects.some((project: any) => project.problems?.length), "an item with a problem");
+    assert.ok(tasks.some((task) => task.progress) && tasks.some((task) => task.completed_at) && tasks.some((task) => task.is_waiting && task.waiting_for.length && task.depends_on.length) && tasks.some((task) => task.assigned_to.length && task.contained_in.length));
+    assert.ok((await call("get", { id: "ALP-006" })).deleted_at, "a deleted item");
+    assert.ok(Object.keys(read.links).length >= 3 && read.timeline.length && read.history.length, JSON.stringify(read.links));
+
+    const tried = held(answers);
     assert.ok(tried > 2000, `${tried} answers with one field missing or of another kind`);
 
     // Of the right kind and still not what the service sends: a version that is no whole number from 1 up, an
@@ -2588,6 +3260,251 @@ describe("the answer of each operation", () => {
     for (const [item, id] of [[task, "alp-005"], [task, "ALP-5"], [project, "alp"], [user, user.id.toLowerCase()], [user, "USER-9"]] as Array<[any, string]>) {
       assert.match(judge("get", { id }, { ...item, id }) ?? "", /"id" of the \w+ is not the ID of a \w+/, `${item.kind} with the ID ${id}`);
     }
+  });
+
+  it("has what says that a list is longer than a page: the lists of get that are cut, the next page of one of them, which is no whole item, and the next page of users", async () => {
+    // A task with more than a page of everything a task has lists of: tasks in it and tasks it is in, tasks it
+    // waits for, users it is assigned to, statuses it has had, changes that were recorded. A project and a
+    // user with more than a page of links.
+    const over = SIZES.page + 1;
+    await call("create_project", { title: "Long lists", prefix: "LNG" });
+    await call("create_user", { username: "manyhands", type: "agent" });
+    const many: string = (await call("create_task", { title: "Many of everything", description: "A task.", project: "LNG" })).id;
+    let version = 1;
+    for (let n = 0; n < over; n++) version = (await call("set_task_status", { id: many, version, status: n % 2 ? "paused" : "in_progress" })).version;
+    for (let n = 0; n < over; n++) {
+      await call("create_task", { title: `Inside ${n}`, description: "A task.", project: "LNG", parent: many });
+      const needed = await call("create_task", { title: `Needed ${n}`, description: "A task.", project: "LNG", assigned_to: ["manyhands"] });
+      await call("add_link", { from: many, type: "depends on", to: needed.id });
+      const holder = await call("create_task", { title: `Holds ${n}`, description: "A task.", project: "LNG" });
+      await call("add_link", { from: holder.id, type: "contains", to: many });
+      await call("create_user", { username: `hand${n}`, type: "agent" });
+      await call("add_link", { from: many, type: "assigned to", to: `hand${n}` });
+    }
+    const whole = await call("get", { id: many, history: true });
+    const project = await call("get", { id: "LNG" });
+    const user = await call("get", { id: "manyhands" });
+    assert.deepEqual(Object.keys(whole.more).sort(), ["assigned_to", "contained_in", "depends_on", "history", "links", "timeline", "waiting_for"], "every list of the task is cut");
+    assert.deepEqual(Object.keys(whole.more.links).sort(), ["assigned to", "contains", "depends on", "is contained"]);
+    assert.deepEqual([Object.keys(project.more), Object.keys(project.more.links), Object.keys(user.more), Object.keys(user.more.links)], [["links"], ["contains"], ["links"], ["is assigned"]]);
+
+    const answers: Array<[what: string, name: string, input: Record<string, unknown>, answer: any]> = [
+      ["a task whose lists are cut", "get", { id: many, history: true }, whole],
+      ["a project whose links are cut", "get", { id: "LNG" }, project],
+      ["a user whose links are cut", "get", { id: "manyhands" }, user],
+    ];
+    // The next page of each list: every list of links by its name, the timeline, the history.
+    const pages: Record<string, any> = {};
+    const next = async (id: string, of: string, continuation: string) => {
+      const input = { id, continuation };
+      pages[of] = await call("get", input);
+      answers.push([`the next page of ${of}`, "get", input, pages[of]]);
+    };
+    for (const [name, part] of Object.entries(whole.more.links) as Array<[string, { continuation: string }]>) await next(many, `the task's links "${name}"`, part.continuation);
+    await next(many, "the task's timeline", whole.more.timeline.continuation);
+    await next(many, "the task's history", whole.more.history.continuation);
+    await next("lng", "the project's links", project.more.links.contains.continuation);
+    await next("manyhands", "the user's links", user.more.links["is assigned"].continuation);
+    // A page that is not the last says where the one after it begins, and a page of links that holds nothing
+    // still says which links it is of.
+    const history = pages["the task's history"];
+    assert.ok(history.history.length === SIZES.page && history.more.history.continuation, "the history goes on after its second page");
+    const last = pages[`the task's links "contains"`];
+    assert.deepEqual([Object.keys(last), last.links.contains.length], [["kind", "id", "version", "unchanged_since", "links"], 1]);
+    // Users: the first page, which says where the next begins, and the next, which is the last.
+    const users = await call("list_users", {});
+    assert.equal(users.users.length, SIZES.page);
+    answers.push(["the first page of users", "list_users", {}, users], ["the next page of users", "list_users", { continuation: users.continuation }, await call("list_users", { continuation: users.continuation })]);
+    for (const name of ["list_tasks", "list_next_tasks"]) answers.push([`the first page of ${name}`, name, {}, await call(name, {})]);
+
+    const tried = held(answers);
+    assert.ok(tried > 5000, `${tried} answers with one field missing or of another kind`);
+    // Each is printed, as the answer to the call it answers.
+    const lines: string[] = [];
+    const ui = { fancy: false, paint: (_style: unknown, text: string) => text, out: (line = "") => void lines.push(line), err: (line = "") => void lines.push(line) } as Ui;
+    for (const [what, name, input, answer] of answers) {
+      assert.doesNotThrow(() => renderResult(ui, name, answer, "http://x", input), what);
+      const printed = lines.splice(0).join("\n");
+      assert.equal(/undefined|\[object/.test(printed), false, `${what}: ${printed.slice(0, 300)}`);
+      if (name === "get") assert.match(printed, input.continuation === undefined ? /Unchanged since {2}revision \d+\n/ : /A page of the item as it is unchanged since revision \d+\./, what);
+    }
+
+    // The answer to a call with a continuation is a page, and the answer to one without is the item: neither is
+    // taken for the other, whatever it carries.
+    const tokens = { history: whole.more.history.continuation as string, timeline: whole.more.timeline.continuation as string, contains: whole.more.links.contains.continuation as string };
+    const continued = { id: many, continuation: tokens.history };
+    const ofLinks = { id: many, continuation: tokens.contains };
+    assert.match(judge("get", continued, whole) ?? "", /it is not one list of the task: a page carries its links, its timeline or its history, and one of them/);
+    assert.match(judge("get", { id: many }, history) ?? "", /of the task is not/);
+    assert.match(judge("get", continued, { ...history, timeline: [] }) ?? "", /it is not one list of the task/);
+    assert.match(judge("get", continued, { kind: "task", id: many, version: 1, unchanged_since: 1 }) ?? "", /it is not one list of the task/);
+    assert.match(judge("get", ofLinks, { ...last, links: { ...last.links, "depends on": [] } }) ?? "", /"links" of a page of the task is not one list of links, under the name it reads by/);
+    assert.match(judge("get", ofLinks, { ...last, links: {} }) ?? "", /"links" of a page of the task is not one list of links/);
+    assert.equal(judge("get", ofLinks, { ...last, links: { contains: [] } }), null, "a page of links that holds nothing");
+    // A page is about the item the call names, by the rule that holds for the item in full.
+    for (const id of [many, many.toLowerCase(), `task:${many}`]) assert.equal(judge("get", { ...continued, id }, history), null, id);
+    assert.match(judge("get", { ...continued, id: "ALP-005" }, history) ?? "", new RegExp(`it is about the task ${many}, and not about ALP-005`));
+    assert.match(judge("get", { ...continued, kind: "project" }, history) ?? "", /it is not a page of a project/);
+    assert.match(judge("get", { ...continued, id: `project:${many}` }, history) ?? "", /and not about project:/);
+    assert.match(judge("get", continued, { ...history, id: many.toLowerCase() }) ?? "", /"id" of a page of the task is not the ID of a task/);
+    // And its list is the one the token of the call reads on in: of that item, and of no other list of it. Which
+    // list a token is for is read from the token, as the service reads it.
+    const notTheList = /and not of the list the continuation of the call reads on in/;
+    assert.match(judge("get", { id: many, continuation: tokens.timeline }, history) ?? "", notTheList, "a page of history to a token of the timeline");
+    assert.match(judge("get", continued, pages["the task's timeline"]) ?? "", notTheList, "a page of the timeline to a token of the history");
+    assert.match(judge("get", continued, last) ?? "", notTheList, "a page of links to a token of the history");
+    assert.match(judge("get", ofLinks, { ...last, links: { "depends on": [] } }) ?? "", notTheList, "a page of links under another name");
+    assert.match(judge("get", { id: many, continuation: project.more.links.contains.continuation }, last) ?? "", notTheList, "a page of the task to a token of the project");
+    for (const none of ["x", "", "not a token", tokens.history.slice(0, -4), 5, null]) assert.match(judge("get", { id: many, continuation: none }, history) ?? "", notTheList, `a page to what is no token: ${JSON.stringify(none)}`);
+    // A user that was named by its username comes back as its ID, and a page carries no username: the token
+    // says which user's list it continues. Named by its ID, a user is that user.
+    const ofUser = pages["the user's links"];
+    const hands = user.more.links["is assigned"].continuation as string;
+    for (const id of ["manyhands", "MANYHANDS", "user:manyhands", ofUser.id, `user:${ofUser.id.toLowerCase()}`]) assert.equal(judge("get", { id, continuation: hands }, ofUser), null, id);
+    assert.notEqual(judge("get", { id: "USER-001", continuation: hands }, ofUser), null);
+    assert.match(judge("get", { id: "manyhands", continuation: hands }, { ...ofUser, id: "USER-001" }) ?? "", notTheList, "a page of another user's links, to a call that names a user by its name");
+    assert.match(judge("get", { id: "manyhands", continuation: hands }, { ...ofUser, id: "manyhands" }) ?? "", /"id" of a page of the user is not the ID of a user/);
+    assert.match(judge("get", { id: "manyhands", continuation: hands }, { kind: "user", id: ofUser.id, version: 1, unchanged_since: 1, timeline: [] }) ?? "", /it is not one list of the user/, "a user has no timeline");
+
+    // What says that a list goes on says the same as the service, and no less. A list that can be read on, the
+    // links under a name, the timeline, the history, is named with how many it has, more than are shown, and
+    // with its token: never one without the other, and the token is that list's, of that item. A list of the
+    // task's summary is named with how many it has and no token. What is named is in the answer, a page names
+    // its own list and no other, and what names nothing is not sent.
+    const cut = (item: any, change: (more: any) => void): any => {
+      const changed = JSON.parse(JSON.stringify(item));
+      change(changed.more);
+      return changed;
+    };
+    const noToken = (list: string) => new RegExp(`"more\\.${list}\\.continuation" of (the task|a page of the task) is not the token that reads on in that list`);
+    const howMany = (list: string, shown: number) => new RegExp(`"more\\.${list}" of (the task|a page of the task) does not say how many entries the list has in all, more than the ${shown} that are shown`);
+    const shown = SIZES.page;
+    const inFull = { id: many, history: true };
+    const notSo: Array<[what: string, input: Record<string, unknown>, answer: unknown, says: RegExp]> = [
+      // The token: there, a token, and the token of that list.
+      ...["history", "timeline", "links.contains"].flatMap((list): Array<[string, Record<string, unknown>, unknown, RegExp]> => {
+        const part = (more: any) => (list === "links.contains" ? more.links.contains : more[list]);
+        const set = (value: unknown) => cut(whole, (more) => void (part(more).continuation = value));
+        return [
+          [`${list} that goes on without a token`, inFull, cut(whole, (more) => void delete part(more).continuation), noToken(list)],
+          ...["", "x", "tok-1", "a b", "$(reboot)", "x; rm -rf ~", `-${tokens.history}`, `${tokens.history} `, `${tokens.history}=`, `"${tokens.history}"`, "x".repeat(2000), 5, null, {}, [tokens.history]].map((value): [string, Record<string, unknown>, unknown, RegExp] => [
+            `${list} that goes on with ${JSON.stringify(value).slice(0, 40)} for a token`,
+            inFull,
+            set(value),
+            noToken(list),
+          ]),
+          [`${list} with the token of another list`, inFull, set(list === "history" ? tokens.timeline : tokens.history), noToken(list)],
+          [`${list} with the token of that list of another item`, inFull, set(project.more.links.contains.continuation), noToken(list)],
+          [`${list} that has as many as are shown`, inFull, cut(whole, (more) => void (part(more).total = shown)), howMany(list, shown)],
+          [`${list} that has fewer than are shown`, inFull, cut(whole, (more) => void (part(more).total = shown - 1)), howMany(list, shown)],
+          [`${list} that has -1`, inFull, cut(whole, (more) => void (part(more).total = -1)), howMany(list, shown)],
+          [`${list} that has 150.5`, inFull, cut(whole, (more) => void (part(more).total = 150.5)), howMany(list, shown)],
+          [`${list} that has more than can be counted`, inFull, cut(whole, (more) => void (part(more).total = 1e21)), howMany(list, shown)],
+        ];
+      }),
+      ["a history that goes on, of which nothing is shown", inFull, { ...whole, history: [] }, howMany("history", 0)],
+      // The lists of the summary: counted, and not read on by themselves.
+      ...["contained_in", "depends_on", "assigned_to", "waiting_for"].flatMap((list): Array<[string, Record<string, unknown>, unknown, RegExp]> => [
+        [`${list} with a token`, inFull, cut(whole, (more) => void (more[list].continuation = tokens.history)), new RegExp(`"more\\.${list}" of the task carries a token, and the list is not read on by itself`)],
+        [`${list} that has as many as are shown`, inFull, cut(whole, (more) => void (more[list].total = shown)), howMany(list, shown)],
+        [`${list} that does not say how many`, inFull, cut(whole, (more) => void (more[list] = {})), howMany(list, shown)],
+        [`${list} in a page`, continued, { ...history, more: { ...history.more, [list]: { total: 300 } } }, new RegExp(`"more\\.${list}" of a page of the task is about another list than the page holds`)],
+      ]),
+      // What is named is there.
+      ["what names no list", inFull, { ...whole, more: {} }, /"more" of the task names no list that goes on/],
+      ["what names only what is no list", inFull, { ...whole, more: { pages: 3 } }, /"more" of the task names no list that goes on/],
+      ["what is no object", inFull, { ...whole, more: [whole.more] }, /"more" of the task is not which lists go on/],
+      ["links that go on under no name", inFull, cut(whole, (more) => void (more.links = {})), /"more\.links" of the task is not which lists of links go on, by what they say/],
+      ["links that go on under a name no link reads by", inFull, cut(whole, (more) => void (more.links["is friends with"] = more.links.contains)), /"more\.links" of the task is not which lists of links go on/],
+      ["links that go on under a name the item has none under", inFull, cut(whole, (more) => void (more.links["is depended on by"] = more.links.contains)), /"more\.links\.is depended on by" of the task is about a list the answer does not carry/],
+      ["a history that goes on in an answer without one", { id: many }, { ...cut(whole, () => {}), history: undefined }, /"more\.history" of the task is about a list the answer does not carry/],
+      ["a project whose dependencies go on", { id: "LNG" }, cut(project, (more) => void (more.depends_on = { total: 300 })), /"more\.depends_on" of the project is about a list the answer does not carry/],
+      ["a user whose timeline goes on", { id: "manyhands" }, cut(user, (more) => void (more.timeline = whole.more.timeline)), /"more\.timeline" of the user is about a list the answer does not carry/],
+      // A page names its own list.
+      ["a page of history that says the timeline goes on", continued, { ...history, more: { timeline: whole.more.timeline } }, /"more\.timeline" of a page of the task is about another list than the page holds/],
+      ["a page of history that says links go on", continued, { ...history, more: { ...history.more, links: whole.more.links } }, /"more\.links\.\w[\w ]*" of a page of the task is about another list than the page holds/],
+      ["a page of links that says links under another name go on", ofLinks, { ...last, more: { links: { "depends on": whole.more.links["depends on"] } } }, /"more\.links\.depends on" of a page of the task is about another list than the page holds/],
+      ["a page of history that goes on without a token", continued, cut(history, (more) => void delete more.history.continuation), noToken("history")],
+      ["a page of history that goes on with the token of the timeline", continued, cut(history, (more) => void (more.history.continuation = tokens.timeline)), noToken("history")],
+      ["a page of history that has as many as it shows", continued, cut(history, (more) => void (more.history.total = history.history.length)), howMany("history", history.history.length)],
+      ["a page that names no list that goes on", continued, { ...history, more: {} }, /"more" of a page of the task names no list that goes on/],
+      // Since when: a revision.
+      ...[-1, 1.5, 1e400, 1e21].flatMap((since): Array<[string, Record<string, unknown>, unknown, RegExp]> => [
+        [`a task unchanged since ${since}`, { id: many }, { ...whole, unchanged_since: since }, /"unchanged_since" of the task is not a whole number from 0 up/],
+        [`a page unchanged since ${since}`, continued, { ...history, unchanged_since: since }, /"unchanged_since" of a page of the task is not a whole number from 0 up/],
+      ]),
+      ["a page of a version that is none", continued, { ...history, version: 0 }, /"version" of a page of the task is not a whole number from 1 up/],
+      ["a page of a timeline with a status no task has", { id: many, continuation: tokens.timeline }, { kind: "task", id: many, version: 1, unchanged_since: 1, timeline: [{ status: "ready", at: whole.created_at, by: "admin" }] }, /"timeline" of a page of the task is not a timeline/],
+      ["a page of links to what is no item", ofLinks, { ...last, links: { contains: [{ kind: "task", id: "lng-1", title: "T" }] } }, /"links" of a page of the task is not the links of the item/],
+    ];
+    for (const [what, input, answer, says] of notSo) assert.match(judge("get", input, JSON.parse(JSON.stringify(answer))) ?? "", says, what);
+    // The last page of a list, and an item none of whose lists is cut, say nothing of it.
+    assert.equal(judge("get", ofLinks, last), null);
+    assert.equal(Object.hasOwn(await call("get", { id: "ALP-005", history: true }), "more"), false);
+
+    // A list of items: where the next page begins is a token, after a page that holds something, and the token
+    // of that very list: the operation that was called, with the filters it was called with.
+    const lists: Array<[name: string, field: string, answer: any]> = [
+      ["list_users", "users", users],
+      ["list_tasks", "tasks", await call("list_tasks", {})],
+      ["list_next_tasks", "tasks", await call("list_next_tasks", {})],
+      ["list_projects", "projects", await (async () => {
+        // There is less than a page of projects: the token is the one the service would give after the last of them.
+        const all = await call("list_projects", {});
+        const list = paging.describeList("list_projects");
+        return { ...all, continuation: paging.sealToken({ q: paging.questionMark(list.question), k: all.projects.at(-1).id }) };
+      })()],
+    ];
+    const ofAnother = /"continuation" of a list is not a token of the list that was asked for/;
+    for (const [name, field, answer] of lists) {
+      assert.equal(judge(name, {}, answer), null, name);
+      assert.ok(answer.continuation && answer[field].length > 0, `${name} goes on`);
+      for (const none of ["", "x", "a b", "$(reboot)", `-${answer.continuation}`, `${answer.continuation}\n`, 5, null]) {
+        assert.match(judge(name, {}, { ...answer, continuation: none }) ?? "", /"continuation" of a list is not a continuation token/, `${name} that goes on from ${JSON.stringify(none)}`);
+      }
+      assert.match(judge(name, {}, { ...answer, [field]: [] }) ?? "", /"continuation" of a list says that there is more, after a page that holds nothing/, name);
+      const { continuation: _, ...ends } = answer;
+      assert.equal(judge(name, {}, ends), null, `the last page of ${name}`);
+      // A token of another operation's list, or of a list of an item, is none of this list's.
+      for (const [other, , theirs] of lists) if (other !== name) assert.match(judge(name, {}, { ...answer, continuation: theirs.continuation }) ?? "", ofAnother, `${name} that goes on with a token of ${other}`);
+      assert.match(judge(name, {}, { ...answer, continuation: tokens.history }) ?? "", ofAnother, `${name} that goes on with a token of get`);
+      // The token of a page that was itself asked for with a token is of the same list.
+      // A page that was asked for with a token holds what comes after the place the token names, and nothing from before it.
+      assert.match(judge(name, { continuation: answer.continuation }, answer) ?? "", new RegExp(`"${field}" of a list is not a page of that list: it holds .*, which is not after the place it was asked from`, "s"), `${name}, the first page again`);
+      if (name !== "list_projects") assert.equal(judge(name, { continuation: answer.continuation }, await call(name, { continuation: answer.continuation })), null, `${name}, a further page`);
+    }
+    // The same operation asked with other filters is another list: its token is not this one's.
+    const open = await call("list_tasks", { status: "open" });
+    const inProject = await call("list_tasks", { project: "LNG", status: "open" });
+    assert.ok(open.continuation && inProject.continuation);
+    assert.equal(judge("list_tasks", { status: "open" }, open), null);
+    assert.equal(judge("list_tasks", { project: "LNG", status: "open" }, inProject), null);
+    assert.equal(judge("list_tasks", { status: "open", project: "LNG" }, inProject), null, "in whatever order the filters were written");
+    assert.match(judge("list_tasks", {}, open) ?? "", ofAnother, "a token of the open tasks for the list of all tasks");
+    assert.match(judge("list_tasks", { status: "open" }, lists[1]![2]) ?? "", ofAnother, "a token of all tasks for the list of the open ones");
+    assert.match(judge("list_tasks", { status: "open" }, inProject) ?? "", ofAnother, "a token of the open tasks of one project for the list of all open ones");
+    assert.match(judge("list_tasks", { project: "lng", status: "open" }, inProject) ?? "", ofAnother, "a filter written another way is another question, as the service has it");
+    assert.match(judge("list_next_tasks", { project: "LNG" }, lists[2]![2]) ?? "", ofAnother);
+
+    // A refusal is read for what it carries, and what a longer list adds to one is printed: how many are in the
+    // way when not all are named, and the item as it is now, whose lists are cut as those of the item in full.
+    const refused = async (name: string, input: Record<string, unknown>): Promise<any> => {
+      try {
+        await service.engine.execute(name, "admin", input);
+      } catch (error) {
+        return asSent(error);
+      }
+      return assert.fail(`${name} was not refused`);
+    };
+    const conflict = await refused("update_task", { id: many, version: 1, title: "Changed meanwhile" });
+    assert.deepEqual([conflict.code, Object.keys(conflict.current.more).sort(), conflict.current.depends_on.length], ["version_conflict", ["assigned_to", "contained_in", "depends_on", "waiting_for"], SIZES.page]);
+    renderError(ui, conflict);
+    assert.match(lines.splice(0).join("\n"), new RegExp(`now: ${many} {2}\\w+ {2}v\\d+`));
+    const current = (await call("get", { id: many })).version;
+    const inTheWay = await refused("set_task_status", { id: many, version: current, status: "done" });
+    assert.deepEqual([inTheWay.blocking.length, inTheWay.blocking_total], [SIZES.blocking, over]);
+    renderError(ui, inTheWay);
+    assert.match(lines.splice(0).join("\n"), new RegExp(`· and ${over - SIZES.blocking} more\n`));
   });
 });
 
@@ -2654,8 +3571,10 @@ describe("what the service can answer", () => {
       commit: async () => {
         throw new Error("read-only");
       },
+      readRevision: async () => snapshot.head.revision,
       readText: async (tenant, kind, id) => (kind === "task" && Number(id) % 2 ? "" : storage.readText(tenant, kind, id)),
       readHistory: (tenant, kind, id) => storage.readHistory(tenant, kind, id),
+      readHistoryPage: (tenant, kind, id, page) => storage.readHistoryPage(tenant, kind, id, page),
       close: async () => {},
     };
     const engine = await Engine.open({ storage: edges });
@@ -2668,7 +3587,7 @@ describe("what the service can answer", () => {
       assert.equal(judge(name, input, answer), null, `${name} ${JSON.stringify(input)} is taken: ${JSON.stringify(answer).slice(0, 400)}`);
       const lines: string[] = [];
       const ui = { fancy: false, paint: (_style: unknown, text: string) => text, out: (line = "") => void lines.push(line), err: (line = "") => void lines.push(line) } as Ui;
-      assert.doesNotThrow(() => renderResult(ui, name, answer, "http://x"), `${name} ${JSON.stringify(input)} is printed`);
+      assert.doesNotThrow(() => renderResult(ui, name, answer, "http://x", input), `${name} ${JSON.stringify(input)} is printed`);
       const printed = lines.join("\n");
       assert.doesNotMatch(printed, /undefined|NaN|\[object Object\]/, `${name} ${JSON.stringify(input)}: ${printed}`);
       return printed;
@@ -3295,7 +4214,7 @@ describe("a service that takes the connection and does not answer", () => {
       assert.equal(error.actions[1], OPEN[1]);
       assert.equal(LIMITS.requestMs, 30_000);
       assert.match(error.actions[1]!, /A request that does not reach the service in full within 30 seconds is dropped/);
-      assert.match(error.actions[2]!, /^vigile get <id> --history shows an item with every change made to it; vigile list-tasks, vigile list-projects and vigile user list show what is there now\.$/);
+      assert.match(error.actions[2]!, /^vigile get <id> --history shows an item with the latest changes made to it; vigile list-tasks, vigile list-projects and vigile user list show what is there now\.$/);
       // Nothing is said to be safe to send again but what is: an ID is never given twice, a username is.
       assert.equal(error.actions[3], "Sent again, a change is sure to be stored only once when it names its item by an ID together with a version: the ID of a task, of a user (USER-007) or of a project is never given twice, so of two such requests the later one to be carried out is refused.");
       assert.equal(error.actions[4], "A request that names a user by its username acts on whoever has the name when it is carried out, and one that names no version on the item as it is then: a task is created once for each request, and a key is replaced by each reset, the last one carried out being the one in force. Do not send such a request again while an earlier one is outstanding: wait until it is over, or name the user by its ID, which vigile get <username> --kind user shows.");
@@ -3375,6 +4294,7 @@ describe("a service that takes the connection and does not answer", () => {
         created_at: "2026-01-12T09:14:03.120Z",
         created_by: "admin",
         updated_at: "2026-01-12T09:14:03.120Z",
+        unchanged_since: 12,
       });
     for (const [args, check] of [
       [["user", "list"], (actions: string[]) => assert.deepEqual(actions, ["Check the service: vigile doctor --config <file>"])],
@@ -3654,7 +4574,7 @@ describe("the built-in commands", () => {
     const everything = (await run(["help"])).out;
     for (const builtin of BUILTINS) assert.ok(everything.includes(`    ${[builtin.name, ...builtin.words.map((word) => `<${word.name}>`)].join(" ")} `), builtin.name);
     assert.match(everything, /get-guide[^\n]*\n\s+--as <username>\s+act as another user; operations act as admin by default\n\n\s+Everywhere/);
-    assert.match((await run(["help", "get"])).out, /--history\n\n\s+Also\n\s+--as <username>[^\n]*\n\s+--config <file>/);
+    assert.match((await run(["help", "get"])).out, /--history\n\s+--continuation <text>\n\n\s+Also\n\s+--as <username>[^\n]*\n\s+--config <file>/);
   });
 
   it("answer every way of asking for help: with the help of what there is, and with a usage error that names what there is not and what there is instead", async () => {
@@ -3819,7 +4739,7 @@ describe("with --json", () => {
       assert.deepEqual(await printed("--json"), everything, "no command at all is the help");
       const get = (await printed("get", "--help", "--json")).commands[0];
       assert.equal(get.command, "get");
-      assert.deepEqual(get.options.map((option: { option: string; value?: string; required: boolean }) => [option.option, option.value, option.required]), [["--kind", "project|task|user", false], ["--id", "text", true], ["--history", undefined, false], ["--as", "username", false]]);
+      assert.deepEqual(get.options.map((option: { option: string; value?: string; required: boolean }) => [option.option, option.value, option.required]), [["--kind", "project|task|user", false], ["--id", "text", true], ["--history", undefined, false], ["--continuation", "text", false], ["--as", "username", false]]);
       assert.deepEqual(await printed("help", "get", "--json"), await printed("get", "--help", "--json"));
 
       const told = async (...args: string[]) => {

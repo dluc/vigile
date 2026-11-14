@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import { VigileError, httpStatus, toErrorBody, toHyphens, toUnderscores, type Engine, type ErrorBody } from "@vigile/core";
+import { VigileError, echo, httpStatus, toErrorBody, toHyphens, toUnderscores, type Engine, type ErrorBody } from "@vigile/core";
 
 export interface ApiOptions {
   engine: Engine;
@@ -187,7 +187,7 @@ export function createApiHandler(options: ApiOptions): ApiHandler {
         return send(response, 200, { ...options.instance(), ...(options.adminStatus?.() ?? {}), engine: engine.status(), listeners: streams.size, inconsistencies: engine.checkConsistency() });
       }
       if (request.method !== "POST") {
-        throw new VigileError("not_found", `${request.method} ${url.pathname} is not part of the API.`, {
+        throw new VigileError("not_found", `${echo(request.method ?? "")} ${echo(url.pathname)} is not part of the API.`, {
           actions: ["Operations are called with POST /api/<operation-name>. GET /api/operations lists them."],
         });
       }

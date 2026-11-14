@@ -8,7 +8,7 @@ import { ConfigError, checkUsers, isTooOpen, loadConfig, masked, unknownEnvironm
 import { OPERATIONS, VERSION } from "@vigile/core";
 import { folderIsHeld, inspectTenantFile, tenantFiles } from "@vigile/storage-sqlite";
 import { UsageError, configPath, flag, type Args } from "../args.js";
-import { areTexts, isCount, isRecord, keyRefused, oneLine, refusalOf, usersOf } from "../answers.js";
+import { allUsers, areTexts, isCount, isRecord, keyRefused, oneLine, refusalOf } from "../answers.js";
 import { ANSWER_WITHIN_MS, NoAnswerError, NotRunningError, baseUrl, clientFor, type ServiceClient } from "../client.js";
 import { realPath } from "../paths.js";
 import { whoAnswers } from "../reach.js";
@@ -379,7 +379,7 @@ export async function doctor(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
         // The questions that follow are each a check of their own: an answer that cannot be used fails its check,
         // with what answered wrongly, and the doctor goes on to the next.
         try {
-          const names = usersOf(base, await client.call("list_users")).map((u) => u.username);
+          const names = (await allUsers(client)).map((u) => u.username);
           const unknown = checkUsers({ ...config, auth: { keyless_user: liveAuth.keyless_user, keys: Object.fromEntries(liveAuth.users_with_keys.map((n) => [n, "x"])) } }, names);
           add({
             section: "Service",

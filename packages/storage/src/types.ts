@@ -45,6 +45,27 @@ export interface HistoryRecord extends HistoryInput {
   seq: number;
 }
 
+/** Where a history entry stands among those of its item: the revision that wrote it, and its place in that revision. */
+export interface HistoryPlace {
+  revision: number;
+  seq: number;
+}
+
+export interface HistoryPageRequest {
+  /** Only entries before this one. */
+  before?: HistoryPlace;
+  limit: number;
+  /** The action whose last entry is where the history begins. */
+  sinceLast?: string;
+}
+
+export interface HistoryPage {
+  /** Oldest first. */
+  records: HistoryRecord[];
+  /** How many entries the history has in all, on this page or not. */
+  total: number;
+}
+
 export type Change =
   /** `text` left undefined keeps the stored text; a string replaces it. */
   | { op: "put_object"; record: ObjectRecord; text?: string }
@@ -75,9 +96,25 @@ export interface StorageAdapter {
    * Rejects with `RevisionConflictError` when the stored revision is not `expectedRevision`.
    */
   commit(tenant: string, request: CommitRequest): Promise<Head>;
+  /**
+   * The revision the tenant is at, and nothing else: `null` for a tenant that does not exist. Whoever holds the
+   * plan in memory and reads text or history beside it asks this after those reads: the revision only ever goes
+   * up, so a store that is still at the revision of the plan in memory was there for each of the reads.
+   */
+  readRevision(tenant: string): Promise<number | null>;
   readText(tenant: string, kind: string, id: string): Promise<string | null>;
   /** Oldest first. */
   readHistory(tenant: string, kind: string, id: string): Promise<HistoryRecord[]>;
+  /**
+   * The latest entries of an item's history, at most `limit` of them, oldest first: the latest of all, or the
+   * latest before a given entry. With them, how many entries the item has in all. An item with a long history
+   * is read a page at a time, and the count does not read the entries.
+   *
+   * With `sinceLast`, the history that is returned and counted begins at the last entry of that action: what
+   * was stored before it under the same kind and ID is as if it were not there. Without such an entry it is
+   * all of the history.
+   */
+  readHistoryPage(tenant: string, kind: string, id: string, page: HistoryPageRequest): Promise<HistoryPage>;
   close(): Promise<void>;
 }
 

@@ -8,6 +8,9 @@ import {
   assertTenantName,
   type CommitRequest,
   type Head,
+  type HistoryPage,
+  type HistoryPageRequest,
+  type HistoryPlace,
   type HistoryRecord,
   type JsonObject,
   type LinkRecord,
@@ -255,6 +258,11 @@ export class SqliteStorage implements StorageAdapter {
     }
   }
 
+  async readRevision(tenant: string): Promise<number | null> {
+    const row = this.db(tenant).prepare("SELECT revision FROM head WHERE id = 1").get() as { revision: number } | undefined;
+    return row?.revision ?? null;
+  }
+
   async readText(tenant: string, kind: string, id: string): Promise<string | null> {
     const row = this.db(tenant).prepare("SELECT text FROM objects WHERE kind = ? AND id = ?").get(kind, id) as
       | { text: string | null }
@@ -267,6 +275,41 @@ export class SqliteStorage implements StorageAdapter {
       .prepare("SELECT kind, id, revision, seq, at, actor, action, data FROM history WHERE kind = ? AND id = ? ORDER BY revision, seq")
       .all(kind, id) as unknown as Array<Omit<HistoryRecord, "data"> & { data: string }>;
     return rows.map((r) => ({ ...r, data: JSON.parse(r.data) as JsonObject }));
+  }
+
+  async readHistoryPage(tenant: string, kind: string, id: string, page: HistoryPageRequest): Promise<HistoryPage> {
+    const db = this.db(tenant);
+    const { before, sinceLast } = page;
+    const columns = "SELECT kind, id, revision, seq, at, actor, action, data FROM history WHERE kind = ? AND id = ?";
+    const latest = "ORDER BY revision DESC, seq DESC LIMIT ?";
+    let rows = (
+      before ? db.prepare(`${columns} AND (revision, seq) < (?, ?) ${latest}`).all(kind, id, before.revision, before.seq, page.limit) : db.prepare(`${columns} ${latest}`).all(kind, id, page.limit)
+    ) as unknown as Array<Omit<HistoryRecord, "data"> & { data: string }>;
+    // The latest of all that are fewer than were asked for are all that is stored for the item.
+    let whole = !before && rows.length < page.limit;
+    let begins: HistoryPlace | undefined;
+    if (sinceLast !== undefined) {
+      // Where the history begins. Among the latest entries of all, the last of that action is the last there
+      // is, and what follows it is the whole history. Otherwise it is looked for from the end backwards, which
+      // stops at it: what was stored before it is never gone through.
+      const among = before ? undefined : rows.find((row) => row.action === sinceLast);
+      if (among) whole = true;
+      begins =
+        among ??
+        (whole
+          ? undefined
+          : (db.prepare("SELECT revision, seq FROM history WHERE kind = ? AND id = ? AND action = ? ORDER BY revision DESC, seq DESC LIMIT 1").get(kind, id, sinceLast) as HistoryPlace | undefined));
+      const from = begins;
+      if (from) rows = rows.filter((row) => row.revision > from.revision || (row.revision === from.revision && row.seq >= from.seq));
+    }
+    // Otherwise the entries are counted where they lie, one after the other under the item's kind and ID, from
+    // where the history begins, without reading what each one says.
+    const counted = (): number => {
+      const count = "SELECT COUNT(*) AS entries FROM history WHERE kind = ? AND id = ?";
+      const found = begins ? db.prepare(`${count} AND (revision, seq) >= (?, ?)`).get(kind, id, begins.revision, begins.seq) : db.prepare(count).get(kind, id);
+      return (found as { entries: number }).entries;
+    };
+    return { records: rows.reverse().map((r) => ({ ...r, data: JSON.parse(r.data) as JsonObject })), total: whole ? rows.length : counted() };
   }
 
   /** SQLite's own consistency check of a tenant file. */

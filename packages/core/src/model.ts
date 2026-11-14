@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-export const KINDS = ["project", "task", "user"] as const;
+import { KINDS } from "./ids.js";
+
+export { KINDS };
 export type Kind = (typeof KINDS)[number];
 
 export const TASK_STATUSES = ["draft", "open", "in_progress", "paused", "in_review", "done", "cancelled"] as const;
@@ -39,6 +41,8 @@ export const LIMITS = {
   why: 1000,
   username: 32,
   page: 100,
+  /** How many of the items that are in the way a refusal names. */
+  blocking: 20,
   linksPerCreate: 30,
 } as const;
 
