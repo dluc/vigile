@@ -263,7 +263,6 @@ main { padding: 18px clamp(14px, 3vw, 28px) 60px; display: grid; grid-template-c
 .board-head .section-title { margin: 0; }
 .scope { flex: 1 1 8ch; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .scope-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.scope .tag-button { flex: none; background: var(--idle-soft); border-radius: var(--r-s); white-space: nowrap; }
 /* A step of the trail of groups that were zoomed into: it leads back out to that step. */
 .crumb { padding: 2px 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 50%, transparent); text-underline-offset: 2px; }
 .crumb:hover { color: var(--text); }
@@ -383,26 +382,37 @@ main { padding: 18px clamp(14px, 3vw, 28px) 60px; display: grid; grid-template-c
  * and not in it: the card is a button itself, which opens the panel.
  */
 .holder { position: relative; display: grid; min-width: 0; }
-.holder > .card { padding-bottom: 46px; }
+.holder > .card { padding-bottom: 58px; }
 .kind { padding: 0 6px; border-radius: var(--r-s); background: var(--idle-soft); color: var(--muted); font: 650 11px var(--sans); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
 .card > .bar { display: block; }
 .zoom-into {
   position: absolute; left: 8px; right: 8px; bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  min-height: 28px; padding: 2px 10px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--raised); color: var(--text);
-  font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+  min-height: 40px; padding: 4px 11px 4px 9px; border: 1px solid color-mix(in srgb, var(--busy) 42%, var(--line)); border-radius: var(--r-s);
+  background: color-mix(in srgb, var(--busy-soft) 72%, var(--raised)); color: var(--text);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 10%, transparent), inset 0 1px color-mix(in srgb, var(--bg) 46%, transparent);
+  font: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
+  transition-property: transform, background-color, border-color, box-shadow; transition-duration: 140ms; transition-timing-function: ease-out;
 }
-.zoom-into:hover { border-color: var(--muted); }
+.zoom-into::before {
+  content: "↳"; display: grid; place-items: center; flex: 0 0 24px; width: 24px; height: 24px; margin-right: -2px;
+  border-radius: 50%; background: var(--busy); color: var(--bg); font-size: 17px; line-height: 1; transform: rotate(-45deg);
+}
+.zoom-into:hover { border-color: var(--busy); background: var(--busy-soft); box-shadow: 0 3px 8px color-mix(in srgb, var(--busy) 18%, transparent); transform: translateY(-1px); }
+.zoom-into:active { transform: scale(0.96); }
 .zoom-into:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
 .zoom-into .holds { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
 
 .graph-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
 .zoom { display: inline-flex; align-items: center; gap: 4px; }
-.zoom button { width: 28px; height: 28px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--surface); cursor: pointer; font-size: 16px; line-height: 1; }
+.levels { padding: 4px; border: 1px solid color-mix(in srgb, var(--busy) 36%, var(--line)); border-radius: calc(var(--r-s) + 4px); background: color-mix(in srgb, var(--busy-soft) 64%, var(--surface)); box-shadow: 0 2px 8px color-mix(in srgb, var(--busy) 12%, transparent); }
+.zoom button { width: 40px; height: 40px; border: 1px solid color-mix(in srgb, var(--busy) 34%, var(--line)); border-radius: var(--r-s); background: var(--surface); color: var(--text); cursor: pointer; font-size: 18px; line-height: 1; transition-property: transform, background-color, border-color; transition-duration: 140ms; transition-timing-function: ease-out; }
+.zoom button:hover:not(:disabled):not([aria-pressed="true"]) { border-color: var(--busy); background: var(--busy-soft); }
+.zoom button:active:not(:disabled) { transform: scale(0.96); }
 .zoom button:disabled, .zoom button[aria-disabled="true"] { opacity: 0.4; cursor: default; }
 .zoom button:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
 /* The board's zoom: out, the level in words, in. */
 .level { min-width: 9ch; padding: 0 4px; text-align: center; color: var(--text); font-weight: 600; white-space: nowrap; }
-.zoom button.wide { width: auto; padding: 0 10px; font-size: 13px; }
+.zoom button.wide { width: auto; min-width: 40px; padding: 0 12px; font-size: 13px; font-weight: 650; white-space: nowrap; }
 .zoom button[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
 
 /*

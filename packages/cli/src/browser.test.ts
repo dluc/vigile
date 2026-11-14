@@ -351,7 +351,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         for (const column of seen.widths) assert.ok(column >= 270 && column <= 380, `a column is ${column}px wide at ${width}px`);
         assert.equal(new Set(seen.widths).size, 1, "all columns are equally wide");
         assert.equal(seen.first, seen.left, "the columns start at the left");
-        assert.equal(seen.filter, seen.left, "the filter is above the first column, not at the far side of the window");
+        assert.ok(seen.filter > seen.left, "the prominent zoom control comes before the filter");
         assert.equal(seen.scrolls, width < 8 * 270 + 7 * 14 + 56, `sideways scrolling at ${width}px only when the columns cannot fit`);
         await page.click(".project-main", 1);
         const few = await page.run<number[]>("return [...document.getElementById('board').children].map((c) => Math.round(c.getBoundingClientRect().width))");
@@ -958,7 +958,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.match(await text("#summary"), /^7 tasks/);
       assert.match(await text("#scope"), /Checkout/);
       await layout("inside a group");
-      await page.click("#scope .tag-button");
+      await page.click("#leave-group");
       assert.match(await text("#summary"), /^55 tasks/);
     });
 
@@ -3393,7 +3393,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await page.until("return Boolean(document.querySelector('#detail .open-group'))", "the group's panel");
         await page.click("#detail .open-group");
         assert.deepEqual([(await done())?.[0], (await done())![1] > 0, await rings()], [true, true, []], "inside a group");
-        await page.click("#scope .tag-button");
+        await page.click("#leave-group");
         assert.deepEqual(await rings(), [], "and out of it again");
 
         // The ring of a card is of its board as well: the card is still there under the filter, without it.
@@ -3594,9 +3594,9 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.deepEqual([await panelOpen(), await count(`.card[data-id="${ids.checkout}"]`)], [false, 0]);
         seen["the card a group was entered from"] = await keyboard();
         // And left again with the button that says so, which goes once it is used.
-        await page.run("document.querySelector('#scope .tag-button').focus({ preventScroll: true })");
+        await page.run("document.getElementById('leave-group').focus({ preventScroll: true })");
         await page.key("Enter");
-        assert.equal(await count("#scope .tag-button"), 0);
+        assert.equal(await page.run<boolean>("return document.getElementById('leave-group').hidden"), true);
         seen["the button that leaves a group"] = await keyboard();
 
         // Notices: dismissed with the keyboard, the next one has it; the last one gone, or all closed at once, the page has it.
@@ -3642,7 +3642,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.deepEqual(seen, {
           "a strip that went with its last task": "view-board",
           "a card whose task was deleted": "level-out",
-          "the card a group was entered from": "tag-button leave",
+          "the card a group was entered from": "leave-group",
           "the button that leaves a group": `card ${ids.checkout}`,
           "a notice that was dismissed, with another left": "toast-close",
           "the last notice, dismissed": "view-board",
@@ -5082,7 +5082,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.click(".open-group");
       await page.until("return window.vigileGraph.nodes('[kind = \"task\"]').length === 2 && window.vigileGraph.scratch('settled')", "the graph of the group alone", 20_000);
       assert.deepEqual(await page.run<string[]>("return window.vigileGraph.nodes('[kind = \"task\"]').map((n) => n.data('ref')).sort()"), [ids.payments, ids.shipping].sort(), "inside the group, its two sub-groups");
-      await page.click("#scope .tag-button");
+      await page.click("#leave-group");
       await page.until("return window.vigileGraph.nodes('[kind = \"project\"]').length === 2 && window.vigileGraph.scratch('settled')", "the whole graph again", 20_000);
       await page.run("document.getElementById('zoom-fit').click()");
       const project = await nodeAt("project:WEB", true);
@@ -6192,7 +6192,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.click("#view-graph");
       await graphReady();
       const graph = await place("graph-box");
-      assert.ok(Math.abs(800 - graph.bottom - 12) <= 1 && graph.top - (await header()) < 110, `the graph has the room, under its controls and legend: ${JSON.stringify(graph)}`);
+      assert.ok(Math.abs(800 - graph.bottom - 12) <= 1 && graph.top - (await header()) < 130, `the graph has the room, under its controls and legend: ${JSON.stringify(graph)}`);
       await layout("in the graph with everything above it folded away");
       await page.click("#view-board");
       await page.until("return document.getElementById('board').getBoundingClientRect().height > 0", "the board");
@@ -6817,7 +6817,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     };
     const hash = () => page.run<string>("return location.hash");
     /** What the control above the board says, or nothing when it has stepped aside. */
-    const level = () => page.run<string | null>("return document.getElementById('levels').hidden ? null : document.getElementById('level').textContent");
+    const level = () => page.run<string | null>("const level = document.getElementById('level'); return document.getElementById('levels').hidden || level.hidden ? null : level.textContent");
     /** Whether each end of the control says there is nothing further: out, in. */
     const ends = () => page.run<string[]>("return ['level-out', 'level-in'].map((id) => document.getElementById(id).getAttribute('aria-disabled'))");
     /** The cards on the board by their task, in order of ID, a closed group marked with a star. */
@@ -6911,6 +6911,11 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.deepEqual([await hash(), await level(), await ends()], ["#board?zoom=4", "4 levels", ["false", "false"]]);
       assert.deepEqual(await cards(), these(...FOUR));
       assert.deepEqual(await says("pit"), { column: "next", kind: "group", tags: ["0/1 done", `in ${z.deep}`, "ZOO"], bar: "0% finished", button: "Zoom in / holds 1 task", name: `Zoom into ${z.pit}: show only the 1 task it holds` });
+      assert.deepEqual(
+        await page.run(`const button = document.querySelector(${JSON.stringify(zoomOf("pit"))}); const style = getComputedStyle(button); const cardStyle = getComputedStyle(button.previousElementSibling); return [Math.round(button.getBoundingClientRect().height), style.backgroundColor !== cardStyle.backgroundColor, getComputedStyle(button, '::before').content];`),
+        [40, true, '"↳"'],
+        "the useful action has a full-size, accented affordance of its own",
+      );
       assert.match(await text("#summary"), /^17 cards for 18 tasks\s*2 in progress\s*13 next\s*1 waiting\s*1 done/);
       await page.click("#level-out");
       assert.deepEqual([await hash(), await level()], ["#board?zoom=3", "3 levels"]);
@@ -6980,17 +6985,17 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.deepEqual([await hash(), await level(), await panelOpen()], [`#board?in=${z.alpha}&zoom=1`, "Top level", false]);
       assert.deepEqual(await cards(), these("a1", "a2", "sub*", "both", "near"));
       assert.match(await text("#summary"), /^5 cards for 11 tasks/);
-      assert.equal(await trail(), `in all projects › ${z.alpha} · Alpha✕ leave group`);
+      assert.equal(await trail(), `in all projects › ${z.alpha} · Alpha`);
       await layout("inside a group at its top level");
       await into("sub");
       assert.equal(await hash(), `#board?in=${z.alpha}/${z.sub}&zoom=1`);
       assert.deepEqual(await cards(), these("s1", "s2", "s3", "deep*", "near"));
-      assert.equal(await trail(), `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group✕ leave group`);
+      assert.equal(await trail(), `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group`);
       await into("deep");
       await into("pit");
       // Four groups in: the trail shows the last three, and the board holds one task with nothing to zoom.
       assert.equal(await hash(), `#board?in=${z.alpha}/${z.sub}/${z.deep}/${z.pit}&zoom=1`);
-      assert.equal(await trail(), `in all projects › … › ${z.sub} › ${z.deep} › ${z.pit} · Pit group✕ leave group`);
+      assert.equal(await trail(), `in all projects › … › ${z.sub} › ${z.deep} › ${z.pit} · Pit group`);
       assert.deepEqual([await cards(), await level()], [these("d1"), null]);
       assert.match(await text("#summary"), /^1 tasks/);
       await layout("four groups in");
@@ -7010,7 +7015,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.click(`#scope .crumb[data-step="1"]`);
       assert.deepEqual([await hash(), await cards()], [`#board?in=${z.alpha}&zoom=1`, these("a1", "a2", "sub*", "both", "near")]);
       await into("sub");
-      await page.click("#scope .leave");
+      await page.click("#leave-group");
       assert.equal(await hash(), `#board?in=${z.alpha}&zoom=1`);
       await into("sub");
       await page.click(`#scope .crumb[data-step="0"]`);
@@ -7021,7 +7026,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.click("#level-in");
       assert.deepEqual([await hash(), await level()], [`#board?in=${z.alpha}&zoom=2`, "2 levels"]);
       assert.deepEqual(await cards(), these("a1", "a2", "sub", "both", "near", "s1", "s2", "s3", "deep*"));
-      await page.click("#scope .leave");
+      await page.click("#leave-group");
       assert.deepEqual([await hash(), await cards()], ["#board?zoom=2", these(...TWO)], "and the level stays when the group is left");
 
       // With everything shown, the button in a group's panel does what it always did, and is now in the address.
@@ -7034,7 +7039,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.match(await text("#summary"), /^10 tasks/);
       // The task and the group that are in both groups are under this one too, and are one card each on the whole board.
       assert.deepEqual(await cards(), these("b1", "both", "sub", "s1", "s2", "s3", "deep", "pit", "d1", "near"));
-      await page.click("#scope .leave");
+      await page.click("#leave-group");
       assert.deepEqual([await hash(), await cards()], ["#board", these(...ALL)]);
       assert.match(await text("#summary"), /^18 tasks/);
       // Opened from the panel of a group that is inside the one in view, the trail goes on; from elsewhere it starts anew.
@@ -7054,7 +7059,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       const inside = `#board?in=${z.alpha}/${z.sub}&zoom=1`;
       await open(`/${inside}`);
       assert.deepEqual([await hash(), await level(), await cards()], [inside, "Top level", these("s1", "s2", "s3", "deep*", "near")]);
-      assert.equal(await trail(), `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group✕ leave group`);
+      assert.equal(await trail(), `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group`);
       // An item opened over a zoomed board has the zoom in its address too, and closing it leaves the zoom alone.
       await page.click(`#board .card[data-id="${z.s1}"]`);
       await page.until("return document.querySelector('.detail-title')?.textContent === 'Sub one'", "a task's panel");
@@ -7070,7 +7075,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.click("#view-graph");
       await graphReady();
       assert.equal(await hash(), inside.replace("#board", "#graph"));
-      assert.equal(await page.run<boolean>("return document.getElementById('levels').hidden"), true, "the board's zoom is not offered over the graph");
+      assert.deepEqual(await page.run<boolean[]>("return ['level-out', 'level-in', 'level'].map((id) => document.getElementById(id).hidden)"), [true, true, true], "the board's level controls are not offered over the graph");
       assert.deepEqual(await page.run<string[]>("return window.vigileGraph.nodes('[kind = \"task\"]').map((n) => n.data('ref')).sort()"), these("s1", "s2", "s3", "deep", "near"), "the graph draws the group's tasks its own way: its groups closed");
       assert.match(await text("#summary"), /^7 tasks/, "and counts every task in the group");
       await page.click("#view-board");
@@ -7092,7 +7097,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await open(`/#board?in=${z.loose}`);
       assert.deepEqual([await text("#empty"), await count("#board .card"), await level()], [`${z.loose} holds no tasks.`, 0, null]);
       await layout("inside a task that holds nothing");
-      await page.click("#scope .leave");
+      await page.click("#leave-group");
       assert.deepEqual([await hash(), await cards()], ["#board", these(...ALL)]);
       // More levels than the plan has is everything; what is not a number, or is cut off, is no zoom at all.
       for (const address of ["/#board?zoom=99", "/#board?zoom=0", "/#board?zoom=two&in=%E0%A4%A", "/#board?zoom", "/#board?&&=&in="]) {
@@ -7171,7 +7176,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await open(`/#board?in=${z.alpha}&zoom=1`);
         await page.click("#focus");
         assert.equal(await text("#scope .scope-text"), `in all projects › ${z.alpha} · Alpha, top level only`);
-        await page.click("#scope .leave");
+        await page.click('#scope .crumb[data-step="0"]');
         assert.equal(await text("#scope .scope-text"), "in all projects, top level only");
         assert.ok(await page.run<boolean>("return document.querySelector('.board-head').getBoundingClientRect().height > 0"), "the line is there for the zoom alone");
         await layout("zoomed out with everything above the board folded away");
@@ -7196,7 +7201,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.match(await text("#summary"), /^3 cards for 15 tasks/);
         assert.equal(await trail(), "in ZOO · Zoo");
         await into("alpha");
-        assert.equal(await trail(), `in ZOO › ${z.alpha} · Alpha✕ leave group`, "inside a group the project is named by its ID, to leave room for the trail");
+        assert.equal(await trail(), `in ZOO › ${z.alpha} · Alpha`, "inside a group the project is named by its ID, to leave room for the trail");
         await choose("ZOO");
         assert.deepEqual(page.errors, []);
       } finally {
@@ -7212,9 +7217,10 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         ["group", "Zoom of the board: how many levels of groups are open", "Zoom out", "Zoom in"],
       );
       const ring = () => page.run<string>("const style = getComputedStyle(document.activeElement); return style.outlineStyle + ' ' + style.outlineWidth");
-      // From the filter, Tab reaches the control; Enter and Space work it, and the keyboard stays on the button.
+      // The control comes before search; Enter and Space work it, and the keyboard stays on the button.
       await page.click("#filter");
-      await page.key("Tab");
+      await page.key("Tab", true);
+      await page.key("Tab", true);
       assert.deepEqual([await focused(), await ring()], ["level-out", "solid 2px"]);
       await page.key("Enter");
       assert.deepEqual([await hash(), await focused()], ["#board?zoom=4", "level-out"]);
@@ -7241,7 +7247,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.deepEqual([await focused(), await ring()], [`${z.alpha} zoom-into`, "solid 2px"]);
       // Zoomed in, the keyboard is on the way back out; taking it, on the button it came from.
       await page.key("Enter");
-      assert.deepEqual([await hash(), await focused()], [`#board?in=${z.alpha}&zoom=1`, "tag-button leave"]);
+      assert.deepEqual([await hash(), await focused()], [`#board?in=${z.alpha}&zoom=1`, "leave-group"]);
       assert.equal(await ring(), "solid 2px");
       await page.key("Enter");
       assert.deepEqual([await hash(), await focused()], ["#board?zoom=1", `${z.alpha} zoom-into`]);
@@ -7251,14 +7257,25 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.key("Enter");
       // Back changes the leave button from Sub to Alpha. It is not the same control: the keyboard returns to the
       // button that represents Sub, so Enter would re-enter it rather than unexpectedly leave Alpha.
-      await page.run("document.querySelector('#scope .leave').focus({ preventScroll: true }); history.back()");
+      await page.run("document.querySelector('#leave-group').focus({ preventScroll: true }); history.back()");
       await page.until(`return location.hash === '#board?in=${z.alpha}&zoom=1'`, "Back from Sub to Alpha");
       assert.equal(await focused(), `${z.sub} zoom-into`);
       await page.key("Enter");
-      await page.key("Tab", true);
+      await page.run("document.querySelector('#scope .crumb[data-step=\"1\"]').focus({ preventScroll: true })");
       assert.deepEqual([await page.run<string>("return document.activeElement.textContent"), await ring()], [z.alpha, "solid 2px"]);
       await page.key("Enter");
       assert.deepEqual([await hash(), await focused()], [`#board?in=${z.alpha}&zoom=1`, `${z.sub} zoom-into`]);
+
+      // Focus mode hides the control cluster. Entering a group still leaves the keyboard on a working way out:
+      // the parent step of the breadcrumb, rather than its noninteractive text.
+      await page.click("#leave-group");
+      await page.click("#focus");
+      await page.run(`document.querySelector('#board .zoom-into[data-id="${z.alpha}"]').focus()`);
+      await page.key("Enter");
+      assert.deepEqual([await hash(), await focused()], [`#board?in=${z.alpha}&zoom=1`, "crumb"]);
+      await page.key("Enter");
+      assert.equal(await hash(), "#board?zoom=1");
+      await page.click("#focus");
       assert.deepEqual(page.errors, []);
     });
 
@@ -7409,7 +7426,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
           assert.deepEqual(await ringed(), [], `after ${control}`);
         }
         await into("alpha");
-        await page.click("#scope .leave");
+        await page.click("#leave-group");
         assert.deepEqual([await ringed(), await cards()], [[], these(...TOP)]);
 
         // How many inside match the filter: a task inside is renamed and now matches. The group that already showed
@@ -7515,15 +7532,15 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await travel("back", "#board?zoom=1");
       await focusOn(zoomOf("alpha"));
       await page.key("Enter");
-      assert.deepEqual([await hash(), await keyboard()], [`#board?in=${z.alpha}&zoom=1`, "tag-button leave"]);
+      assert.deepEqual([await hash(), await keyboard()], [`#board?in=${z.alpha}&zoom=1`, "leave-group"]);
       await travel("back", "#board?zoom=1");
       assert.equal(await keyboard(), `${z.alpha} zoom-into`);
       await travel("forward", `#board?in=${z.alpha}&zoom=1`);
-      assert.equal(await keyboard(), "tag-button leave");
+      assert.equal(await keyboard(), "leave-group");
 
       // Leaving a group with everything shown: the group's card, which has no button to zoom.
       await open(`/#board?in=${z.alpha}/${z.sub}`);
-      await focusOn("#scope .leave");
+      await focusOn("#leave-group");
       await page.key("Enter");
       assert.deepEqual([await hash(), await keyboard()], [`#board?in=${z.alpha}`, z.sub]);
 
@@ -7534,7 +7551,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await travel("back", `#board?in=${z.alpha}/${z.sub}/${z.deep}&zoom=1`);
       await focusOn("#level-in");
       await travel("forward", `#board?in=${z.alpha}/${z.sub}/${z.deep}/${z.pit}&zoom=1`);
-      assert.deepEqual([await level(), await keyboard()], [null, "tag-button leave"]);
+      assert.deepEqual([await level(), await keyboard()], [null, "leave-group"]);
       assert.deepEqual(page.errors, []);
     });
 
@@ -7550,7 +7567,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.run(`location.hash = '#graph/${z.alpha}?zoom=1'`);
       await page.until("return Boolean(document.querySelector('.open-group'))", "the group's panel over the graph");
       await page.click(".open-group");
-      assert.deepEqual([await hash(), await keyboard()], [`#graph?in=${z.alpha}&zoom=1`, "tag-button leave"]);
+      assert.deepEqual([await hash(), await keyboard()], [`#graph?in=${z.alpha}&zoom=1`, "leave-group"]);
       await page.key("Enter");
       assert.deepEqual([await hash(), await keyboard()], ["#graph?zoom=1", "scope-text"]);
       assert.match(await page.run<string>("const style = getComputedStyle(document.activeElement); return style.outlineStyle + ' ' + style.outlineWidth"), /^solid 2px$/, "and the line shows that the keyboard is there");
@@ -7566,9 +7583,9 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.key("Enter");
       await page.click("#view-graph");
       await graphReady();
-      await focusOn("#scope .leave");
+      await focusOn("#leave-group");
       await page.key("Enter");
-      assert.deepEqual([await hash(), await keyboard()], [`#graph?in=${z.alpha}&zoom=1`, "tag-button leave"]);
+      assert.deepEqual([await hash(), await keyboard()], [`#graph?in=${z.alpha}&zoom=1`, "leave-group"]);
       await page.key("Enter");
       assert.deepEqual([await hash(), await keyboard()], ["#graph?zoom=1", "scope-text"]);
       // The same from a step of the trail, which leads out of two groups at once.
@@ -7586,7 +7603,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.equal(await keyboard(), "level-in");
       await focusOn(on("s1"));
       await travel("forward", `#graph?in=${z.alpha}/${z.sub}&zoom=1`);
-      assert.equal(await keyboard(), "tag-button leave");
+      assert.equal(await keyboard(), "leave-group");
       assert.deepEqual(page.errors, []);
     });
 
@@ -7678,7 +7695,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await alter("delete", { id: z.deep! });
         undo.push(() => plan("restore", { id: z.deep }));
         await page.until(`return location.hash === '#board?in=${z.alpha}/${z.sub}&zoom=1'`, "the board to step out of the group that is gone", 3000);
-        assert.equal(await keyboard(), "tag-button leave");
+        assert.equal(await keyboard(), "leave-group");
         await undo.pop()!();
         assert.deepEqual(page.errors, []);
       } finally {
@@ -7717,7 +7734,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.deepEqual(await said(), [], "nothing further out, and nothing to say");
       await into("alpha");
       assert.deepEqual(await said(), [`zoom-said: Top level in ${z.alpha} Alpha: 5 cards for 11 tasks.`]);
-      await page.click("#scope .leave");
+      await page.click("#leave-group");
       assert.deepEqual(await said(), ["zoom-said: Top level in all projects: 6 cards for 18 tasks."]);
       // The filter, the column for bugs and a reading of the plan draw the board again: none of it is read out.
       await page.click("#filter");
@@ -7737,7 +7754,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.click("#view-graph");
       await graphReady();
       assert.deepEqual(await said(), [], "a change of view is not a zoom");
-      await page.click("#scope .leave");
+      await page.click("#leave-group");
       assert.deepEqual(await said(), ["zoom-said: Graph of all projects: 18 tasks."]);
       // What was said is taken off the page a few seconds later, so that it is not found there when it no longer holds.
       await page.until("return document.getElementById('zoom-said').textContent === ''", "what was said to be taken away", 7000);
@@ -7786,7 +7803,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       const choose = (project: string) => page.run(`[...document.querySelectorAll('#projects .project-main')].find((main) => main.querySelector('.project-id').textContent === ${JSON.stringify(project)}).click()`);
       const place = `#board?in=${z.alpha}/${z.sub}&zoom=1`;
       const shown = async () => [await hash(), await level(), await cards(), await trail(), await page.run<string>("return document.title")];
-      const there = [place, "Top level", these("s1", "s2", "s3", "deep*", "near"), `in ZOO › ${z.alpha} › ${z.sub} · Shared sub-group✕ leave group`, "zoom · Vigile"];
+      const there = [place, "Top level", these("s1", "s2", "s3", "deep*", "near"), `in ZOO › ${z.alpha} › ${z.sub} · Shared sub-group`, "zoom · Vigile"];
       try {
         // A refresh whose authorized answers are already on their way cannot put the plan or its route back after
         // another tab removes that credential and locks this page out.
@@ -7867,7 +7884,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await refuse();
         await alter("delete", { id: z.sub! });
         await letIn();
-        assert.deepEqual([await hash(), await trail()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha✕ leave group`]);
+        assert.deepEqual([await hash(), await trail()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha`]);
         await plan("restore", { id: z.sub });
 
         // The project is selected for the whole page and not for one entry of the history. Locked out two groups
@@ -7881,7 +7898,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await travel("back", "#board");
         assert.deepEqual(await page.run("return history.state.kept"), { route: `#board?in=${z.alpha}&zoom=1`, project: "ZOO" });
         await letIn();
-        assert.deepEqual([await hash(), await trail(), await cards()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha✕ leave group`, these("a1", "a2", "sub*", "both", "near")]);
+        assert.deepEqual([await hash(), await trail(), await cards()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha`, these("a1", "a2", "sub*", "both", "near")]);
         assert.equal(await page.run<string>("return document.querySelector('#projects .project.selected .project-id')?.textContent"), "ZOO");
         // The entry the page was locked out on still has its address put away. Come back to, it has it again.
         await travel("forward", place);
@@ -7893,7 +7910,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await travel("back", "#board");
         assert.deepEqual([await left(), await page.run("return history.state.kept")], [[], { route: `#board?in=${z.alpha}&zoom=1`, project: "ZOO" }]);
         await letIn();
-        assert.deepEqual([await hash(), await trail()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha✕ leave group`]);
+        assert.deepEqual([await hash(), await trail()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha`]);
         // And when the other view was gone to while locked out, which is an entry of its own.
         await refuse();
         await page.click("#view-graph");
@@ -7936,7 +7953,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.deepEqual([await left(), await hash(), await panelOpen()], [[], "#graph", false]);
         await letIn();
         await page.until("return document.querySelector('.detail-title')?.textContent === 'Sub one' && !document.getElementById('panel').hidden", "the task's panel again");
-        assert.deepEqual([await hash(), await trail()], [`#graph/${z.s1}?in=${z.alpha}/${z.sub}`, `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group✕ leave group`]);
+        assert.deepEqual([await hash(), await trail()], [`#graph/${z.s1}?in=${z.alpha}/${z.sub}`, `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group`]);
         assert.deepEqual(page.errors, []);
       } finally {
         setValue(zooConfig, "auth.keyless_user", "agent1");
@@ -7989,7 +8006,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.deepEqual(await cards(), these("a1", "a2", "sub*", "both", "near", "under*"));
         assert.match(await text("#summary"), /^6 cards for 13 tasks/);
         await into("under");
-        assert.deepEqual([await hash(), await cards(), await trail()], [`#board?in=${z.alpha}/${z.under}&zoom=1`, these("leaf"), `in all projects › ${z.alpha} › ${z.under} · Under a deleted group✕ leave group`]);
+        assert.deepEqual([await hash(), await cards(), await trail()], [`#board?in=${z.alpha}/${z.under}&zoom=1`, these("leaf"), `in all projects › ${z.alpha} › ${z.under} · Under a deleted group`]);
         // A trail that names the deleted group loses that step and keeps the ones around it.
         await open(`/#board?in=${z.alpha}/${z.mid}/${z.under}`);
         assert.deepEqual([await hash(), await cards()], [`#board?in=${z.alpha}/${z.under}`, these("leaf")]);
@@ -8006,8 +8023,8 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await live();
         await alter("delete", { id: z.sub! });
         await page.until(`return location.hash === '#board?in=${z.alpha}/${z.deep}'`, "the deleted group to leave the trail", 3000);
-        assert.deepEqual([await cards(), await trail()], [these("pit", "d1"), `in all projects › ${z.alpha} › ${z.deep} · Deep group✕ leave group`]);
-        await page.click("#scope .leave");
+        assert.deepEqual([await cards(), await trail()], [these("pit", "d1"), `in all projects › ${z.alpha} › ${z.deep} · Deep group`]);
+        await page.click("#leave-group");
         assert.deepEqual(await cards(), these("a1", "a2", "both", "near", "under", "leaf", "s1", "s2", "s3", "deep", "pit", "d1"), "everything the deleted group held is in Alpha");
         await plan("restore", { id: z.sub });
         await page.run("localStorage.removeItem('vigile.auto-refresh')");
@@ -8016,7 +8033,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await open(`/#graph?in=${z.alpha}`);
         await graphReady();
         assert.ok((await page.run<string[]>("return window.vigileGraph.nodes('[kind = \"task\"]').map((n) => n.data('ref'))")).includes(z.under!), "inside Alpha, the group is drawn");
-        await page.click("#scope .leave");
+        await page.click("#leave-group");
         await page.click("label:has(#collapse-groups)");
         await page.until(`return Boolean(window.vigileGraph?.scratch('settled')) && window.vigileGraph.getElementById('task:${z.leaf}').nonempty()`, "the graph with its groups open", 20_000);
         assert.deepEqual(await page.run(`const cy = window.vigileGraph; const boxes = (id) => cy.getElementById(id).ancestors().map((box) => box.id()); return [boxes('task:${z.under}').includes('task:${z.alpha}'), boxes('task:${z.leaf}').includes('task:${z.under}'), boxes('task:${z.leaf}').includes('task:${z.alpha}')]`), [true, true, true]);
@@ -8076,7 +8093,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.deepEqual([await level(), await closed()], ["Top level", [`${chain[0]} holds 1,001 tasks`]]);
         // Half-way down, entered: the board is in the group at level 500, and shows the level under it.
         const entered = await timed(`location.hash = '#board?in=${chain[499]}&zoom=1'; window.dispatchEvent(new HashChangeEvent('hashchange'))`);
-        assert.deepEqual([await closed(), await trail()], [[`${chain[500]} holds 501 tasks`], `in all projects › ${chain[499]} · Level 500✕ leave group`]);
+        assert.deepEqual([await closed(), await trail()], [[`${chain[500]} holds 501 tasks`], `in all projects › ${chain[499]} · Level 500`]);
         assert.match(await text("#summary"), /^1 card for 502 tasks/);
         // The last group but one, entered from its card: one task, and nothing further to zoom.
         await at("#board?zoom=1001");
@@ -8086,9 +8103,9 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         // The whole way down as a trail, a thousand groups one in the other: the address is taken as it is, the
         // board is in the last of them, and each step out is one group.
         await at(`#board?in=${chain.slice(0, 1001).join("/")}`);
-        assert.deepEqual([await trail(), await page.run<string[]>("return [...document.querySelectorAll('#board .card')].map((card) => card.dataset.id)")], [`in all projects › … › ${chain[998]} › ${chain[999]} › ${chain[1000]} · Level 1001✕ leave group`, [chain[1001]]]);
+        assert.deepEqual([await trail(), await page.run<string[]>("return [...document.querySelectorAll('#board .card')].map((card) => card.dataset.id)")], [`in all projects › … › ${chain[998]} › ${chain[999]} › ${chain[1000]} · Level 1001`, [chain[1001]]]);
         assert.ok((await page.run<string>("return document.querySelector('#scope .scope-text').title")).length < 200, "the line's full text names the steps it shows, not a thousand");
-        const left = await timed("document.querySelector('#scope .leave').click()");
+        const left = await timed("document.querySelector('#leave-group').click()");
         assert.equal(await hash(), `#board?in=${chain.slice(0, 1000).join("/")}`);
         // A trail of as many steps that do not hold one another is cut to the last one that does.
         await at(`#board?in=${Array.from({ length: 5000 }, () => chain[5]).join("/")}/${chain[0]}/${chain[3]}`);
@@ -8127,7 +8144,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
                 `const card = ${card("alpha")}; const button = card.nextElementSibling; const c = card.getBoundingClientRect(), b = button.getBoundingClientRect(), last = card.lastElementChild.getBoundingClientRect();
                  return { inside: b.left >= c.left && b.right <= c.right && b.bottom <= c.bottom, below: b.top >= last.bottom, height: Math.round(b.height) }`,
               );
-              assert.deepEqual(fit, { inside: true, below: true, height: 28 }, `${name}, ${scheme}, ${width}px`);
+              assert.deepEqual(fit, { inside: true, below: true, height: 40 }, `${name}, ${scheme}, ${width}px`);
               await layout(`zoomed out in ${name}, ${scheme}, at ${width}px`);
               await open(`/#board?in=${z.alpha}/${z.sub}/${z.deep}&zoom=1`);
               await layout(`inside three groups in ${name}, ${scheme}, at ${width}px`);

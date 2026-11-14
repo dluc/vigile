@@ -876,9 +876,12 @@ function renderSummary(tasks, all) {
         filter,
         zoom,
       ),
-      steps.length > 0 && el("button", { class: "tag-button leave", type: "button", "data-group": steps.at(-1).id, title: steps.length > 1 ? `Back out to ${steps.at(-2).id}` : "Show everything here again", onclick: () => zoomOut(steps.length - 1) }, "✕ leave group"),
     ]),
   );
+  const leave = $("leave-group");
+  leave.hidden = steps.length === 0;
+  leave.dataset.group = steps.at(-1)?.id ?? "";
+  leave.title = steps.length > 1 ? `Back out to ${steps.at(-2).id}` : "Show everything here again";
 }
 
 /**
@@ -1091,6 +1094,7 @@ function stepLevel(by) {
 }
 $("level-out").addEventListener("click", () => stepLevel(-1));
 $("level-in").addEventListener("click", () => stepLevel(1));
+$("leave-group").addEventListener("click", () => zoomOut(Math.max(0, state.into.length - 1)));
 
 /** Opens an item in the panel. Opened from inside the panel, it remembers the item it came from. */
 /** Finds the control the panel was opened from, as it is now, so that the keyboard can go back to it. */
@@ -1725,9 +1729,9 @@ function keyboardPlace() {
   // The line above the board is written again with it. The way out of a group stands for that group, and a step
   // of the trail, which is known by how far out it leads, for the group it names. Which group that is, is read
   // from the control itself: by now the page may be somewhere else already.
-  if (at.matches("#scope .leave")) {
+  if (at.matches("#leave-group")) {
     const group = at.dataset.group;
-    return ofBoard(() => [...$("scope").querySelectorAll(".leave")].find((button) => button.dataset.group === group), { item: group ?? null, kind: ".zoom-into" });
+    return ofBoard(() => ($("leave-group").dataset.group === group ? $("leave-group") : null), { item: group ?? null, kind: ".zoom-into" });
   }
   if (at.matches("#scope .crumb")) {
     const group = at.dataset.group;
@@ -1819,7 +1823,8 @@ function standsFor(id, kind) {
   const step = state.into.indexOf(id);
   if (step < 0) return null;
   const crumb = [...$("scope").querySelectorAll(".crumb")].find((button) => button.dataset.step === String(step + 1));
-  return (step < state.into.length - 1 ? reachable(crumb) : null) ?? reachable($("scope").querySelector(".leave"));
+  const parent = [...$("scope").querySelectorAll(".crumb")].find((button) => button.dataset.step === String(step));
+  return (step < state.into.length - 1 ? reachable(crumb) : null) ?? reachable($("leave-group")) ?? reachable(parent);
 }
 
 /**
@@ -1838,7 +1843,7 @@ function whereNow(place) {
     (place.item && place.kind === ".card" ? representative(place.item) : null) ??
     reachable(same) ??
     (place.item ? standsFor(place.item, place.kind) : null) ??
-    [state.view === "board" ? $(state.level === null ? "level-out" : "level-in") : null, $("scope").querySelector(".leave"), $("scope").querySelector(".scope-text"), $(`view-${state.view}`)].find(reachable) ??
+    [state.view === "board" ? $(state.level === null ? "level-out" : "level-in") : null, $("leave-group"), $("scope").querySelector(".scope-text"), $(`view-${state.view}`)].find(reachable) ??
     null
   );
 }
@@ -1858,7 +1863,8 @@ function render() {
   draw();
   // Put back without scrolling: the reader keeps their place on the page as well. What had the keyboard may be
   // gone from the new drawing, or hidden by it: the keyboard then goes where it can.
-  keepKeyboard(had, () => restoredControl(place));
+  if (had?.matches?.("#leave-group") && place?.item && had.dataset.group !== place.item) keyboardTo(place);
+  else keepKeyboard(had, () => restoredControl(place));
 }
 
 /**
@@ -1924,10 +1930,12 @@ function linkViews() {
  * A button with nothing further to go to says so and stays where it is, so that the keyboard does not lose it.
  */
 function showLevels(board) {
-  $("levels").hidden = !board || board.deepest < 2;
+  const canStep = Boolean(board && board.deepest >= 2);
+  $("levels").hidden = !canStep && state.into.length === 0;
+  for (const id of ["level-out", "level-in", "level"]) $(id).hidden = !canStep;
   // Out of sight it says nothing: how many levels were open says how deep the plan is.
-  $("level").textContent = $("levels").hidden ? "" : levelName(board.level);
-  if ($("levels").hidden) return;
+  $("level").textContent = canStep ? levelName(board.level) : "";
+  if (!canStep) return;
   const ends = { "level-out": board.level === 1, "level-in": board.level === null };
   const titles = {
     "level-out": ends["level-out"] ? "Only the top level is shown: there is nothing further to zoom out to" : "Zoom out: close one level of groups",
