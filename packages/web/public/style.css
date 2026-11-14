@@ -159,6 +159,11 @@ body.lit { --muted: color-mix(in srgb, var(--muted-plain) 50%, var(--text)); }
 .settings-menu .switch > span:not(.track) { flex: 1; }
 .setting-icon { flex: none; color: var(--muted); }
 .setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding-top: 8px; }
+/* A row of the menu that does something once, where a switch would have nothing to stay on or off for. */
+.setting-action { display: flex; align-items: center; gap: 4px; min-height: 34px; }
+.setting-action button { flex: 1; min-height: 30px; padding: 0 6px; border: 0; border-radius: var(--r-s); background: none; text-align: left; white-space: nowrap; cursor: pointer; }
+.setting-action button:hover { background: var(--idle-soft); }
+.setting-action button:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
 .settings-menu .theme { width: 30px; height: 30px; }
 #settings[aria-expanded="true"] { background: var(--top-text, var(--text)); border-color: var(--top-text, var(--text)); color: var(--top-pressed, var(--bg)); }
 /* The theme picker: one small emblem for each theme, drawn in that theme's own colours whichever theme is on. */
@@ -277,7 +282,7 @@ main { padding: 18px clamp(14px, 3vw, 28px) 60px; display: grid; grid-template-c
  * A column is never wider than a card reads well at, so on a wide window the columns keep to the left
  * and are not stretched across it.
  */
-.board { --column-widest: 380px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(270px, var(--column-widest)); justify-content: start; gap: 14px; align-items: start; overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity; }
+.board { --column-widest: 380px; --column-track: minmax(270px, var(--column-widest)); --column-strip: 40px; display: grid; grid-auto-flow: column; grid-auto-columns: var(--column-track); grid-template-columns: var(--columns, none); justify-content: start; gap: 14px; align-items: start; overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity; }
 .board > .column { scroll-snap-align: start; }
 /* When the window is wider than the columns need, Done takes the spare room and lays its cards out side by side. */
 .board > .column.wide { grid-column: span var(--span); }
@@ -286,6 +291,14 @@ main { padding: 18px clamp(14px, 3vw, 28px) 60px; display: grid; grid-template-c
 .column-head { display: flex; align-items: center; gap: 8px; padding: 2px 4px 10px; font-weight: 650; font-size: 13px; }
 .column-head .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--idle); }
 .column-head .count { margin-left: auto; color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+/*
+ * The control at the end of a column's heading that collapses the column. It takes little of the heading's width,
+ * so that the longest names still fit a narrow column on one line, and reaches a little further than it looks.
+ */
+.column-fold { position: relative; flex: none; display: grid; place-items: center; width: 18px; height: 24px; margin: -3px -4px; padding: 0; border: 0; border-radius: var(--r-s); background: none; color: var(--muted); cursor: pointer; }
+.column-fold::after { content: ""; position: absolute; inset: 0 -3px; }
+.column-fold:hover { background: var(--idle-soft); color: var(--text); }
+.column-fold:focus-visible { outline: 2px solid var(--busy); outline-offset: 1px; }
 .column[data-tone="go"] .column-head .dot { background: var(--go); }
 .column[data-tone="wait"] .column-head .dot { background: var(--wait); }
 .column[data-tone="stop"] .column-head .dot { background: var(--stop); }
@@ -630,6 +643,7 @@ button.link:hover { background: var(--idle-soft); }
 :root[data-theme="gito"] .column[data-tone="review"] .column-head .dot { border-color: var(--review); background: none; }
 :root[data-theme="gito"] .column[data-tone="bug"] .column-head .dot { border-color: var(--bug); background: none; }
 :root[data-theme="gito"] .column-head .count { margin-left: 0; padding: 0 7px; border-radius: 2em; background: color-mix(in srgb, var(--idle) 24%, transparent); color: var(--text); font-size: 12px; }
+:root[data-theme="gito"] .column-fold { margin-left: auto; }
 :root[data-theme="gito"] .card { box-shadow: none; }
 :root[data-theme="gito"] .card:hover { box-shadow: none; border-color: var(--muted); }
 :root[data-theme="gito"] .card.is-group { box-shadow: 3px 3px 0 -1px var(--surface), 3px 3px 0 0 var(--line); }
@@ -659,11 +673,50 @@ button.link:hover { background: var(--idle-soft); }
 :root .project.dimmed:hover, :root .project.dimmed:focus-within, :root .project-chip.dimmed:hover, :root .project-chip.dimmed:focus-visible { filter: none; }
 
 /*
+ * A collapsed column is a strip as wide as a column's heading is tall: the arrowhead that opens it, its dot, its
+ * name written from top to bottom, and its count. It is as tall as the board, like the columns it stands among.
+ * The control in it reaches over the whole strip, so a click anywhere on the strip opens the column. This comes
+ * after the themes, whose own columns and headings it must turn into strips too.
+ */
+:root .column.collapsed { position: relative; cursor: pointer; }
+:root .column.collapsed:hover { box-shadow: var(--shadow); }
+:root .column.collapsed .column-head { margin: 0; padding: 2px 4px; border: 0; }
+.column.collapsed .column-fold { position: static; }
+.column.collapsed .column-fold::after { inset: 0; }
+.column.collapsed .column-fold:hover { background: none; }
+.column.collapsed .column-fold:focus-visible { outline: none; }
+.column.collapsed:has(.column-fold:focus-visible) { outline: 2px solid var(--busy); outline-offset: -2px; }
+.column.collapsed .column-fold svg { transform: rotate(180deg); }
+/* A strip that something changed in is ringed as a changed card is, on its inside: the board cuts off what reaches out of it. */
+.column.collapsed.changed { animation: changed-strip 6s ease-out both; }
+@keyframes changed-strip {
+  0%, 30% { box-shadow: inset 0 0 0 3px var(--busy), inset 0 0 0 8px color-mix(in srgb, var(--busy) 22%, transparent); }
+  100% { box-shadow: inset 0 0 0 3px transparent, inset 0 0 0 8px transparent; }
+}
+@media (min-width: 641px) {
+  :root .board > .column.collapsed { display: flex; flex-direction: column; align-items: center; align-self: stretch; padding: 10px 0; }
+  :root .column.collapsed .column-head { writing-mode: vertical-rl; padding: 0; white-space: nowrap; }
+  :root .column.collapsed .column-head .count { writing-mode: horizontal-tb; margin: 0; }
+  .column.collapsed .column-fold { order: -1; margin: -3px 0 0; width: 24px; }
+}
+/* On a phone the columns are stacked, and a collapsed one is its heading alone: a short bar. The arrowhead points up and down there. */
+@media (max-width: 640px) {
+  .column-fold svg { transform: rotate(90deg); }
+  .column.collapsed .column-fold svg { transform: rotate(-90deg); }
+}
+/* The line beside the strips when every column is collapsed. */
+.columns-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 0; padding: 8px 4px; color: var(--muted); font-size: 13px; }
+.columns-note button { flex: none; min-height: 28px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--raised); cursor: pointer; }
+.columns-note button:hover { box-shadow: var(--shadow); }
+.columns-note button:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+
+/*
  * Without motion the ring on a changed card does not fade: it is there, then gone. This comes last and names the
  * theme, so that it holds against the shadows the themes and the groups give their cards.
  */
 @media (prefers-reduced-motion: reduce) {
   :root[data-theme] .card.changed { animation: none; box-shadow: 0 0 0 3px var(--busy); }
+  :root[data-theme] .column.collapsed.changed { animation: none; box-shadow: inset 0 0 0 3px var(--busy); }
 }
 /* The one rule the graph library would write into the page itself; see LIBRARY_STYLE in graph.js. */
 .__________cytoscape_container { position: relative; }

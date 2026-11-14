@@ -274,7 +274,9 @@ The page loads once and then stays as it is, so it never changes under your
 eyes while you read. The refresh button reloads it. With "Auto-refresh" on, the
 page listens to the service and shows each change as it happens: a card that
 moved to another column floats there, a new one fades in, and each is ringed
-for a moment. The refresh button is then not needed and not shown.
+for a moment, as is a card that shows something else than before: another
+title, priority or assignee, a new tag. The refresh button is then not needed
+and not shown.
 
 The gear button in the header opens the settings, which the browser remembers:
 
@@ -299,6 +301,19 @@ Two more switches sit above the graph, because they change what it shows:
 The projects at the top fold into one row, and the button with four corners in
 the header folds away everything above the board or the graph, so that it gets
 the whole window. The page works from a phone to a very wide screen.
+
+A column of the board collapses to a narrow strip with the arrow at the end of
+its heading, and opens again with a click anywhere on the strip. The strip
+keeps the column's name and its count, and the other columns share the room it
+leaves; on a phone, where columns are stacked, it is a short bar. The cards of
+a collapsed column are still counted above the board and found by the filter.
+When one of them arrives, leaves or would show something else, the strip is
+ringed as the card would be; a card that goes into the column or comes out of
+it travels to the strip or from it, and a card that had the keyboard leaves it
+on the strip. The browser remembers which columns are collapsed. That is not
+part of the page's address, so a link you share collapses nobody else's
+columns. With every column collapsed, a line beside the strips says so and
+opens them all; the settings offer "Open all columns" while any is collapsed.
 
 **Themes.** The settings switch the theme on the spot: Vigile,
 the page's own; Dado, after Azure DevOps; Jeev, after Jira; Gito, after GitHub.

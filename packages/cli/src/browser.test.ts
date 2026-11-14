@@ -1891,6 +1891,1800 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     });
   });
 
+  browserSuite("collapsed columns", () => {
+    type Column = { key: string; collapsed: boolean; width: number; height: number; cards: number };
+    /** The columns as the board shows them: which are collapsed, how large each is, and how many cards each has drawn. */
+    const board = () =>
+      page.run<Column[]>(
+        "return [...document.querySelectorAll('.board > .column')].map((c) => { const r = c.getBoundingClientRect(); return { key: c.dataset.key, collapsed: c.classList.contains('collapsed'), width: Math.round(r.width), height: Math.round(r.height), cards: c.querySelectorAll('.card').length }; })",
+      );
+    const column = async (key: string) => (await board()).find((c) => c.key === key)!;
+    const collapsed = async () => (await board()).filter((c) => c.collapsed).map((c) => c.key);
+    /** The control in a column's heading that collapses it; on a collapsed column, the one that opens it. */
+    const control = (key: string) => `.column[data-key="${key}"] .column-fold`;
+    const named = (key: string) => page.run<[string | null, string | null]>(`const b = document.querySelector(${JSON.stringify(control(key))}); return [b.getAttribute('aria-label'), b.getAttribute('aria-expanded')]`);
+    const stored = () => page.run<string | null>("return localStorage.getItem('vigile.collapsed')");
+    /** Opens the page as a browser does that remembers these columns as collapsed. */
+    const loadCollapsed = async (keys: string[], path = "/") => {
+      await load();
+      await page.run(`localStorage.setItem('vigile.collapsed', ${JSON.stringify(JSON.stringify(keys))})`);
+      await load(path);
+    };
+    const forget = () => page.run("for (const name of ['vigile.collapsed', 'vigile.bugs-apart', 'vigile.auto-refresh', 'vigile.motion', 'vigile.sound', 'vigile.scroll']) localStorage.removeItem(name)");
+    const ALL = ["in_progress", "in_review", "next", "waiting", "paused", "draft", "done", "cancelled"];
+    const sideways = () => page.run<boolean>("const b = document.getElementById('board'); return b.scrollWidth > b.clientWidth");
+    /** Counts the copies of cards that float across the page while a card travels or leaves. */
+    const watchGhosts = () => page.run("window.ghosts = 0; window.ghostWatch?.disconnect(); window.ghostWatch = new MutationObserver((changes) => { for (const c of changes) for (const n of c.addedNodes) if (n.classList?.contains('card-ghost')) window.ghosts++; }); window.ghostWatch.observe(document.body, { childList: true });");
+    const ghosts = () => page.run<number>("return window.ghosts");
+    const settled = () => page.until("return document.querySelectorAll('.card-ghost').length === 0 && [...document.querySelectorAll('.card')].every((c) => getComputedStyle(c).visibility === 'visible')", "the movement to finish", 12_000);
+    const live = () => page.until("return document.getElementById('sync').textContent.startsWith('Live')", "the page to say it is live");
+    const ringed = (key: string) => page.run<boolean>(`return document.querySelector('.column[data-key="${key}"]').classList.contains('changed')`);
+
+    it("collapses a column to a narrow strip that keeps its name and its count, gives its room to the other columns, and opens it again with a click anywhere on the strip", async () => {
+      await page.size(1440, 900);
+      await load();
+      try {
+        const before = await board();
+        assert.deepEqual(before.map((c) => [c.key, c.collapsed, c.width]), ALL.map((key) => [key, false, 270]), "eight open columns, more than the window holds, each at its least width");
+        const counts = await columns();
+        const summary = await text("#summary");
+        // Every column has the control, a button at the end of its heading that says what it will do.
+        const controls = await page.run<Array<[string, string | null, string | null, boolean]>>(
+          "return [...document.querySelectorAll('.board > .column')].map((c) => { const all = c.querySelectorAll('.column-fold'); const b = all[0]; return [b.tagName + ' ' + b.type + ' ' + all.length, b.getAttribute('aria-label'), b.getAttribute('aria-expanded'), b === c.querySelector('.column-head').lastElementChild]; })",
+        );
+        assert.deepEqual(
+          controls,
+          ["In progress", "In review", "Next", "Waiting for dependencies", "Paused", "Draft", "Done", "Cancelled"].map((title) => ["BUTTON button 1", `Collapse the ${title} column`, "true", true]),
+        );
+
+        await page.click(control("done"));
+        const strip = await column("done");
+        assert.deepEqual([strip.collapsed, strip.width, strip.cards], [true, 40, 0], "Done is a strip 40 pixels wide, with none of its cards drawn");
+        assert.equal(strip.height, (await column("next")).height, "as tall as the columns it stands among");
+        assert.deepEqual(await columns(), counts, "every column still says its name and how many cards it holds, the collapsed one too");
+        assert.equal(await text("#summary"), summary, "and the counts above the board are what they were");
+        assert.deepEqual(await named("done"), [`Open the Done column, ${counts.Done} cards`, "false"], "its control now says that it opens the column, and how many cards are in it");
+        assert.deepEqual(
+          await page.run("const c = document.querySelector('.column[data-key=\"done\"]'); const head = c.querySelector('.column-head').getBoundingClientRect(); return [c.children.length, getComputedStyle(c.querySelector('.column-head')).writingMode, head.height > 2 * head.width, getComputedStyle(c.querySelector('.count')).writingMode]"),
+          [1, "vertical-rl", true, "horizontal-tb"],
+          "the strip is the heading alone, its name written from top to bottom and its count upright",
+        );
+        assert.equal(await stored(), '["done"]');
+        await layout("with one column collapsed");
+
+        // With enough of them collapsed, the open ones are wider than they were: they share the room that was freed.
+        for (const key of ["paused", "draft", "cancelled"]) await page.click(control(key));
+        const some = await board();
+        assert.deepEqual(some.filter((c) => c.collapsed).map((c) => [c.key, c.width]), [["paused", 40], ["draft", 40], ["done", 40], ["cancelled", 40]]);
+        const open = some.filter((c) => !c.collapsed);
+        assert.deepEqual(open.map((c) => c.key), ["in_progress", "in_review", "next", "waiting"]);
+        for (const c of open) assert.ok(c.width > 275 && c.width <= 380 && Math.abs(c.width - open[0]!.width) <= 1, `${c.key} is ${c.width}px wide, as wide as the other open ones and wider than before`);
+        assert.equal(await sideways(), false, "and the board no longer scrolls sideways");
+        await layout("with four columns collapsed");
+
+        // A click anywhere on the strip opens the column: here near its lower end, far from the arrowhead.
+        const at = await page.run<{ x: number; y: number; control: boolean }>(
+          "const r = document.querySelector('.column[data-key=\"done\"]').getBoundingClientRect(); const x = r.left + r.width / 2, y = r.bottom - 30; return { x, y, control: Boolean(document.elementFromPoint(x, y)?.closest('.column[data-key=\"done\"] .column-fold')) }",
+        );
+        assert.equal(at.control, true, "the control reaches over the whole strip");
+        await page.clickAt(at.x, at.y);
+        const again = await column("done");
+        assert.deepEqual([again.collapsed, again.cards, again.width >= 270], [false, counts.Done, true], "Done is open again, with its cards");
+        assert.deepEqual(await named("done"), ["Collapse the Done column", "true"]);
+        assert.equal(await stored(), '["paused","draft","cancelled"]');
+        assert.deepEqual(await columns(), counts);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await forget();
+      }
+    });
+
+    it("writes the name on a strip so that it can be read in every theme, light and dark, and the column for bugs is a column like the others", async () => {
+      await page.size(1280, 900);
+      await load();
+      /** Runs in the page: how well the name and the count of each strip stand out from what is behind them. */
+      const READ = `
+        const lum = (colour) => { const scale = colour.startsWith("color(") ? 1 : 1 / 255; const [r, g, b] = colour.match(/[\\d.]+/g).slice(0, 3).map((v) => Number(v) * scale).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+        const ratio = (a, b) => { const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+        const clear = (colour) => colour === "transparent" || /^rgba\\(.*, 0\\)$/.test(colour);
+        return [...document.querySelectorAll(".column.collapsed")].map((c) => {
+          let behind = c;
+          while (clear(getComputedStyle(behind).backgroundColor)) behind = behind.parentElement;
+          const bg = getComputedStyle(behind).backgroundColor;
+          const name = getComputedStyle(c.querySelector(".column-head")).color;
+          const count = getComputedStyle(c.querySelector(".count")).color;
+          return c.dataset.key + (ratio(name, bg) >= 4.5 ? "" : " name hard to read: " + name + " on " + bg) + (ratio(count, bg) >= 4.5 ? "" : " count hard to read: " + count + " on " + bg);
+        });
+      `;
+      try {
+        await setting("bugs-apart");
+        const counts = await columns();
+        await page.click(control("trouble"));
+        await page.click(control("done"));
+        const bugs = await column("trouble");
+        assert.deepEqual([bugs.collapsed, bugs.width, bugs.cards], [true, 40, 0], "the column for bugs collapses to a strip like any other");
+        assert.deepEqual(await named("trouble"), [`Open the Bugs, issues and incidents column, ${counts["Bugs, issues and incidents"]} cards`, "false"]);
+        assert.equal(await count(".column[data-key='trouble'] .lane, .column[data-key='trouble'] .column-note"), 0, "without its note and the headings of its states");
+        assert.deepEqual(await columns(), counts);
+        for (const scheme of ["light", "dark"] as const) {
+          await page.scheme(scheme);
+          for (const name of ["vigile", "dado", "jeev", "gito"]) {
+            await page.run(`document.documentElement.dataset.theme = ${JSON.stringify(name)}`);
+            assert.deepEqual(await page.run<string[]>(READ), ["trouble", "done"], `the strips can be read in ${name}, ${scheme}`);
+            const strips = (await board()).filter((c) => c.collapsed);
+            assert.deepEqual(strips.map((c) => c.width), [40, 40], `a strip is 40 pixels wide in ${name}`);
+            const fits = await page.run<boolean>("return [...document.querySelectorAll('.column.collapsed')].every((c) => c.querySelector('.column-head').getBoundingClientRect().bottom <= c.getBoundingClientRect().bottom)");
+            assert.equal(fits, true, `the name and the count fit the strip in ${name}`);
+            await layout(`with strips in ${name}, ${scheme}`);
+          }
+        }
+        await page.click(control("trouble"));
+        assert.equal(await count(".column[data-key='trouble'] .lane"), 3, "opened, the column for bugs has the headings of its states again");
+      } finally {
+        await page.scheme("light");
+        await page.run("document.documentElement.dataset.theme = 'vigile'");
+        await forget();
+      }
+    });
+
+    it("counts the cards of a collapsed column above the board and under the filter, as it counts those of an open one", async () => {
+      await page.size(1280, 900);
+      await load();
+      try {
+        const counts = await columns();
+        const summary = await text("#summary");
+        await loadCollapsed(["next", "done"]);
+        assert.deepEqual(await collapsed(), ["next", "done"]);
+        assert.equal(await text("#summary"), summary, "the counts above the board count the collapsed columns too");
+        assert.deepEqual(await columns(), counts);
+        // The filter finds the cards of a collapsed column, and the strip counts what it found.
+        await page.click("#filter");
+        await page.type("Finished thing");
+        assert.match(await text("#summary"), /^20 tasks\s*0 in progress\s*0 next\s*0 waiting\s*20 done/);
+        assert.deepEqual(await columns(), { "In progress": 0, Next: 0, Done: 20 });
+        assert.deepEqual((await board()).map((c) => [c.key, c.collapsed, c.cards]), [["in_progress", false, 0], ["next", true, 0], ["done", true, 0]]);
+        assert.deepEqual(await named("done"), ["Open the Done column, 20 cards", "false"]);
+        await page.run("document.getElementById('filter').select()");
+        await page.type("Finished thing 7");
+        assert.deepEqual(await named("done"), ["Open the Done column, 1 card", "false"], "one card is one card");
+        // Nothing matches: the message says so, and no strip is left standing over it.
+        await page.run("document.getElementById('filter').select()");
+        await page.type("no such task");
+        assert.deepEqual([await count(".board > *"), await text("#empty")], [0, 'No task matches "no such task".']);
+        await page.run("document.getElementById('filter').select()");
+        await page.key("Backspace");
+        assert.deepEqual(await columns(), counts);
+        assert.deepEqual(await collapsed(), ["next", "done"]);
+      } finally {
+        await forget();
+      }
+    });
+
+    it("remembers which columns are collapsed in the browser and nowhere else, ignores a value damaged by hand and a name that no column has, and works for the visit where the browser stores nothing", async () => {
+      await page.size(1280, 900);
+      await load();
+      try {
+        assert.equal(await stored(), null, "nothing is stored until a column is collapsed");
+        const address = await page.run<string>("return location.href");
+        const asked = page.requests.length;
+        await page.click(control("next"));
+        await page.click(control("cancelled"));
+        await page.wait(300);
+        assert.equal(await stored(), '["next","cancelled"]', "one stored value: the names of the collapsed columns, in the order of the board");
+        assert.equal(await page.run<string>("return location.href"), address, "the address of the page is what it was: a shared link collapses nobody else's columns");
+        assert.equal(page.requests.length, asked, "and nothing was sent to the service");
+        await load();
+        assert.deepEqual(await collapsed(), ["next", "cancelled"], "a reload shows the same columns collapsed");
+        assert.equal(page.requests.slice(asked).some((url) => /collapsed|cancelled/.test(url)), false, "no request names them");
+
+        // Something else under the name is taken for no collapsed columns, and the page works.
+        for (const damaged of ["{", "null", '"done"', '{"done":true}', "[[\"done\"]]", "7", ""]) {
+          await page.run(`localStorage.setItem('vigile.collapsed', ${JSON.stringify(damaged)})`);
+          await load();
+          assert.deepEqual([await collapsed(), (await count(".card")) > 0], [[], true], `stored as ${damaged}`);
+        }
+        // Names that no column has are left out, whatever they are; the ones that are columns count.
+        await page.run(`localStorage.setItem('vigile.collapsed', ${JSON.stringify(JSON.stringify(["done", "gone", "__proto__", 7, null, "constructor", ["next"], "done", "paused"]))})`);
+        await load();
+        assert.deepEqual(await collapsed(), ["paused", "done"]);
+        await page.click(control("paused"));
+        assert.equal(await stored(), '["done"]', "and they are gone from what is stored at the next change");
+        // With nothing but such names stored, no column counts as collapsed: the settings do not offer to open any.
+        await page.run(`localStorage.setItem('vigile.collapsed', '["gone", "__proto__", 7]')`);
+        await load();
+        await openSettings();
+        assert.deepEqual([await collapsed(), await page.run<number>("return document.getElementById('columns-open').getBoundingClientRect().width")], [[], 0]);
+        await closeSettings();
+        // A column that is remembered and not on the board, as the one for bugs while it is switched off, is collapsed when it comes.
+        await page.run(`localStorage.setItem('vigile.collapsed', '["trouble"]')`);
+        await load();
+        assert.deepEqual(await collapsed(), []);
+        await setting("bugs-apart");
+        assert.deepEqual(await collapsed(), ["trouble"]);
+        assert.deepEqual(page.errors, []);
+        await forget();
+
+        // A browser that refuses storage altogether: every use of it throws.
+        const refusing = (await page.send("Page.addScriptToEvaluateOnNewDocument", {
+          source: "for (const name of ['localStorage', 'sessionStorage']) Object.defineProperty(window, name, { configurable: true, get() { throw new DOMException('The operation is insecure.', 'SecurityError'); } });",
+        })) as { identifier: string };
+        try {
+          await load();
+          await page.click(control("done"));
+          await page.click(control("next"));
+          assert.deepEqual(await collapsed(), ["next", "done"], "the columns collapse for as long as the page is open");
+          await page.click(".column[data-key='next']");
+          assert.deepEqual(await collapsed(), ["done"], "and open again");
+          await load();
+          assert.deepEqual(await collapsed(), [], "a reload starts with every column open, since nothing could be stored");
+          assert.deepEqual(page.errors, []);
+        } finally {
+          await page.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: refusing.identifier });
+          await load();
+        }
+      } finally {
+        await forget();
+      }
+    });
+
+    it("leaves no empty board when every column is collapsed: the strips stay, and a line says so and opens them all, as the settings do while any column is collapsed", async () => {
+      await page.size(1920, 900);
+      await load();
+      const offered = () => page.run<boolean>("return document.getElementById('columns-open').getBoundingClientRect().width > 0");
+      const done = () =>
+        page.run<{ span: string; perRow: number; width: number }>(
+          "const c = document.querySelector('.column[data-key=\"done\"]'); const cards = [...c.querySelectorAll('.card')].map((k) => k.getBoundingClientRect()); return { span: c.style.getPropertyValue('--span').trim(), perRow: cards.filter((k) => Math.abs(k.top - cards[0].top) < 2).length, width: Math.round(c.getBoundingClientRect().width) }",
+        );
+      try {
+        const counts = await columns();
+        const summary = await text("#summary");
+        await openSettings();
+        assert.equal(await offered(), false, "with every column open, the settings have nothing to offer");
+        await closeSettings();
+
+        // All but three: Done takes the room that is spare now, and lays its cards out side by side.
+        for (const key of ["in_review", "waiting", "paused", "draft", "cancelled"]) await page.click(control(key));
+        assert.deepEqual(await done(), { span: "2", perRow: 2, width: 774 }, "Done is two cards wide once the strips leave it the room");
+        assert.equal(await sideways(), false);
+        await layout("with five strips and a Done column two cards wide");
+        // A narrower window has no room to spare, and Done is one card wide again.
+        await page.size(1440, 900);
+        await page.until("return document.querySelector('.column[data-key=\"done\"]').style.getPropertyValue('--span') === ''", "the Done column to give the room back");
+        assert.equal((await done()).perRow, 1);
+        await page.size(1920, 900);
+        await page.until("return document.querySelector('.column[data-key=\"done\"]').style.getPropertyValue('--span').trim() === '2'", "the Done column to take the room again");
+
+        // All but one.
+        await page.click(control("in_progress"));
+        await page.click(control("next"));
+        assert.deepEqual(await done(), { span: "3", perRow: 3, width: 1168 }, "alone among strips, Done takes all the cards' widths that fit beside them");
+        assert.equal(await count(".columns-note"), 0);
+        await layout("with every column but one collapsed");
+
+        // All of them: the strips stay, each with its name and count, and a line beside them says what happened.
+        await page.click(control("done"));
+        assert.deepEqual((await board()).map((c) => [c.key, c.collapsed, c.width]), ALL.map((key) => [key, true, 40]));
+        assert.deepEqual(await columns(), counts);
+        assert.equal(await text("#summary"), summary);
+        assert.deepEqual(await page.run("const note = document.querySelector('#board > .columns-note'); return [note.firstChild.textContent, note.querySelector('button').textContent, note === document.getElementById('board').lastElementChild, note.getBoundingClientRect().left > document.querySelector('.column[data-key=\"cancelled\"]').getBoundingClientRect().right]"), [
+          "Every column is collapsed.",
+          "Open all",
+          true,
+          true,
+        ]);
+        assert.equal(await stored(), JSON.stringify(ALL));
+        await layout("with every column collapsed");
+        await page.click(".columns-note button");
+        assert.deepEqual([await collapsed(), await count(".columns-note"), await stored()], [[], 0, "[]"], "one click opens them all, and the line goes");
+        assert.deepEqual(await columns(), counts);
+        assert.deepEqual((await board()).map((c) => c.cards > 0), ALL.map(() => true), "every column has its cards again");
+
+        // The settings offer the same while any column is collapsed, and only then.
+        await page.click(control("next"));
+        await page.click(control("draft"));
+        await openSettings();
+        assert.equal(await offered(), true);
+        assert.equal(await text("#columns-open"), "Open all columns");
+        await layout("with the settings offering to open all columns");
+        await page.click("#columns-open");
+        assert.deepEqual([await collapsed(), await offered(), await settingsOpen(), await stored()], [[], false, true, "[]"], "all open, the offer gone, the menu still open");
+        assert.equal(await page.run<string>("return document.activeElement.id"), "settings", "the keyboard is on the button of the menu, not lost with the row that went");
+        await closeSettings();
+        // In the graph view there is no board to draw: the choice is made all the same, and the board shows it.
+        await loadCollapsed(["next"], "/#graph");
+        await graphReady();
+        await openSettings();
+        assert.equal(await offered(), true);
+        await page.click("#columns-open");
+        await closeSettings();
+        assert.equal(await stored(), "[]");
+        await page.click("#view-board");
+        await page.until("return document.querySelectorAll('.card').length > 0 && document.getElementById('board').getBoundingClientRect().height > 0", "the board");
+        assert.deepEqual(await collapsed(), []);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await forget();
+        await page.size(1280, 900);
+      }
+    });
+
+    it("can be collapsed and opened with the keyboard: the control says what it will do, shows where the keyboard is, and keeps it after it is used", async () => {
+      await page.size(1280, 900);
+      await load();
+      const at = () =>
+        page.run<{ where: string; name: string | null; expanded: string | null; shown: boolean }>(
+          "const a = document.activeElement; return { where: a.matches('.column-fold') ? a.closest('.column').dataset.key : a.closest('.columns-note') ? 'note' : a.dataset.id ? 'card' : a.tagName, name: a.getAttribute('aria-label'), expanded: a.getAttribute('aria-expanded'), shown: a.matches(':focus-visible') }",
+        );
+      /** The line drawn around what has the keyboard: around the control in an open column, around the whole strip of a collapsed one. */
+      const outline = (key: string) =>
+        page.run<{ control: string; strip: string }>(
+          `const c = document.querySelector('.column[data-key="${key}"]'); const b = c.querySelector('.column-fold'); const line = (el) => getComputedStyle(el).outlineStyle === 'none' ? 'none' : getComputedStyle(el).outlineWidth + ' ' + getComputedStyle(el).outlineStyle; return { control: line(b), strip: line(c) }`,
+        );
+      try {
+        const counts = await columns();
+        // The keyboard comes to the control of the first column from whatever is before it.
+        await page.run(`document.querySelector(${JSON.stringify(control("in_progress"))}).focus()`);
+        await page.key("Tab", true);
+        await page.key("Tab");
+        assert.deepEqual(await at(), { where: "in_progress", name: "Collapse the In progress column", expanded: "true", shown: true });
+        assert.deepEqual(await outline("in_progress"), { control: "2px solid", strip: "none" });
+        // Enter collapses the column. The keyboard is on its control still, which now opens it, and the strip shows it.
+        await page.key("Enter");
+        assert.deepEqual(await collapsed(), ["in_progress"]);
+        assert.deepEqual(await at(), { where: "in_progress", name: `Open the In progress column, ${counts["In progress"]} cards`, expanded: "false", shown: true });
+        assert.deepEqual(await outline("in_progress"), { control: "none", strip: "2px solid" }, "the line is around the whole strip, which is the control now");
+        await layout("with the keyboard on a strip");
+        // A second press undoes the first, with the space bar as well as with Enter.
+        await page.key("Space");
+        assert.deepEqual(await collapsed(), []);
+        assert.deepEqual(await at(), { where: "in_progress", name: "Collapse the In progress column", expanded: "true", shown: true });
+        await page.key("Space");
+        assert.deepEqual(await collapsed(), ["in_progress"]);
+        // From a strip, Tab goes on to the next column: none of the collapsed column's cards is in the way.
+        await page.key("Tab");
+        assert.equal((await at()).where, "in_review");
+        await page.key("Enter");
+        await page.key("Tab");
+        assert.equal((await at()).where, "next", "from one strip to the control of the column after it");
+        await page.key("Tab");
+        assert.equal((await at()).where, "card", "and in an open column the cards come after the control");
+
+        // With every column collapsed, Tab visits the strips in the order of the columns, then the line that opens them all.
+        await loadCollapsed(ALL);
+        await page.run(`document.querySelector(${JSON.stringify(control("in_progress"))}).focus()`);
+        const visited = ["in_progress"];
+        for (let press = 0; press < 8; press++) {
+          await page.key("Tab");
+          visited.push((await at()).where);
+        }
+        assert.deepEqual(visited, [...ALL, "note"]);
+        // Enter on "Open all" opens them. The line is gone, and the keyboard is on the first column's control.
+        await page.key("Enter");
+        assert.deepEqual(await collapsed(), []);
+        assert.deepEqual(await at(), { where: "in_progress", name: "Collapse the In progress column", expanded: "true", shown: true });
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await forget();
+      }
+    });
+
+    it("on a phone, where the columns are stacked, makes a collapsed column a short bar across the screen, and a strip again on a wide window", async () => {
+      await page.size(390, 844, true);
+      await load();
+      try {
+        const counts = await columns();
+        const wide = (await column("next")).width;
+        await page.tap(control("next"));
+        const bar = await column("next");
+        assert.deepEqual([bar.collapsed, bar.width, bar.cards], [true, wide, 0], "as wide as the screen leaves, like the columns above and below it");
+        assert.ok(bar.height >= 36 && bar.height <= 56, `and as low as its heading: ${bar.height}px`);
+        assert.equal(await page.run<string>("return getComputedStyle(document.querySelector('.column[data-key=\"next\"] .column-head')).writingMode"), "horizontal-tb", "its name is written across");
+        assert.deepEqual(await columns(), counts);
+        const tops = await page.run<number[]>("return [...document.querySelectorAll('.board > .column')].map((c) => Math.round(c.getBoundingClientRect().top))");
+        assert.equal(new Set(tops).size, tops.length, "the columns are still one under the other");
+        await layout("with a column collapsed on a phone");
+        await page.scheme("dark");
+        await layout("with a column collapsed on a phone, dark");
+        await page.scheme("light");
+        // Every column a bar, and the line under them.
+        for (const key of ALL.filter((key) => key !== "next")) await page.tap(control(key));
+        assert.deepEqual((await board()).map((c) => [c.collapsed, c.width, c.height <= 56]), ALL.map(() => [true, wide, true]));
+        assert.equal(await page.run<boolean>("const note = document.querySelector('.columns-note').getBoundingClientRect(); return note.top >= document.querySelector('.column[data-key=\"cancelled\"]').getBoundingClientRect().bottom && note.width > 0"), true, "the line that opens them all is under the bars");
+        await layout("with every column collapsed on a phone");
+        // A tap anywhere on a bar opens it.
+        await page.tap(".column[data-key='next']");
+        assert.deepEqual(await collapsed(), ALL.filter((key) => key !== "next"));
+        assert.ok((await column("next")).cards > 0);
+        // The same page on a wide window: the bars are strips.
+        await page.size(1280, 900);
+        await page.until("return Math.round(document.querySelector('.column[data-key=\"done\"]').getBoundingClientRect().width) === 40", "the bars to become strips");
+        assert.deepEqual((await board()).filter((c) => c.collapsed).map((c) => [c.key, c.width]), ALL.filter((key) => key !== "next").map((key) => [key, 40]));
+        await layout("with the bars of a phone turned into strips");
+        for (const width of [320, 640, 641, 768, 1024, 1920]) {
+          await page.size(width, 900, width <= 640);
+          await layout(`with all but one column collapsed at ${width}px`);
+        }
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await forget();
+        await page.size(1280, 900);
+      }
+    });
+
+    it("sends the card of a task that goes into a collapsed column to the strip, which takes it in, and brings one that comes out of it from the strip", async () => {
+      await page.size(1500, 900);
+      const mine = `[...document.querySelectorAll('.card-ghost')].find((g) => g.querySelector('.id').textContent === ${JSON.stringify(ids.address)})`;
+      const card = `document.querySelector('.card[data-id="${ids.address}"]')`;
+      type Spot = { x: number; y: number; width: number; opacity: number };
+      /** The travelling copy at the start of its journey, once it has lifted off, and as it lands. */
+      const journey = () =>
+        page.run<{ start: Spot; lifted: Spot; end: Spot }>(`
+          const ghost = ${mine}; const flight = ghost.getAnimations()[0];
+          const total = flight.effect.getComputedTiming().duration; const was = flight.currentTime;
+          const at = (time) => { flight.currentTime = time; const r = ghost.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, opacity: Number(getComputedStyle(ghost).opacity) }; };
+          const seen = { start: at(0), lifted: at(150), end: at(total - 1) };
+          flight.currentTime = was;
+          return seen;
+        `);
+      const strip = () => page.run<{ left: number; right: number; top: number; bottom: number }>("const r = document.querySelector('.column.collapsed[data-key=\"done\"]').getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }");
+      // Counts the notes played, in place of listening to them.
+      const COUNT = "window.notes = 0; const start = OscillatorNode.prototype.start; OscillatorNode.prototype.start = function (...args) { window.notes++; return start.apply(this, args); };";
+      let other: { id: string; version: number } | null = null;
+      try {
+        await load();
+        await page.run("localStorage.setItem('vigile.auto-refresh', 'on'); localStorage.setItem('vigile.sound', 'on')");
+        await loadCollapsed(["waiting", "paused", "draft", "done", "cancelled"]);
+        await page.run(COUNT);
+        await live();
+        const counts = await columns();
+        const from = await page.run<{ x: number; width: number }>(`const r = ${card}.getBoundingClientRect(); return { x: r.left + r.width / 2, width: r.width }`);
+
+        // Into the collapsed column: the card lifts off where it was, travels to the strip, and shrinks into it.
+        await move(ids.address!, "done");
+        await page.until(`return Boolean(${mine})`, "the card to set off for the strip", 1500);
+        const into = await journey();
+        const room = await strip();
+        assert.ok(Math.abs(into.start.x - from.x) <= 2 && Math.abs(into.start.width - from.width) <= 2 && into.start.opacity === 1, `it sets off from where the card was: ${JSON.stringify(into.start)}`);
+        assert.ok(into.end.x > room.left && into.end.x < room.right && into.end.y > room.top && into.end.y < room.bottom, `and lands on the strip: at ${Math.round(into.end.x)}, ${Math.round(into.end.y)}, the strip being ${JSON.stringify(room)}`);
+        assert.ok(into.end.width < 60 && into.end.opacity < 0.05, `where it is taken in: ${Math.round(into.end.width)}px wide and no longer seen`);
+        assert.deepEqual(await page.run(`return [${card}, document.querySelector('.column[data-key="done"]').classList.contains('changed')]`), [null, true], "there is no card of it on the board, and the strip is ringed");
+        assert.equal((await columns()).Done, counts.Done! + 1, "the strip counts one card more");
+        await page.until("return window.notes === 2", "the sound for the completed task", 2500);
+        // Another change arrives while the copy is on its way, which is slowed down here to be sure of that: the
+        // board is drawn again under it, and its journey is not cut short.
+        await page.run(`${mine}.getAnimations()[0].playbackRate = 0.1; ${mine}.dataset.mark = 'first';`);
+        other = (await run("create_task", { title: "Arrives during the journey to the strip", description: "d", project: "WEB" })) as { id: string; version: number };
+        await page.until(`return document.querySelector('.card[data-id="${other.id}"]') !== null`, "the board to be drawn again", 1500);
+        assert.equal(await page.run<string | undefined>(`return ${mine}?.dataset.mark`), "first", "the same copy is still on its way");
+        await page.run(`${mine}.getAnimations()[0].playbackRate = 1`);
+        await settled();
+        assert.equal(await count(`.card[data-id="${ids.address}"]`), 0);
+        await layout("after a card went into a collapsed column");
+
+        // Out of it: the card grows out of the strip, and travels to its place in the column it now belongs to.
+        await move(ids.address!, "open");
+        await page.until(`return Boolean(${mine})`, "the card to set off from the strip", 1500);
+        const out = await journey();
+        assert.ok(out.start.x > room.left && out.start.x < room.right && out.start.y > room.top && out.start.y < room.bottom, `it sets off from the strip: at ${Math.round(out.start.x)}, ${Math.round(out.start.y)}`);
+        assert.ok(out.start.width < 60 && out.start.opacity < 0.05, `out of which it grows: ${Math.round(out.start.width)}px wide at first`);
+        assert.ok(out.lifted.opacity === 1 && out.lifted.width > 250, `to its own size before it leaves: ${Math.round(out.lifted.width)}px`);
+        assert.deepEqual(await page.run(`return [${card}.closest('.column').dataset.key, getComputedStyle(${card}).visibility, ${card}.classList.contains('changed'), document.querySelector('.column[data-key="done"]').classList.contains('changed')]`), ["next", "hidden", true, true], "the card waits unseen where it will land, ringed, and the strip it left is ringed too");
+        assert.equal((await columns()).Done, counts.Done, "the strip counts one card fewer");
+        await settled();
+        assert.equal(await page.run<string>(`return getComputedStyle(${card}).visibility`), "visible");
+
+        // A column is collapsed while a card is on its way between two others: the columns move, so the journey
+        // ends there and then, with the card in its place.
+        await move(ids.address!, "in_progress");
+        await page.until(`return Boolean(${mine})`, "the card to set off for its column", 1500);
+        await page.run(`${mine}.getAnimations()[0].playbackRate = 0.1`);
+        assert.equal(await page.run<string>(`return getComputedStyle(${card}).visibility`), "hidden");
+        await page.click(control("in_review"));
+        assert.deepEqual(await page.run(`return [document.querySelectorAll('.card-ghost').length, ${card}.closest('.column').dataset.key, getComputedStyle(${card}).visibility, ${card}.classList.contains('changed')]`), [0, "in_progress", "visible", true], "no copy is left in the air, and the card is where it belongs, ringed");
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await move(ids.address!, "open").catch(() => {});
+        await move(ids.address!, "in_progress").catch(() => {});
+        if (other) await run("delete", { id: other.id, version: (await run("get", { id: other.id })).version }).catch(() => {});
+        await forget();
+        await load();
+      }
+    });
+
+    it("rings the strip of a collapsed column for as long as it rings a card, when a card in it changes state, arrives from another strip or leaves, and when animations are off", async () => {
+      await page.size(1280, 900);
+      const card = `document.querySelector('.card[data-id="${ids.review}"]')`;
+      try {
+        // A second task is in review, so that the column is still there when the first one leaves it.
+        await move(ids.paused!, "in_progress", "in_review");
+        await load();
+        await page.run("localStorage.setItem('vigile.auto-refresh', 'on'); localStorage.setItem('vigile.bugs-apart', 'on')");
+        await loadCollapsed(["trouble", "in_review", "done"]);
+        await live();
+        const counts = await columns();
+
+        // A bug goes to review and stays in the column for bugs: its state changed there. Nothing travels.
+        await watchGhosts();
+        const began = Date.now();
+        await move(ids.bugBusy!, "in_review");
+        await page.until(`return document.querySelector('.column[data-key="trouble"]').classList.contains('changed')`, "the strip of the bugs to be ringed", 2000);
+        assert.deepEqual([await ringed("in_review"), await ringed("done"), await ghosts()], [false, false, 0], "that strip alone, and no card travels");
+        assert.deepEqual(await columns(), counts);
+        // The mark is the one a changed card gets: the same ring, for the same six seconds, drawn on the inside of the strip.
+        assert.deepEqual(
+          await page.run("const s = getComputedStyle(document.querySelector('.column[data-key=\"trouble\"]')); return [s.animationName, s.animationDuration, /inset/.test(s.boxShadow) && /3px/.test(s.boxShadow)]"),
+          ["changed-strip", "6s", true],
+        );
+        // Under reduced motion the ring does not fade: it is there, then gone, in every theme.
+        await page.motion("reduce");
+        for (const name of ["vigile", "dado", "jeev", "gito"]) {
+          const shadow = await page.run<string>(`document.documentElement.dataset.theme = ${JSON.stringify(name)}; const s = getComputedStyle(document.querySelector('.column[data-key="trouble"]')); return s.animationName + ' ' + s.boxShadow`);
+          assert.match(shadow, /^none .*0px 0px 0px 3px inset$/, `the strip is ringed in ${name} under reduced motion: ${shadow}`);
+        }
+        await page.run("document.documentElement.dataset.theme = 'vigile'");
+        await page.motion("no-preference");
+        // The keyboard is on a strip while the board is drawn again for the next change: it stays there.
+        await page.run(`document.querySelector(${JSON.stringify(control("in_review"))}).focus({ preventScroll: true })`);
+
+        // From one strip to another: the one it left and the one it came to are ringed, and nothing travels.
+        await move(ids.review!, "done");
+        await page.until(`return document.querySelector('.column[data-key="done"]').classList.contains('changed')`, "the strip of Done to be ringed", 2000);
+        assert.deepEqual([await ringed("in_review"), await ghosts()], [true, 0]);
+        const now = await columns();
+        assert.deepEqual([now["In review"], now.Done], [counts["In review"]! - 1, counts.Done! + 1], "and both count what they hold now");
+        assert.deepEqual(await page.run("const a = document.activeElement; return [a.matches('.column-fold'), a.closest('.column')?.dataset.key, a.getAttribute('aria-label')]"), [true, "in_review", "Open the In review column, 1 card"], "the keyboard is still on the strip it was on, whose control says the new count");
+        // Opened in time, the column shows which card it was.
+        await page.click(".column[data-key='done']");
+        assert.deepEqual(await page.run(`return [${card}.closest('.column').dataset.key, ${card}.classList.contains('changed'), document.querySelectorAll('.column[data-key="done"] .card.changed').length]`), ["done", true, 1], "the card that arrived is ringed, and no other");
+        await page.click(control("done"));
+        assert.equal(await ringed("done"), true, "collapsed again, the strip is still ringed");
+
+        // Drawing the same strip again synchronizes the running ring to its age; it does not count that age a
+        // second time through a negative delay. Folding another column keeps this DOM node and redraws its mark.
+        await page.wait(Math.max(0, 3000 - (Date.now() - began)));
+        await page.click(control("done"));
+        const progress = await page.run<number>(`return document.querySelector('.column[data-key="trouble"]').getAnimations().find((one) => one.animationName === 'changed-strip').effect.getComputedTiming().progress`);
+        assert.ok(progress > 0.3 && progress < 0.7, `the three-second-old ring is half-way through, not at ${progress}`);
+        // The first strip is ringed for as long as a card is: still after four seconds, no longer after seven.
+        await page.wait(Math.max(0, 4000 - (Date.now() - began)));
+        assert.equal(await ringed("trouble"), true, "still marked after 4 seconds");
+        await page.wait(Math.max(0, 7000 - (Date.now() - began)));
+        assert.equal(await ringed("trouble"), false, "no longer marked after 7 seconds");
+
+        // With animations off nothing travels to a strip either, and the ring alone says what changed.
+        await page.until(`return !document.querySelector('.column[data-key="in_review"]').classList.contains('changed')`, "the earlier rings to fade", 9000);
+        await setting("motion");
+        await watchGhosts();
+        assert.equal(await count(`.column[data-key="in_progress"] .card[data-id="${ids.address}"]`), 1);
+        await move(ids.address!, "in_review");
+        await page.until(`return document.querySelector('.column[data-key="in_review"]').classList.contains('changed')`, "the strip to be ringed", 2000);
+        assert.deepEqual([await ghosts(), await count(`.card[data-id="${ids.address}"]`), (await columns())["In review"]], [0, 0, 2], "the card is gone from its column without a journey, and the strip counts it");
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await page.motion("no-preference");
+        await page.run("document.documentElement.dataset.theme = 'vigile'");
+        await move(ids.address!, "in_progress").catch(() => {});
+        await move(ids.bugBusy!, "in_progress").catch(() => {});
+        await move(ids.review!, "open", "in_progress", "in_review").catch(() => {});
+        await move(ids.paused!, "in_progress", "paused").catch(() => {});
+        await forget();
+        await load();
+      }
+    });
+
+    it("opens the panel of a task that is in a collapsed column, from the address and from a link, and leaves the column collapsed", async () => {
+      await page.size(1280, 900);
+      try {
+        // Card form is done, and Done is collapsed: the address of the task opens its panel all the same.
+        await loadCollapsed(["done"], `/#board/${ids.card}`);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Card form'", "the panel of a task in a collapsed column");
+        assert.deepEqual(await collapsed(), ["done"], "the column stays collapsed");
+        assert.equal(await count(`.card[data-id="${ids.card}"]`), 0);
+        await layout("with the panel of a task in a collapsed column");
+        await page.key("Escape");
+        assert.equal(await panelOpen(), false);
+        assert.deepEqual(await collapsed(), ["done"]);
+        // From a link in the panel of another task: Receipts waits for Card form.
+        await page.run(`document.querySelector('.card[data-id="${ids.receipts}"]').focus({ preventScroll: true })`);
+        await page.key("Enter");
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Receipts'", "the panel of a task on the board");
+        const link = await page.run<number>("return [...document.querySelectorAll('#detail .link')].findIndex((l) => l.querySelector('.name').textContent === 'Card form')");
+        assert.ok(link >= 0, "a link to the task in the collapsed column");
+        await page.click("#detail .link", link);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Card form'", "the linked task");
+        assert.deepEqual(await collapsed(), ["done"]);
+        // Closed, the keyboard is back on the card the first panel was opened from.
+        await page.key("Escape");
+        assert.equal(await panelOpen(), false);
+        assert.equal(await page.run<string | undefined>("return document.activeElement.dataset.id"), ids.receipts);
+        assert.deepEqual(await collapsed(), ["done"]);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await forget();
+      }
+    });
+
+    it("collapses and opens a column at once on a board of hundreds of cards, and leaves the cards of the other columns as they are", async () => {
+      // A window in which Done has no spare width to take, with or without the first column: it is then not drawn again either.
+      await page.size(1260, 900);
+      const folder = mkdtempSync(join(tmpdir(), "vigile-browser-test-columns-"));
+      let many: Service | null = null;
+      try {
+        initConfig(join(folder, "config.toml"), { name: "columns", port: await freePort() });
+        many = await startService({ loaded: loadConfig(join(folder, "config.toml"), {}), log: () => {}, warn: () => {} });
+        const plan = (operation: string, input: Record<string, unknown>) => many!.engine.execute(operation, "agent1", input) as Promise<any>;
+        await plan("create_project", { title: "Many cards", prefix: "MANY" });
+        for (let i = 0; i < 620; i++) {
+          const { id, version } = await plan("create_task", { title: `Card ${i}`, description: "d", project: "MANY" });
+          if (i < 300) await plan("set_task_status", { id, version, status: "done" });
+          else if (i < 320) await plan("set_task_status", { id, version, status: "in_progress" });
+        }
+        await page.open("about:blank");
+        await page.open(`${many.urls.base}/`);
+        await page.until("return /^(Updated|Live)/.test(document.getElementById('sync').textContent)", "the page to show its data", 20_000);
+        // Every card of the two long columns is on the board, and Next is scrolled a long way down.
+        await page.run(`for (const more of document.querySelectorAll('.more[aria-expanded="false"]')) more.click()`);
+        assert.deepEqual((await board()).map((c) => [c.key, c.cards]), [["in_progress", 20], ["next", 300], ["done", 300]]);
+        await page.run("for (const card of document.querySelectorAll('.card')) card.kept = true; document.querySelector('.column[data-key=\"next\"] .cards').scrollTop = 5000;");
+        /** Presses a column's control and says how long the page took over it, and what became of the cards that were there. */
+        const press = (key: string) =>
+          page.run<{ ms: number; kept: Record<string, number>; drawn: Record<string, number>; next: number }>(`
+            const began = performance.now();
+            document.querySelector(${JSON.stringify(control(key))}).click();
+            const ms = performance.now() - began;
+            const cards = (column, kept) => [...column.querySelectorAll('.card')].filter((card) => Boolean(card.kept) === kept).length;
+            const columns = [...document.querySelectorAll('.board > .column')];
+            return { ms, kept: Object.fromEntries(columns.map((c) => [c.dataset.key, cards(c, true)])), drawn: Object.fromEntries(columns.map((c) => [c.dataset.key, cards(c, false)])), next: Math.round(document.querySelector('.column[data-key="next"] .cards')?.scrollTop ?? -1) };
+          `);
+        // Collapsing the short column draws no card at all: the 600 cards of the others are the very ones that were there.
+        const first = await press("in_progress");
+        assert.deepEqual([first.kept, first.drawn, first.next], [{ in_progress: 0, next: 300, done: 300 }, { in_progress: 0, next: 0, done: 0 }, 5000], "the other columns keep their cards, and their place");
+        assert.ok(first.ms < 150, `collapsing took ${Math.round(first.ms)} ms`);
+        // Collapsing a column of 300 cards is no more work, and its strip says how many it holds.
+        const second = await press("done");
+        assert.deepEqual([second.kept, second.drawn, second.next], [{ in_progress: 0, next: 300, done: 0 }, { in_progress: 0, next: 0, done: 0 }, 5000]);
+        assert.ok(second.ms < 150, `collapsing 300 cards took ${Math.round(second.ms)} ms`);
+        assert.deepEqual(await named("done"), ["Open the Done column, 300 cards", "false"]);
+        assert.deepEqual((await board()).map((c) => [c.key, c.collapsed, c.width, c.cards]), [["in_progress", true, 40, 0], ["next", false, 380, 300], ["done", true, 40, 0]]);
+        await layout("with a column of 300 cards collapsed");
+        // Opening it draws its own cards and no others.
+        const third = await press("done");
+        assert.deepEqual([third.kept, third.drawn, third.next], [{ in_progress: 0, next: 300, done: 0 }, { in_progress: 0, next: 0, done: 300 }, 5000], "only the cards of the column that was opened are drawn");
+        assert.ok(third.ms < 400, `opening 300 cards took ${Math.round(third.ms)} ms`);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await page.run("localStorage.removeItem('vigile.collapsed')").catch(() => {});
+        await many?.stop();
+        rmSync(folder, { recursive: true, force: true });
+        await page.size(1280, 900);
+        await load();
+      }
+    });
+
+    /** The copy of a task's card that is in the air, as the page finds it. */
+    const copyOf = (id: string) => `[...document.querySelectorAll('.card-ghost')].find((g) => g.querySelector('.id').textContent === ${JSON.stringify(id)})`;
+    type Spot = { x: number; y: number; width: number; opacity: number };
+    /** A travelling copy at the start of its journey, once it has lifted off, and as it lands. */
+    const journeyOf = (id: string) =>
+      page.run<{ start: Spot; lifted: Spot; end: Spot }>(`
+        const ghost = ${copyOf(id)}; const flight = ghost.getAnimations()[0];
+        const total = flight.effect.getComputedTiming().duration; const was = flight.currentTime;
+        const at = (time) => { flight.currentTime = time; const r = ghost.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, opacity: Number(getComputedStyle(ghost).opacity) }; };
+        const seen = { start: at(0), lifted: at(150), end: at(total - 1) };
+        flight.currentTime = was;
+        return seen;
+      `);
+    type Room = { left: number; right: number; top: number; bottom: number };
+    const roomOf = (key: string) => page.run<Room>(`const r = document.querySelector('.column.collapsed[data-key="${key}"]').getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }`);
+    const within = (spot: Spot, room: Room) => spot.x > room.left && spot.x < room.right && spot.y > room.top && spot.y < room.bottom;
+    /** What a card does by itself besides being ringed: the fade of a new card, or the slide of one that moved in its column. */
+    const ownMoves = (id: string) => page.run<number>(`return document.querySelector('.card[data-id="${id}"]').getAnimations().filter((a) => !a.animationName).length`);
+    const cardAt = (id: string) => page.run<[string, string, boolean] | null>(`const c = document.querySelector('.card[data-id="${id}"]'); return c ? [c.closest('.column').dataset.key, getComputedStyle(c).visibility, c.classList.contains('changed')] : null`);
+    /** Whether the page has read the plan and shown it without failing: a failure while it shows what changed is reported as a service that cannot be reached. */
+    const connected = () => page.run<boolean>("return document.getElementById('notice').hidden && !document.getElementById('sync').textContent.startsWith('Not connected')");
+    /** Puts a task in a state, from whichever of the states on the way it is in: for putting the plan back. */
+    const back = async (id: string, ...statuses: string[]) => {
+      for (const status of statuses) await move(id, status).catch(() => {});
+    };
+
+    it("starts a card's journey where its strip was when the last task leaves a collapsed column and the strip goes with it, and lands one on a strip that its arrival makes", async () => {
+      await page.size(1280, 900);
+      const id = ids.review!;
+      try {
+        await load();
+        await page.run("localStorage.setItem('vigile.auto-refresh', 'on')");
+        await loadCollapsed(["in_review"]);
+        await live();
+        assert.deepEqual([await collapsed(), (await columns())["In review"]], [["in_review"], 1], "In review is collapsed and holds one task: the column is there for that task alone");
+
+        // The last task leaves: the strip is gone from the new drawing, and the card sets off from where it stood.
+        const stood = await roomOf("in_review");
+        await move(id, "in_progress");
+        await page.until(`return Boolean(${copyOf(id)})`, "the card to set off from where the strip was", 1500);
+        const out = await journeyOf(id);
+        assert.equal(await count(".column[data-key='in_review']"), 0, "the column went with its last task");
+        assert.ok(within(out.start, stood), `the card sets off from where the strip stood: at ${Math.round(out.start.x)}, ${Math.round(out.start.y)}, the strip having been ${JSON.stringify(stood)}`);
+        assert.ok(out.start.width < 60 && out.start.opacity < 0.05 && out.lifted.width > 250 && out.lifted.opacity === 1, `out of which it grows: ${Math.round(out.start.width)}px wide at first, ${Math.round(out.lifted.width)}px when it leaves`);
+        assert.deepEqual([await cardAt(id), await ownMoves(id)], [["in_progress", "hidden", true], 0], "the card waits unseen where it will land, ringed, and does not fade in as a new card does");
+        await settled();
+
+        // The first task enters: its arrival makes the strip, and the card lands on it.
+        await move(id, "in_review");
+        await page.until(`return Boolean(${copyOf(id)})`, "the card to set off for the strip that its arrival makes", 1500);
+        const into = await journeyOf(id);
+        const made = await roomOf("in_review");
+        assert.ok(within(into.end, made) && into.end.width < 60 && into.end.opacity < 0.05, `the card lands on the new strip and is taken in: at ${Math.round(into.end.x)}, ${Math.round(into.end.y)}, ${Math.round(into.end.width)}px wide`);
+        assert.deepEqual([await cardAt(id), await ringed("in_review"), (await columns())["In review"]], [null, true, 1], "the new strip is ringed and counts the task");
+        await settled();
+
+        // With no choice saved, the system's reduced-motion preference leaves only the ring.
+        await page.motion("reduce");
+        await watchGhosts();
+        await move(id, "in_progress");
+        await page.until(`return document.querySelector('.card[data-id="${id}"]') !== null`, "the card to appear without travelling under reduced motion", 1500);
+        assert.deepEqual([await ghosts(), await cardAt(id), await ownMoves(id)], [0, ["in_progress", "visible", true], 0]);
+        await page.motion("no-preference");
+
+        // With animations switched off nothing travels, in either direction: the rings say it.
+        await setting("motion");
+        await watchGhosts();
+        await move(id, "in_review");
+        await page.until("return document.querySelector('.column[data-key=\"in_review\"]')?.classList.contains('changed')", "the new strip to be ringed", 2000);
+        await move(id, "in_progress");
+        await page.until(`return document.querySelector('.card[data-id="${id}"]') !== null`, "the card to be back", 2000);
+        assert.deepEqual([await ghosts(), await cardAt(id), await ownMoves(id)], [0, ["in_progress", "visible", true], 0]);
+        await setting("motion");
+
+        // A strip that has no place on the page is no place to set off from. There is then no journey, which is
+        // not the same as a new card: the card is in its place at once, ringed, and does not fade in.
+        await move(id, "in_review");
+        await page.until("return document.querySelector('.column.collapsed[data-key=\"in_review\"]') !== null", "the strip to be back", 2000);
+        await settled();
+        await page.run("document.querySelector('.column[data-key=\"in_review\"]').style.display = 'none'");
+        await watchGhosts();
+        await move(id, "in_progress");
+        await page.until(`return document.querySelector('.card[data-id="${id}"]') !== null`, "the card to be back", 2000);
+        assert.deepEqual([await ghosts(), await cardAt(id), await ownMoves(id)], [0, ["in_progress", "visible", true], 0], "no journey, no fade: the card is there, ringed");
+        assert.equal(await connected(), true, "and the page has shown the change without failing over it");
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await page.motion("no-preference");
+        await back(id, "in_progress", "in_review");
+        await forget();
+        await load();
+      }
+    });
+
+    it("in one refresh sends two tasks that swap between a column and a strip on their two journeys, and nothing between a strip that goes and a strip that comes", async () => {
+      await page.size(1280, 900);
+      const [a, b] = [ids.address!, ids.review!];
+      const drawnAgain = async () => {
+        await page.run("window.drawn = 0; window.drawnWatch?.disconnect(); window.drawnWatch = new MutationObserver(() => window.drawn++); window.drawnWatch.observe(document.getElementById('board'), { childList: true })");
+        await page.click("#refresh");
+        await page.until("return window.drawn > 0", "the board to be drawn again");
+      };
+      try {
+        // Nothing is paused, so that column is not on the board; were it there, it would be a strip.
+        await move(ids.paused!, "in_progress");
+        await loadCollapsed(["in_review", "paused"]);
+        assert.deepEqual([await collapsed(), (await columns())["In review"], await cardAt(a)], [["in_review"], 1, ["in_progress", "visible", false]]);
+        const strip = await roomOf("in_review");
+
+        // One task goes into the strip while the one that was in it comes out, and the page reads both at once.
+        await move(a, "in_review");
+        await move(b, "in_progress");
+        await watchGhosts();
+        await drawnAgain();
+        await page.until(`return Boolean(${copyOf(a)}) && Boolean(${copyOf(b)})`, "both cards to be on their way", 1500);
+        const [into, out] = [await journeyOf(a), await journeyOf(b)];
+        assert.ok(within(into.end, strip) && into.end.width < 60 && !within(into.start, strip), "one lands on the strip, from its column");
+        assert.ok(within(out.start, strip) && out.start.width < 60 && !within(out.end, strip), "the other sets off from the strip, for its column");
+        assert.deepEqual([await ghosts(), await cardAt(a), await cardAt(b), await ringed("in_review"), (await columns())["In review"]], [2, null, ["in_progress", "hidden", true], true, 1], "two copies in the air, the strip ringed and holding one task as before");
+        await settled();
+
+        // From a strip that goes with its last task to a strip that comes with its first: there is no card at
+        // either end, so nothing travels, and the strip that came says what happened.
+        await move(a, "in_progress", "paused");
+        await watchGhosts();
+        await drawnAgain();
+        assert.deepEqual(await collapsed(), ["paused"], "In review is gone, and Paused has come, collapsed as the browser remembers it");
+        assert.deepEqual([await ghosts(), await cardAt(a), await ringed("paused"), (await columns()).Paused, await named("paused")], [0, null, true, 1, ["Open the Paused column, 1 card", "false"]]);
+        assert.equal(await connected(), true);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await back(a, "in_progress");
+        await back(b, "in_progress", "in_review");
+        await back(ids.paused!, "in_progress", "paused");
+        await forget();
+        await load();
+      }
+    });
+
+    it("ends a journey to a strip or from one when its column is opened or collapsed under it", async () => {
+      await page.size(1280, 900);
+      const id = ids.address!;
+      try {
+        await load();
+        await page.run("localStorage.setItem('vigile.auto-refresh', 'on')");
+        await loadCollapsed(["in_review"]);
+        await live();
+        // On its way into the strip, and the strip is opened: the card is in the open column, in sight.
+        await move(id, "in_review");
+        await page.until(`return Boolean(${copyOf(id)})`, "the card to set off for the strip", 1500);
+        await page.run(`${copyOf(id)}.getAnimations()[0].playbackRate = 0.05`);
+        await page.click(".column[data-key='in_review']");
+        assert.deepEqual([await count(".card-ghost"), await cardAt(id), await collapsed()], [0, ["in_review", "visible", true], []], "no copy is left in the air, and the card is in the column that was opened, ringed");
+        // On its way out of the strip, and the column it is going to is collapsed: it is in that strip now.
+        await page.click(control("in_review"));
+        await move(id, "in_progress");
+        await page.until(`return Boolean(${copyOf(id)})`, "the card to set off from the strip", 1500);
+        await page.run(`${copyOf(id)}.getAnimations()[0].playbackRate = 0.05`);
+        const held = (await columns())["In progress"];
+        await page.click(control("in_progress"));
+        assert.deepEqual([await count(".card-ghost"), await cardAt(id), await collapsed(), (await columns())["In progress"]], [0, null, ["in_progress", "in_review"], held]);
+        assert.equal(await connected(), true);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await back(id, "in_progress");
+        await forget();
+        await load();
+      }
+    });
+
+    it("rings a strip for every change that rings a card: whatever a card shows, and nothing that it does not show", async () => {
+      await page.size(1280, 900);
+      const made: string[] = [];
+      const create = async (title: string, extra: Record<string, unknown> = {}) => {
+        const { id } = (await run("create_task", { title, description: "d", project: "WEB", ...extra })) as { id: string };
+        made.unshift(id);
+        return id;
+      };
+      /** Changes an item at its present version, as another client would. */
+      const change = async (operation: string, input: { id: string } & Record<string, unknown>) => run(operation, { ...input, version: (await run("get", { id: input.id })).version });
+      let broken = false;
+      try {
+        // A task that waits, so that it stays in one column through all that is done to it.
+        const first = await create("Waited for");
+        const second = await create("Waited for as well");
+        const task = await create("Shows a good deal", { depends_on: [first] });
+        const [groupOne, groupTwo] = [await create("Holds it"), await create("Holds it too")];
+        const [goesOpen, goesCollapsed] = [await create("Deleted while its column is open", { depends_on: [first] }), await create("Deleted while its column is collapsed", { depends_on: [first] })];
+        await load();
+        await page.run("localStorage.removeItem('vigile.auto-refresh')");
+        /**
+         * Makes one change while the task's column is open or collapsed, has the page read the plan, and says what
+         * is ringed for it: the task's card in the open column; the strip of the collapsed one, and the task's
+         * card once that strip is opened.
+         */
+        const rings = async (how: "open" | "collapsed", make: () => Promise<unknown>) => {
+          await page.run(`localStorage.setItem('vigile.collapsed', ${JSON.stringify(how === "collapsed" ? '["waiting"]' : "[]")})`);
+          await load();
+          assert.equal(await count(".changed"), 0, "nothing is ringed on a page that was just opened");
+          await page.run("window.drawn = 0; new MutationObserver(() => window.drawn++).observe(document.getElementById('board'), { childList: true })");
+          await make();
+          await page.click("#refresh");
+          await page.until("return window.drawn > 0", "the board to be drawn again");
+          if (how === "open") return page.run<boolean | null>(`return document.querySelector('.column[data-key="waiting"] .card[data-id="${task}"]')?.classList.contains('changed') ?? null`);
+          const strip = await ringed("waiting");
+          await page.click(".column[data-key='waiting']");
+          const card = await page.run<boolean | null>(`return document.querySelector('.column[data-key="waiting"] .card[data-id="${task}"]')?.classList.contains('changed') ?? null`);
+          return card === null ? null : [strip, card];
+        };
+        const link = (from: string, type: string, to: string) => () => run("add_link", { from, type, to });
+        /** Each thing a card shows, changed once with the column open and once more with it collapsed. */
+        const shown: Array<[string, () => Promise<unknown>, () => Promise<unknown>]> = [
+          ["the title", () => change("update_task", { id: task, title: "Shows a good deal, and more" }), () => change("update_task", { id: task, title: "Shows a good deal, and more still" })],
+          ["the kind", () => change("update_task", { id: task, type: "bug" }), () => change("update_task", { id: task, type: "incident" })],
+          ["the priority", () => change("update_task", { id: task, priority: 3 }), () => change("update_task", { id: task, priority: 7 })],
+          ["who it is assigned to", link(task, "assigned to", "user"), link(task, "assigned to", "agent1")],
+          ["the groups it is in", link(groupOne, "contains", task), link(groupTwo, "contains", task)],
+          ["what it waits for", link(task, "depends on", second), link(task, "depends on", "EMPTY")],
+          ["that it has a problem", () => change("set_project_status", { id: "EMPTY", status: "broken" }).then(() => (broken = true)), () => change("set_project_status", { id: "EMPTY", status: "open" }).then(() => (broken = false))],
+          ["how far the tasks inside it are", () => create("Inside it", { parent: task }), () => create("Inside it too", { parent: task })],
+        ];
+        const seen: Record<string, unknown> = {};
+        for (const [what, whileOpen, whileCollapsed] of shown) seen[what] = [await rings("open", whileOpen), await rings("collapsed", whileCollapsed)];
+        assert.deepEqual(seen, Object.fromEntries(shown.map(([what]) => [what, [true, [true, true]]])), "each change rings the card, and with the column collapsed the strip and the card in it");
+
+        // What no card shows rings nothing, open or collapsed: the description, the reason, the size, the value.
+        assert.deepEqual(
+          [await rings("open", () => change("update_task", { id: task, description: "Another description.", why: "Another reason." })), await rings("collapsed", () => change("update_task", { id: task, size: 3, value: 5 }))],
+          [false, [false, false]],
+          "a change that no card shows rings neither the card nor the strip",
+        );
+        // A task that is deleted leaves its column. With the column open its card goes and no other card is ringed;
+        // collapsed, the strip is ringed for the card that left it, counts one fewer, and no card in it is ringed.
+        const waiting = (await columns())["Waiting for dependencies"]!;
+        assert.equal(await rings("open", () => change("delete", { id: goesOpen })), false);
+        assert.equal(await count(`.card[data-id="${goesOpen}"]`), 0);
+        assert.deepEqual(await rings("collapsed", () => change("delete", { id: goesCollapsed })), [true, false]);
+        assert.equal((await columns())["Waiting for dependencies"], waiting - 2);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        if (broken) await run("set_project_status", { id: "EMPTY", status: "open", version: (await run("get", { kind: "project", id: "EMPTY" })).version }).catch(() => {});
+        for (const id of made) await run("delete", { id, version: (await run("get", { id })).version }).catch(() => {});
+        await forget();
+        await load();
+      }
+    });
+
+    it("rings nothing for what the person does to the page: the filter, a project, the theme, a column collapsed or opened", async () => {
+      await page.size(1280, 900);
+      const id = ids.launch!;
+      /** Has the page read the plan, and waits until it has drawn the board for it. */
+      const read = async () => {
+        await page.run("window.drawn = 0; window.drawnWatch?.disconnect(); window.drawnWatch = new MutationObserver(() => window.drawn++); window.drawnWatch.observe(document.getElementById('board'), { childList: true })");
+        await page.click("#refresh");
+        await page.until("return window.drawn > 0", "the board to be drawn again");
+      };
+      const priority = (await run("get", { id })).priority as number;
+      try {
+        await loadCollapsed(["waiting", "done"]);
+        assert.equal(await count(`.card[data-id="${id}"]`), 0, "the task is in a collapsed column");
+        // The filter leaves fewer cards, a project takes its name off every card, a theme draws them otherwise,
+        // and a column is collapsed and opened: none of it is news of the plan.
+        await page.click("#filter");
+        await page.type("e");
+        assert.equal(await count(".changed"), 0, "after typing in the filter");
+        await page.run("document.getElementById('filter').select()");
+        await page.key("Backspace");
+        await page.run("[...document.querySelectorAll('#projects .project-main')].find((card) => card.querySelector('.project-id').textContent === 'WEB').click()");
+        assert.equal(await count(".changed"), 0, "after selecting a project");
+        await theme("gito");
+        await page.click(control("next"));
+        await page.click(".column[data-key='next']");
+        assert.equal(await count(".changed"), 0, "after a theme, and a column collapsed and opened");
+        // The plan is read after all that, and something no card shows has changed in it: still nothing is ringed,
+        // although every card and every strip is drawn otherwise than when the page was opened.
+        await run("update_task", { id, version: (await run("get", { id })).version, description: "Another description of the launch." });
+        await read();
+        assert.equal(await count(".changed"), 0, "after the plan was read with the project selected");
+        // And then something a card shows: the strip of its column is ringed, and that strip alone.
+        await run("update_task", { id, version: (await run("get", { id })).version, priority: priority + 1 });
+        await read();
+        assert.deepEqual(await page.run("return [...document.querySelectorAll('.changed')].map((el) => el.dataset.key ?? el.dataset.id)"), ["waiting"]);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await run("update_task", { id, version: (await run("get", { id })).version, priority, description: "Description of Launch the checkout." }).catch(() => {});
+        await page.run("localStorage.removeItem('vigile.theme'); document.documentElement.dataset.theme = 'vigile'");
+        await forget();
+        await load();
+      }
+    });
+
+    it("leaves the keyboard on the strip when the card it was on is taken into a collapsed column, also into one that the task's arrival makes", async () => {
+      await page.size(1280, 900);
+      const where = () => page.run<[string, string | null, string | null]>("const a = document.activeElement; return [a.matches('.column-fold') ? 'strip ' + a.closest('.column').dataset.key : a.dataset.id ? 'card ' + a.dataset.id : a.tagName, a.getAttribute('aria-label'), a.getAttribute('aria-expanded')]");
+      try {
+        // Nothing is paused, so that column is not on the board; were it there, it would be a strip.
+        await move(ids.paused!, "in_progress");
+        await load();
+        await page.run("localStorage.setItem('vigile.auto-refresh', 'on')");
+        await loadCollapsed(["in_review", "paused"]);
+        await live();
+        const reviewed = (await columns())["In review"]!;
+        // The keyboard is on a card, and its task goes into the collapsed column: the strip stands for the card now.
+        await page.run(`document.querySelector('.card[data-id="${ids.address}"]').focus({ preventScroll: true })`);
+        assert.equal((await where())[0], `card ${ids.address}`);
+        await move(ids.address!, "in_review");
+        await page.until(`return document.querySelector('.card[data-id="${ids.address}"]') === null`, "the card to be taken into the strip", 2000);
+        assert.deepEqual(await where(), ["strip in_review", `Open the In review column, ${reviewed + 1} cards`, "false"], "the keyboard is on the strip that holds the task");
+        // From there Enter opens the column, and the card is one Tab away.
+        await page.key("Enter");
+        assert.deepEqual([await collapsed(), (await where())[0]], [[], "strip in_review"]);
+        await settled();
+        // Into a column that was not on the board: the strip that the arrival makes takes the keyboard.
+        await page.run(`document.querySelector('.card[data-id="${ids.paused}"]').focus({ preventScroll: true })`);
+        await move(ids.paused!, "paused");
+        await page.until("return document.querySelector('.column.collapsed[data-key=\"paused\"]') !== null", "the strip that the task's arrival makes", 2000);
+        assert.deepEqual(await where(), ["strip paused", "Open the Paused column, 1 card", "false"]);
+        // A card that goes to an open column keeps the keyboard itself, as it always did.
+        await settled();
+        await page.run(`document.querySelector('.card[data-id="${ids.bugBusy}"]').focus({ preventScroll: true })`);
+        await move(ids.bugBusy!, "in_review");
+        await page.until(`return document.querySelector('.column[data-key="in_review"] .card[data-id="${ids.bugBusy}"]') !== null`, "the card to be in its new column", 2000);
+        assert.equal((await where())[0], `card ${ids.bugBusy}`);
+        assert.equal(await connected(), true);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await back(ids.address!, "in_progress");
+        await back(ids.bugBusy!, "in_progress");
+        await back(ids.paused!, "in_progress", "paused");
+        await forget();
+        await load();
+      }
+    });
+
+    it("rings a strip for a change in any task it holds, the fifty-first as the first and the last of 2,000, and builds no card to know it", async () => {
+      await page.size(1280, 900);
+      const folder = mkdtempSync(join(tmpdir(), "vigile-browser-test-held-"));
+      let many: Service | null = null;
+      try {
+        initConfig(join(folder, "config.toml"), { name: "held", port: await freePort() });
+        many = await startService({ loaded: loadConfig(join(folder, "config.toml"), {}), log: () => {}, warn: () => {} });
+        const plan = (operation: string, input: Record<string, unknown>) => many!.engine.execute(operation, "agent1", input) as Promise<any>;
+        await plan("create_project", { title: "Many tasks", prefix: "MANY" });
+        const [busy, next]: [string[], string[]] = [[], []];
+        for (let i = 0; i < 2003; i++) {
+          const { id, version } = await plan("create_task", { title: `Task ${i}`, description: "d", project: "MANY" });
+          if (i < 3) await plan("set_task_status", { id, version, status: "in_progress" });
+          (i < 3 ? busy : next).push(id);
+        }
+        /** Opens the page of the large plan as a browser does that remembers these settings and no others. */
+        const open = async (settings: Record<string, string> = {}) => {
+          await page.open("about:blank");
+          await page.open(`${many!.urls.base}/`);
+          await page.run(`localStorage.clear(); for (const [name, value] of Object.entries(${JSON.stringify(settings)})) localStorage.setItem(name, value);`);
+          await page.open("about:blank");
+          await page.open(`${many!.urls.base}/`);
+          await page.until("return /^(Updated|Live)/.test(document.getElementById('sync').textContent)", "the page to show its data", 20_000);
+        };
+        const drawn = () => page.run<string[]>("return [...document.querySelectorAll('.column[data-key=\"next\"] .card')].map((c) => c.dataset.id)");
+        // Open, the column has a card for its first 50 tasks, and for its first 12 where the page scrolls as a whole.
+        await open();
+        assert.deepEqual(await drawn(), next.slice(0, 50));
+        await open({ "vigile.scroll": "page" });
+        assert.deepEqual(await drawn(), next.slice(0, 12));
+
+        // Collapsed, it holds all 2,000, and the board is drawn without one card being built for them.
+        await open({ "vigile.collapsed": '["next"]' });
+        assert.deepEqual(await named("next"), ["Open the Next column, 2,000 cards", "false"]);
+        const cost = await page.run<{ made: number; ms: number; cards: number }>(`
+          const real = document.createElement; let made = 0;
+          document.createElement = function (...args) { made++; return real.apply(this, args); };
+          const began = performance.now();
+          document.getElementById('filter').dispatchEvent(new Event('input'));
+          const ms = performance.now() - began;
+          document.createElement = real;
+          return { made, ms, cards: document.querySelectorAll('.card').length };
+        `);
+        assert.equal(cost.cards, 3, "the three cards of the open column are all there are");
+        assert.ok(cost.made < 150, `drawing the page again made ${cost.made} elements: the three cards and what is around them, none for the 2,000`);
+        assert.ok(cost.ms < 150, `and took ${Math.round(cost.ms)} ms`);
+
+        /** Changes one task while Next is collapsed, has the page read the plan, and says whether the strip is ringed. */
+        const rings = async (settings: Record<string, string>, id: string, change: Record<string, unknown>) => {
+          await open({ "vigile.collapsed": '["next"]', ...settings });
+          await page.run("window.drawn = 0; new MutationObserver(() => window.drawn++).observe(document.getElementById('board'), { childList: true })");
+          await plan("update_task", { id, version: (await plan("get", { id })).version, ...change });
+          await page.click("#refresh");
+          await page.until("return window.drawn > 0", "the board to be drawn again", 20_000);
+          return ringed("next");
+        };
+        const whole = { "vigile.scroll": "page" };
+        assert.deepEqual(
+          {
+            "the 50th task": await rings({}, next[49]!, { title: "Task 50, renamed" }),
+            "the 51st, which an open column shows only on request": await rings({}, next[50]!, { title: "Task 51, renamed" }),
+            "the last of 2,000": await rings({}, next[1999]!, { priority: 0, title: "The last task, renamed" }),
+            "the 12th where the page scrolls as a whole": await rings(whole, next[11]!, { title: "Task 12, renamed" }),
+            "the 13th there": await rings(whole, next[12]!, { title: "Task 13, renamed" }),
+            "what no card shows, of the 51st": await rings({}, next[50]!, { description: "Another description." }),
+            "a task of another column": await rings({}, busy[0]!, { title: "A task in progress, renamed" }),
+          },
+          {
+            "the 50th task": true,
+            "the 51st, which an open column shows only on request": true,
+            "the last of 2,000": true,
+            "the 12th where the page scrolls as a whole": true,
+            "the 13th there": true,
+            "what no card shows, of the 51st": false,
+            "a task of another column": false,
+          },
+        );
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await many?.stop();
+        rmSync(folder, { recursive: true, force: true });
+        await load();
+      }
+    });
+
+    it("rings a strip for the tasks the filter leaves in it and for one that a change brings under the filter, not for one that the filter hides", async () => {
+      await page.size(1280, 900);
+      const [hidden, found] = [ids.rates!, ids.launch!];
+      const priorities = [(await run("get", { id: hidden })).priority as number, (await run("get", { id: found })).priority as number];
+      const change = async (id: string, input: Record<string, unknown>) => run("update_task", { id, version: (await run("get", { id })).version, ...input });
+      /** Opens the board with Waiting collapsed and "launch" in the filter, makes a change, has the page read the plan, and says what is ringed. */
+      const rings = async (make: () => Promise<unknown>) => {
+        await loadCollapsed(["waiting"]);
+        await page.click("#filter");
+        await page.type("launch");
+        await page.run("window.drawn = 0; new MutationObserver(() => window.drawn++).observe(document.getElementById('board'), { childList: true })");
+        await make();
+        await page.click("#refresh");
+        await page.until("return window.drawn > 0", "the board to be drawn again");
+        return [(await columns())["Waiting for dependencies"], await ringed("waiting")];
+      };
+      try {
+        assert.deepEqual(await rings(() => change(hidden, { priority: priorities[0]! + 1 })), [1, false], "a task that the filter hides is not on the strip, and what changes on it rings nothing");
+        assert.deepEqual(await rings(() => change(found, { priority: priorities[1]! + 1 })), [1, true], "the task that the filter leaves rings the strip");
+        assert.deepEqual(await rings(() => change(hidden, { title: "Rates, for the launch" })), [2, true], "a task whose new title the filter finds has come to the strip, which counts it and is ringed");
+        assert.deepEqual(await rings(() => change(hidden, { title: "Rates" })), [1, true], "and one whose new title it no longer finds has left it");
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await change(hidden, { title: "Rates", priority: priorities[0] }).catch(() => {});
+        await change(found, { priority: priorities[1] }).catch(() => {});
+        await forget();
+        await load();
+      }
+    });
+
+    it("puts the keyboard, when the panel closes, on what stands for a task now: its card, the strip that holds it, or the link to the view when it has neither", async () => {
+      await page.size(1280, 900);
+      const [a, b] = [ids.address!, ids.review!];
+      const at = () =>
+        page.run<string>("const a = document.activeElement; return a.matches('.column-fold') ? 'strip ' + a.closest('.column').dataset.key + ': ' + a.getAttribute('aria-label') : a.dataset.id ? 'card ' + a.dataset.id : a.closest('#panel') ? 'panel' : a.id || a.tagName");
+      const shown = (title: string) => page.until(`return !document.getElementById('panel').hidden && document.querySelector('.detail-title')?.textContent === ${JSON.stringify(title)}`, `the panel of ${title}`);
+      const gone = (id: string) => page.until(`return document.querySelector('.card[data-id="${id}"]') === null`, "the card to be taken into the strip", 2000);
+      let other: string | null = null;
+      try {
+        await load();
+        await page.run("localStorage.setItem('vigile.auto-refresh', 'on')");
+        await loadCollapsed(["in_review"]);
+        await live();
+        // Opened from a card, and the task goes into a collapsed column while the panel is open.
+        await page.run(`document.querySelector('.card[data-id="${a}"]').focus({ preventScroll: true })`);
+        await page.key("Enter");
+        await shown("Address form");
+        assert.equal(await at(), "panel");
+        await move(a, "in_review");
+        await gone(a);
+        assert.equal(await at(), "panel", "the board is drawn again behind the panel, which keeps the keyboard");
+        await page.key("Escape");
+        assert.equal(await at(), "strip in_review: Open the In review column, 2 cards", "closed, the keyboard is on the strip that holds the task the panel was opened from");
+
+        // Opened from a card and gone on to a linked item: the card it started from is what counts, as it is now.
+        await move(a, "in_progress");
+        await page.until(`return document.querySelector('.card[data-id="${a}"]') !== null`, "the card to be back", 2000);
+        await settled();
+        await page.run(`document.querySelector('.card[data-id="${a}"]').focus({ preventScroll: true })`);
+        await page.key("Enter");
+        await shown("Address form");
+        await page.click("#detail .link", await page.run<number>("return [...document.querySelectorAll('#detail .link')].findIndex((l) => l.querySelector('.name').textContent === 'Shipping')"));
+        await shown("Shipping");
+        await move(a, "in_review");
+        await gone(a);
+        await page.key("Escape");
+        assert.equal(await at(), "strip in_review: Open the In review column, 2 cards");
+        await move(a, "in_progress");
+
+        // Opened from the address, for a task in a collapsed column: there is nothing it was opened from, and the
+        // strip stands for the task.
+        await load(`/#board/${b}`);
+        await shown("In review item");
+        await page.key("Escape");
+        assert.equal(await at(), "strip in_review: Open the In review column, 1 card");
+        // The task leaves while its panel is open, the last of its column: the strip is gone and the task has a
+        // card, on its way to its place. The keyboard wants it, so it lands at once.
+        await load(`/#board/${b}`);
+        await shown("In review item");
+        await live();
+        await move(b, "in_progress");
+        await page.until(`return document.querySelector('.card[data-id="${b}"]') !== null`, "the card of the task that left the strip", 2000);
+        await page.key("Escape");
+        assert.deepEqual([await at(), await cardAt(b), await page.run<boolean>(`return Boolean(${copyOf(b)})`), await count(".column[data-key='in_review']")], [`card ${b}`, ["in_progress", "visible", true], false, 0]);
+        await move(b, "in_review");
+
+        // The task is deleted while its panel is open: it has no card and no strip, and the keyboard goes to the
+        // link of the view, which is always there.
+        other = ((await run("create_task", { title: "Deleted while its panel is open", description: "d", project: "WEB" })) as { id: string }).id;
+        await move(other, "in_progress", "in_review");
+        await load(`/#board/${other}`);
+        await shown("Deleted while its panel is open");
+        await live();
+        await run("delete", { id: other, version: (await run("get", { id: other })).version });
+        await page.until("return [...document.querySelectorAll('#detail .pill')].some((pill) => pill.textContent === 'deleted')", "the panel to say that the task is deleted", 3000);
+        await page.key("Escape");
+        assert.equal(await at(), "view-board");
+
+        // A column is collapsed under the card that has the keyboard, by a click that does not take it: the strip has it.
+        await load();
+        await page.run(`document.querySelector('.card[data-id="${a}"]').focus({ preventScroll: true }); document.querySelector(${JSON.stringify(control("in_progress"))}).click();`);
+        assert.match(await at(), /^strip in_progress: Open the In progress column, \d cards$/);
+        await page.key("Enter");
+
+        // In the graph there is no board for a task to be on: closed, the panel leaves the keyboard on the link of the view.
+        await load("/#graph");
+        await graphReady();
+        await page.run("document.getElementById('zoom-fit').click()");
+        const launch = await nodeAt(`task:${ids.launch}`);
+        await page.clickAt(launch.x, launch.y);
+        await shown("Launch the checkout");
+        await page.key("Escape");
+        assert.equal(await at(), "view-graph");
+        assert.equal(await connected(), true);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await back(a, "in_progress");
+        await back(b, "in_progress", "in_review");
+        if (other) await run("delete", { id: other, version: (await run("get", { id: other })).version }).catch(() => {});
+        await forget();
+        await load();
+      }
+    });
+
+    it("takes a card into the middle of a collapsed column's bar on a phone and of its strip on a wide window, and brings it out from there", async () => {
+      const id = ids.address!;
+      type Rect = { left: number; right: number; top: number; bottom: number };
+      /** Where the travelling copy is, as it is drawn, at the start of its journey and at its end. */
+      const flightOf = () =>
+        page.run<{ start: Rect; end: Rect }>(`
+          const ghost = ${copyOf(id)}; const flight = ghost.getAnimations()[0];
+          const total = flight.effect.getComputedTiming().duration; const was = flight.currentTime;
+          const at = (time) => { flight.currentTime = time; const r = ghost.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; };
+          const seen = { start: at(0), end: at(total - 0.01) };
+          flight.currentTime = was;
+          return seen;
+        `);
+      const middle = (r: Rect) => ({ x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 });
+      const inside = (r: Rect, room: Rect) => r.left >= room.left - 1.5 && r.right <= room.right + 1.5 && r.top >= room.top - 1.5 && r.bottom <= room.bottom + 1.5;
+      const say = (r: Rect) => `${Math.round(r.left)}..${Math.round(r.right)} across, ${Math.round(r.top)}..${Math.round(r.bottom)} down`;
+      /** Holds the copy still a moment before the end of its journey or after its start, for a picture. */
+      const picture = async (name: string, part: number) => {
+        if (!shots) return;
+        await page.run(`const flight = ${copyOf(id)}.getAnimations()[0]; window.flightWas = flight.currentTime; flight.pause(); flight.currentTime = flight.effect.getComputedTiming().duration * ${part};`);
+        await page.shot(join(shots, `${name}.png`));
+        await page.run(`const flight = ${copyOf(id)}.getAnimations()[0]; flight.currentTime = window.flightWas; flight.play();`);
+      };
+      try {
+        await load();
+        await page.run("localStorage.setItem('vigile.auto-refresh', 'on')");
+        for (const [width, height, phone] of [[390, 844, true], [1280, 900, false]] as const) {
+          const where = `at ${width}px`;
+          await page.size(width, height, phone);
+          await loadCollapsed(["in_review"]);
+          await live();
+          // Into the collapsed column: the copy ends shrunk inside the bar or the strip, around a point of it.
+          await move(id, "in_review");
+          await page.until(`return Boolean(${copyOf(id)})`, `the card to set off ${where}`, 1500);
+          const into = await flightOf();
+          const room = await roomOf("in_review");
+          assert.ok(inside(into.end, room), `${where} the card ends inside the collapsed column: ${say(into.end)}, the column being ${say(room)}`);
+          if (phone) assert.ok(Math.abs(middle(into.end).y - middle(room).y) <= 1.5 && Math.abs(middle(into.end).x - middle(into.start).x) <= 1.5, `${where} it ends in the middle of the bar from top to bottom, straight under where it was`);
+          else assert.ok(Math.abs(middle(into.end).x - middle(room).x) <= 1.5 && Math.abs(middle(into.end).y - middle(into.start).y) <= 1.5, `${where} it ends in the middle of the strip across, level with where it was`);
+          await picture(`a-card-goes-into-a-collapsed-column-${where.replaceAll(" ", "-")}`, 0.93);
+          await settled();
+          // Out of it: the copy starts shrunk inside the bar or the strip, and ends as the card in its place.
+          await move(id, "in_progress");
+          await page.until(`return Boolean(${copyOf(id)})`, `the card to set off from the collapsed column ${where}`, 1500);
+          const out = await flightOf();
+          const place = await page.run<Rect>(`const r = document.querySelector('.card[data-id="${id}"]').getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }`);
+          assert.ok(inside(out.start, room), `${where} the card starts inside the collapsed column: ${say(out.start)}, the column being ${say(room)}`);
+          assert.ok(inside(out.end, place) && inside(place, out.end), `${where} and ends as the card in its place: ${say(out.end)}, the card being ${say(place)}`);
+          await picture(`a-card-comes-out-of-a-collapsed-column-${where.replaceAll(" ", "-")}`, 0.07);
+          await settled();
+        }
+        assert.equal(await connected(), true);
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await page.motion("no-preference");
+        await page.size(1280, 900);
+        await back(id, "in_progress");
+        await forget();
+        await load();
+      }
+    });
+
+    it("keeps the mark of a task that changed whether or not a card is drawn for it: one that left a collapsed column for a place its new column shows only on request is ringed when it is shown in time", async () => {
+      await page.size(1280, 900);
+      const folder = mkdtempSync(join(tmpdir(), "vigile-browser-test-marks-"));
+      let many: Service | null = null;
+      try {
+        initConfig(join(folder, "config.toml"), { name: "marks", port: await freePort() });
+        many = await startService({ loaded: loadConfig(join(folder, "config.toml"), {}), log: () => {}, warn: () => {} });
+        const plan = (operation: string, input: Record<string, unknown>) => many!.engine.execute(operation, "agent1", input) as Promise<any>;
+        const change = async (operation: string, input: { id: string } & Record<string, unknown>) => plan(operation, { ...input, version: (await plan("get", { id: input.id })).version });
+        await plan("create_project", { title: "Marks", prefix: "MARK" });
+        await plan("create_project", { title: "Another project", prefix: "OTHER" });
+        await plan("create_task", { title: "Elsewhere", description: "d", project: "OTHER" });
+        /** Makes a task. One that is busy is in progress, the column that is collapsed here; the others are next. */
+        const make = async (title: string, priority: number, busy = false) => {
+          const { id, version } = await plan("create_task", { title, description: "d", project: "MARK", priority });
+          if (busy) await plan("set_task_status", { id, version, status: "in_progress" });
+          return id as string;
+        };
+        // Next is in the order of its priorities, and of making among equals. Each task that will move is made so
+        // that it comes to a known place: the 12th and the 13th, the 50th and the 51st, and the last of 2,000.
+        await make("Stays in progress", 0, true);
+        const leaves = await make("Mover that is deleted", 0, true);
+        for (let i = 1; i <= 11; i++) await make(`In line ${i}`, 4);
+        const twelfth = await make("Mover to the 12th place", 3, true);
+        await make("In line 12", 3);
+        const thirteenth = await make("Mover to the 13th place", 3, true);
+        for (let i = 13; i <= 49; i++) await make(`In line ${i}`, 2);
+        const fiftieth = await make("Mover to the 50th place", 1, true);
+        await make("In line 50", 1);
+        const fiftyFirst = await make("Mover to the 51st place", 1, true);
+        for (let i = 51; i <= 1999; i++) await make(`In line ${i}`, 0);
+        const last = await make("Mover to the last place", 0, true);
+
+        /** Opens the page of this plan as a browser does that remembers these settings and no others. */
+        const open = async (settings: Record<string, string> = {}) => {
+          await page.open("about:blank");
+          await page.open(`${many!.urls.base}/`);
+          await page.run(`localStorage.clear(); for (const [name, value] of Object.entries(${JSON.stringify(settings)})) localStorage.setItem(name, value);`);
+          await page.open("about:blank");
+          await page.open(`${many!.urls.base}/`);
+          await page.until("return /^(Updated|Live)/.test(document.getElementById('sync').textContent)", "the page to show its data", 20_000);
+        };
+        /** Has the page read the plan, and waits until it has drawn the board for it. */
+        const read = async () => {
+          await page.run("window.drawn = 0; window.drawnWatch?.disconnect(); window.drawnWatch = new MutationObserver(() => window.drawn++); window.drawnWatch.observe(document.getElementById('board'), { childList: true })");
+          await page.click("#refresh");
+          await page.until("return window.drawn > 0", "the board to be drawn again", 20_000);
+        };
+        const goes = async (id: string) => {
+          await change("set_task_status", { id, status: "open" });
+          await read();
+        };
+        const comesBack = (id: string) => change("set_task_status", { id, status: "in_progress" });
+        /** Whether a task's card is ringed, or nothing when no card is drawn for it. */
+        const card = (id: string) => page.run<boolean | null>(`return document.querySelector('.card[data-id="${id}"]')?.classList.contains('changed') ?? null`);
+        const place = (id: string) => page.run<number>(`return [...document.querySelectorAll('.column[data-key="next"] .card')].findIndex((c) => c.dataset.id === "${id}") + 1`);
+        const showAll = () => page.run(`document.querySelector('.column[data-key="next"] .more').click()`);
+        const strip = (key: string) => page.run<boolean>(`return document.querySelector('.column[data-key="${key}"]').classList.contains('changed')`);
+        const SOURCE = { "vigile.collapsed": '["in_progress"]' };
+        const WHOLE = { ...SOURCE, "vigile.scroll": "page" };
+        /**
+         * A task leaves the collapsed column for Next. Says whether the strip it left is ringed, whether its card
+         * is ringed as the board is drawn, and whether it is ringed, and where it is, once the whole column is shown.
+         */
+        const moved = async (settings: Record<string, string>, id: string, before: () => Promise<unknown> = async () => {}) => {
+          await open(settings);
+          await goes(id);
+          const seen = { strip: await strip("in_progress"), drawn: await card(id) };
+          await before();
+          await showAll();
+          const shown = { ...seen, shown: await card(id), place: await place(id) };
+          await comesBack(id);
+          return shown;
+        };
+        assert.deepEqual(
+          {
+            "to the 50th place, which the column shows": await moved(SOURCE, fiftieth),
+            "to the 51st, which it shows on request": await moved(SOURCE, fiftyFirst),
+            "to the last of 2,000": await moved(SOURCE, last),
+            "to the 12th place where the page scrolls as a whole": await moved(WHOLE, twelfth),
+            "to the 13th there": await moved(WHOLE, thirteenth),
+            "to the 51st, shown when the time of the mark is up": await moved(SOURCE, fiftyFirst, () => page.wait(6300)),
+          },
+          {
+            "to the 50th place, which the column shows": { strip: true, drawn: true, shown: true, place: 50 },
+            "to the 51st, which it shows on request": { strip: true, drawn: null, shown: true, place: 51 },
+            "to the last of 2,000": { strip: true, drawn: null, shown: true, place: 2000 },
+            "to the 12th place where the page scrolls as a whole": { strip: true, drawn: true, shown: true, place: 12 },
+            "to the 13th there": { strip: true, drawn: null, shown: true, place: 13 },
+            "to the 51st, shown when the time of the mark is up": { strip: true, drawn: null, shown: false, place: 51 },
+          },
+        );
+
+        // Under reduced motion the ring of the card that is shown on request does not fade: it is there.
+        await page.motion("reduce");
+        await open(SOURCE);
+        await goes(fiftyFirst);
+        await showAll();
+        assert.match(await page.run<string>(`const s = getComputedStyle(document.querySelector('.card[data-id="${fiftyFirst}"]')); return s.animationName + ' ' + s.boxShadow`), /^none .*0px 0px 0px 3px$/);
+        await page.motion("no-preference");
+        await comesBack(fiftyFirst);
+
+        // The column it goes to is collapsed too: both strips are ringed, and the card when that column is opened and shown whole.
+        await open({ "vigile.collapsed": '["in_progress","next"]' });
+        await goes(fiftyFirst);
+        assert.deepEqual([await strip("in_progress"), await strip("next"), await card(fiftyFirst)], [true, true, null]);
+        await page.click(".column[data-key='next']");
+        assert.equal(await card(fiftyFirst), null, "opened, the column shows its first 50");
+        await showAll();
+        assert.deepEqual([await card(fiftyFirst), await place(fiftyFirst)], [true, 51]);
+        await comesBack(fiftyFirst);
+        // From an open column the card goes, and is ringed where it is shown on request.
+        await open();
+        assert.equal(await card(fiftyFirst), false);
+        await goes(fiftyFirst);
+        assert.equal(await card(fiftyFirst), null);
+        await showAll();
+        assert.equal(await card(fiftyFirst), true);
+        await comesBack(fiftyFirst);
+
+        // The filter hides the task: it is not on the board when it moves, and there is no mark to show when the filter is cleared.
+        await open(SOURCE);
+        await page.click("#filter");
+        await page.type("In line");
+        await goes(fiftyFirst);
+        assert.deepEqual([await strip("in_progress"), await count(".changed")], [false, 0], "nothing is ringed for a task that the filter hides");
+        await page.run("document.getElementById('filter').select()");
+        await page.key("Backspace");
+        await showAll();
+        assert.deepEqual([await card(fiftyFirst), await place(fiftyFirst), await count(".changed")], [false, 51, 0], "clearing the filter shows the task where it is, and makes no mark");
+        await comesBack(fiftyFirst);
+        // Another project is selected when it moves: the same. And a mark that was made is gone once the board is
+        // narrowed to a project the task is not in, also when the board is widened again in time.
+        const choose = (project: string) => page.run(`[...document.querySelectorAll('#projects .project-main')].find((card) => card.querySelector('.project-id').textContent === ${JSON.stringify(project)}).click()`);
+        await open(SOURCE);
+        await choose("OTHER");
+        await goes(fiftyFirst);
+        await choose("OTHER");
+        await showAll();
+        assert.deepEqual([await card(fiftyFirst), await count(".changed")], [false, 0], "a task that moved while another project was selected");
+        await comesBack(fiftyFirst);
+        await open(SOURCE);
+        await goes(fiftyFirst);
+        assert.equal(await strip("in_progress"), true);
+        await choose("OTHER");
+        await choose("OTHER");
+        await showAll();
+        assert.equal(await card(fiftyFirst), false, "a mark does not outlast the board that it was made on");
+        await comesBack(fiftyFirst);
+
+        // A task that is deleted leaves its strip ringed and has no mark of its own; one that the plan takes off the
+        // board and puts back, here by a title the filter finds or not, is marked when it is back.
+        await open(SOURCE);
+        await page.click("#filter");
+        await page.type("Mover");
+        const held = (await columns())["In progress"]!;
+        await change("delete", { id: leaves });
+        await change("update_task", { id: fiftyFirst, title: "Renamed, and not found" });
+        await read();
+        assert.deepEqual([await strip("in_progress"), (await columns())["In progress"], await count(".card.changed")], [true, held - 2, 0], "the strip is ringed for the two that left it, and counts them out");
+        await open(SOURCE);
+        await page.click("#filter");
+        await page.type("Mover");
+        await change("update_task", { id: fiftyFirst, title: "Mover to the 51st place" });
+        await read();
+        assert.deepEqual([await strip("in_progress"), (await columns())["In progress"]], [true, held - 1], "back on the board by a later change, it rings the strip that holds it");
+        await page.click(".column[data-key='in_progress']");
+        assert.equal(await card(fiftyFirst), true, "and its card, when the column is opened");
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await page.motion("no-preference");
+        await many?.stop();
+        rmSync(folder, { recursive: true, force: true });
+        await load();
+      }
+    });
+
+    it("keeps a mark to the board it was made on: narrowed to another project, group or filter the board shows no ring of the board before, a strip's no more than a card's, nor when it is widened again in time or let in again after a refused key", async () => {
+      await page.size(1280, 900);
+      const id = ids.card!;
+      let turn = 0;
+      /** Has the page read the plan, and waits until it has drawn the board for it. */
+      const read = async () => {
+        await page.run("window.drawn = 0; window.drawnWatch?.disconnect(); window.drawnWatch = new MutationObserver(() => window.drawn++); window.drawnWatch.observe(document.getElementById('board'), { childList: true })");
+        await page.click("#refresh");
+        await page.until("return window.drawn > 0", "the board to be drawn again");
+      };
+      /** Everything that is ringed: a strip by its column, a card by its task. */
+      const rings = () => page.run<string[]>("return [...document.querySelectorAll('.changed')].map((el) => el.dataset.key ?? el.dataset.id)");
+      /** Opens the whole board with Done collapsed or open, and has a task that is done show another title: its strip, or its card, is ringed. */
+      const ring = async (keys: string[]) => {
+        await loadCollapsed(keys);
+        await run("update_task", { id, version: (await run("get", { id })).version, title: `Card form, as it is called at turn ${++turn}` });
+        await read();
+        assert.deepEqual(await rings(), keys.length ? ["done"] : [id], "ringed on the board it changed on");
+      };
+      const done = () => page.run<[boolean, number] | null>("const c = document.querySelector('.column[data-key=\"done\"]'); return c ? [c.classList.contains('collapsed'), Number(c.querySelector('.count').textContent)] : null");
+      const choose = (project: string) => page.run(`[...document.querySelectorAll('#projects .project-main')].find((card) => card.querySelector('.project-id').textContent === ${JSON.stringify(project)}).click()`);
+      try {
+        // A later reading of the plan on the same board leaves the ring where it is.
+        await ring(["done"]);
+        await run("update_task", { id: ids.launch, version: (await run("get", { id: ids.launch })).version, description: `Another description, at turn ${turn}.` });
+        await read();
+        assert.deepEqual(await rings(), ["done"], "the same board, read again: the strip is still ringed");
+
+        // Another project, which has nothing that is done: its board has a Done column too, collapsed and empty,
+        // and no ring on it. Nor is there one when all projects are shown again, well within the six seconds.
+        await choose("LONGNAME");
+        assert.deepEqual([await done(), await rings()], [[true, 0], []], "the strip of the same column on the board of another project is not ringed");
+        await choose("LONGNAME");
+        assert.deepEqual([(await done())?.[0], await rings()], [true, []], "and the ring does not come back with the board it was made on");
+
+        // A filter that finds nothing that is done, and the filter cleared again.
+        await ring(["done"]);
+        await page.click("#filter");
+        await page.type("Prerequisite");
+        assert.deepEqual([await done(), await rings()], [[true, 0], []], "under a filter");
+        await page.run("document.getElementById('filter').select()");
+        await page.key("Backspace");
+        assert.deepEqual(await rings(), [], "and with the filter cleared");
+
+        // A group, which holds the very task that changed: its Done column holds it, and is not ringed for it.
+        await ring(["done"]);
+        await page.run(`document.querySelector('.card[data-id="${ids.checkout}"]').click()`);
+        await page.until("return Boolean(document.querySelector('#detail .open-group'))", "the group's panel");
+        await page.click("#detail .open-group");
+        assert.deepEqual([(await done())?.[0], (await done())![1] > 0, await rings()], [true, true, []], "inside a group");
+        await page.click("#scope .tag-button");
+        assert.deepEqual(await rings(), [], "and out of it again");
+
+        // The ring of a card is of its board as well: the card is still there under the filter, without it.
+        await ring([]);
+        await page.click("#filter");
+        await page.type("Card form");
+        assert.deepEqual([await count(`.card[data-id="${id}"]`), await rings()], [1, []], "a card that the filter leaves on the board");
+        await page.run("document.getElementById('filter').select()");
+        await page.key("Backspace");
+        assert.deepEqual(await rings(), []);
+
+        // The key is refused: the page keeps nothing of the plan, and no ring is there when it is let in again in time.
+        await ring(["done"]);
+        setValue(config, "auth.keyless_user", "");
+        try {
+          await page.click("#refresh");
+          await page.until("return !document.getElementById('notice').hidden && document.getElementById('main').hidden", "the page to be locked out");
+          await page.click("#notice input");
+          await page.type(adminKey);
+          await page.key("Enter");
+          await page.until("return document.querySelectorAll('.card').length > 0 && document.getElementById('notice').hidden", "the board, once the key is right");
+          assert.deepEqual([(await done())?.[0], await rings()], [true, []], "let in again, the board has no ring from before");
+        } finally {
+          setValue(config, "auth.keyless_user", "agent1");
+          await page.run("localStorage.clear()");
+        }
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await run("update_task", { id, version: (await run("get", { id })).version, title: "Card form" }).catch(() => {});
+        await run("update_task", { id: ids.launch, version: (await run("get", { id: ids.launch })).version, description: "Description of Launch the checkout." }).catch(() => {});
+        await forget();
+        await load();
+      }
+    });
+  });
+
+  browserSuite("the keyboard, when the control that had it goes", () => {
+    /** What has the keyboard, and whether it can be seen: never the page itself, never something hidden. */
+    const keyboard = () =>
+      page.run<string>(
+        "const a = document.activeElement; const seen = a !== document.body && a.isConnected && !a.disabled && !a.closest('[hidden], [inert]') && a.getClientRects().length > 0 && getComputedStyle(a).visibility !== 'hidden' && (() => { const r = a.getBoundingClientRect(); const at = document.elementFromPoint(Math.min(Math.max(r.left + r.width / 2, 0), innerWidth - 1), Math.min(Math.max(r.top + r.height / 2, 0), innerHeight - 1)); return r.bottom < 0 || r.top > innerHeight || Boolean(at && (a.contains(at) || at.contains(a))); })(); return (a === document.body ? 'nothing' : a.matches('.column-fold') ? 'strip ' + a.closest('.column').dataset.key : a.dataset.id ? 'card ' + a.dataset.id : a.closest('#panel') ? 'panel' : a.id || a.className || a.tagName) + (seen ? '' : ', which cannot be seen')",
+      );
+    const shown = (title: string) => page.until(`return !document.getElementById('panel').hidden && document.querySelector('.detail-title')?.textContent === ${JSON.stringify(title)}`, `the panel of ${title}`);
+    const live = () => page.until("return document.getElementById('sync').textContent.startsWith('Live')", "the page to say it is live");
+    const full = () => page.run<boolean>("return document.body.classList.contains('graph-full')");
+    /**
+     * Waits until the browser itself has left full screen. It says so a moment after the page has, and the page
+     * takes that word for a wish to leave: full screen entered again before it would be left at once.
+     */
+    const left = async () => {
+      await page.until("return !document.body.classList.contains('graph-full') && !document.fullscreenElement", "the page to come back from full screen");
+      await page.wait(150);
+    };
+    /**
+     * Waits for the graph to have the size of its box, and clicks the box of a task in it with the keyboard
+     * nowhere, as it is for someone who has only used the mouse: the panel then has nothing it was opened from.
+     */
+    const press = async (id: string) => {
+      await graphReady();
+      await page.until("return Math.abs(window.vigileGraph.height() - document.getElementById('graph-box').clientHeight) < 2", "the drawing to take the size of its box");
+      await page.run("document.getElementById('zoom-fit').click(); document.activeElement.blur();");
+      const at = await nodeAt(`task:${id}`);
+      await page.clickAt(at.x, at.y);
+    };
+    const remove = async (id: string) => run("delete", { id, version: (await run("get", { id })).version });
+    const create = async (title: string) => ((await run("create_task", { title, description: "d", project: "WEB" })) as { id: string }).id;
+
+    it("leaves it on a control that can be seen when the panel closes over the graph, at full screen as in the window: opened from a box, the address or a link, with the task deleted meanwhile, with full screen switched under it", async () => {
+      await page.size(1280, 800);
+      const made = [await create("Deleted while its panel is open over the graph"), await create("Deleted while its panel is open at full screen")];
+      try {
+        await load();
+        await page.run("localStorage.setItem('vigile.auto-refresh', 'on')");
+        const seen: Record<string, string> = {};
+        // In the window the header is there, and the link of the view takes the keyboard.
+        await load("/#graph");
+        await press(ids.launch!);
+        await shown("Launch the checkout");
+        await page.key("Escape");
+        seen["a box, in the window"] = await keyboard();
+        await press(ids.launch!);
+        await shown("Launch the checkout");
+        await page.click("#detail .link", await page.run<number>("return [...document.querySelectorAll('#detail .link')].findIndex((l) => l.querySelector('.name').textContent === 'Checkout')"));
+        await shown("Checkout");
+        await page.key("Escape");
+        seen["a link, in the window"] = await keyboard();
+        await load(`/#graph/${ids.launch}`);
+        await shown("Launch the checkout");
+        await page.key("Escape");
+        seen["the address"] = await keyboard();
+        await live();
+        await press(made[0]!);
+        await shown("Deleted while its panel is open over the graph");
+        await remove(made[0]!);
+        await page.until("return [...document.querySelectorAll('#detail .pill')].some((pill) => pill.textContent === 'deleted')", "the panel to say that the task is deleted", 3000);
+        await page.key("Escape");
+        seen["a box whose task was deleted, in the window"] = await keyboard();
+
+        // Full screen is entered with the keyboard on its button, which keeps it.
+        await graphReady();
+        await page.run("document.getElementById('graph-full').focus({ preventScroll: true })");
+        await page.key("Enter");
+        await page.until("return document.body.classList.contains('graph-full')", "full screen");
+        seen["the button, once full screen is entered with it"] = await keyboard();
+        // At full screen the header is gone and its link with it: the button that leaves full screen is there.
+        await press(ids.launch!);
+        await shown("Launch the checkout");
+        await page.key("Escape");
+        assert.deepEqual([await panelOpen(), await full()], [false, true], "Escape closed the panel and left the full screen as it is");
+        seen["a box, at full screen"] = await keyboard();
+        await press(ids.launch!);
+        await shown("Launch the checkout");
+        await page.click("#detail .link", await page.run<number>("return [...document.querySelectorAll('#detail .link')].findIndex((l) => l.querySelector('.name').textContent === 'Checkout')"));
+        await shown("Checkout");
+        await page.key("Escape");
+        seen["a link, at full screen"] = await keyboard();
+        await press(made[1]!);
+        await shown("Deleted while its panel is open at full screen");
+        await remove(made[1]!);
+        await page.until("return [...document.querySelectorAll('#detail .pill')].some((pill) => pill.textContent === 'deleted')", "the panel to say that the task is deleted", 3000);
+        await page.key("Escape");
+        seen["a box whose task was deleted, at full screen"] = await keyboard();
+        // Full screen is left while the panel is open, and entered while it is open: what counts is what is there when it closes.
+        await press(ids.launch!);
+        await shown("Launch the checkout");
+        await page.run("document.getElementById('graph-full').click()");
+        await left();
+        await page.key("Escape");
+        seen["full screen left under the open panel"] = await keyboard();
+        await press(ids.launch!);
+        await shown("Launch the checkout");
+        await page.run("document.getElementById('graph-full').click()");
+        assert.equal(await full(), true);
+        await page.key("Escape");
+        seen["full screen entered under the open panel"] = await keyboard();
+        // Escape leaves full screen, and the button, which says something else now, still has the keyboard.
+        await page.key("Escape");
+        await left();
+        seen["the button, once full screen is left with Escape"] = await keyboard();
+        // The keyboard is in the header when full screen takes the header away.
+        await page.run("document.getElementById('settings').focus({ preventScroll: true }); document.getElementById('graph-full').click();");
+        assert.equal(await full(), true);
+        seen["a control of the header that full screen hides"] = await keyboard();
+        await page.run("document.getElementById('graph-full').click()");
+
+        assert.deepEqual(seen, {
+          "a box, in the window": "view-graph",
+          "a link, in the window": "view-graph",
+          "the address": "view-graph",
+          "a box whose task was deleted, in the window": "view-graph",
+          "the button, once full screen is entered with it": "graph-full",
+          "a box, at full screen": "graph-full",
+          "a link, at full screen": "graph-full",
+          "a box whose task was deleted, at full screen": "graph-full",
+          "full screen left under the open panel": "view-graph",
+          "full screen entered under the open panel": "graph-full",
+          "the button, once full screen is left with Escape": "graph-full",
+          "a control of the header that full screen hides": "graph-full",
+        });
+        assert.deepEqual(page.errors, []);
+      } finally {
+        for (const id of made) await remove(id).catch(() => {});
+        await page.run("localStorage.removeItem('vigile.auto-refresh')");
+        await page.size(1280, 900);
+        await load();
+      }
+    });
+
+    it("leaves it on a control that can be seen on the board: when a strip goes with its last task, a card with its task, a group is entered or left, a notice is dismissed, and the key is taken", async () => {
+      await page.size(1280, 900);
+      const made: string[] = [];
+      const seen: Record<string, string> = {};
+      try {
+        const gone = await create("Deleted under the keyboard");
+        made.push(gone);
+        await load();
+        await page.run("localStorage.setItem('vigile.auto-refresh', 'on'); localStorage.setItem('vigile.collapsed', '[\"in_review\"]')");
+        await load();
+        await live();
+        // The strip that has the keyboard holds one task, which leaves: the strip is gone with it.
+        await page.run("document.querySelector('.column[data-key=\"in_review\"] .column-fold').focus({ preventScroll: true })");
+        await move(ids.review!, "in_progress");
+        await page.until("return document.querySelector('.column[data-key=\"in_review\"]') === null", "the strip to go with its last task", 2000);
+        seen["a strip that went with its last task"] = await keyboard();
+        // The card that has the keyboard is of a task that is deleted.
+        await page.run(`document.querySelector('.card[data-id="${gone}"]').focus({ preventScroll: true })`);
+        await remove(gone);
+        await page.until(`return document.querySelector('.card[data-id="${gone}"]') === null`, "the card to go with its task", 2000);
+        seen["a card whose task was deleted"] = await keyboard();
+        await page.until("return document.querySelectorAll('.card-ghost').length === 0", "the cards to settle", 12_000);
+
+        // A group is entered from its panel, with the keyboard: the card the panel was opened from is not among what the group holds.
+        await page.run(`document.querySelector('.card[data-id="${ids.checkout}"]').focus({ preventScroll: true })`);
+        await page.key("Enter");
+        await shown("Checkout");
+        await page.run("document.querySelector('#detail .open-group').focus({ preventScroll: true })");
+        await page.key("Enter");
+        assert.deepEqual([await panelOpen(), await count(`.card[data-id="${ids.checkout}"]`)], [false, 0]);
+        seen["the card a group was entered from"] = await keyboard();
+        // And left again with the button that says so, which goes once it is used.
+        await page.run("document.querySelector('#scope .tag-button').focus({ preventScroll: true })");
+        await page.key("Enter");
+        assert.equal(await count("#scope .tag-button"), 0);
+        seen["the button that leaves a group"] = await keyboard();
+
+        // Notices: dismissed with the keyboard, the next one has it; the last one gone, or all closed at once, the page has it.
+        const watched = [await create("Watched, first"), await create("Watched, second"), await create("Watched, third"), await create("Watched, fourth")];
+        made.push(...watched);
+        const notices = async (ids: string[]) => {
+          await page.run(`sessionStorage.setItem('vigile.watching', ${JSON.stringify(JSON.stringify(ids))})`);
+          await load();
+          for (const id of ids) await move(id, "in_progress", "done");
+          await page.until(`return document.querySelectorAll('.toast.done').length === ${ids.length}`, "the notices that the watched tasks are done", 5000);
+        };
+        await notices(watched.slice(0, 2));
+        await page.run("document.querySelector('.toast .toast-close').focus({ preventScroll: true })");
+        await page.key("Enter");
+        assert.equal(await count(".toast"), 1);
+        seen["a notice that was dismissed, with another left"] = await keyboard();
+        await page.key("Enter");
+        assert.equal(await count(".toast"), 0);
+        seen["the last notice, dismissed"] = await keyboard();
+        await notices(watched.slice(2));
+        await page.run("document.getElementById('toasts-clear').focus({ preventScroll: true })");
+        await page.key("Enter");
+        assert.equal(await count(".toast"), 0);
+        seen["the button that closes all notices"] = await keyboard();
+
+        // The form that asks for a key goes once the key is taken.
+        await page.run("localStorage.removeItem('vigile.auto-refresh'); sessionStorage.removeItem('vigile.watching')");
+        setValue(config, "auth.keyless_user", "");
+        try {
+          await page.open("about:blank");
+          await page.open(`${base}/`);
+          await page.until("return !document.getElementById('notice').hidden", "the key form");
+          await page.click("#notice input");
+          await page.type(adminKey);
+          await page.key("Enter");
+          await page.until("return document.querySelectorAll('.card').length > 0 && document.getElementById('notice').hidden", "the board, once the key is right");
+          seen["the form that asked for a key"] = await keyboard();
+        } finally {
+          setValue(config, "auth.keyless_user", "agent1");
+          await page.run("localStorage.clear()");
+        }
+
+        assert.deepEqual(seen, {
+          "a strip that went with its last task": "view-board",
+          "a card whose task was deleted": "level-out",
+          "the card a group was entered from": "tag-button leave",
+          "the button that leaves a group": `card ${ids.checkout}`,
+          "a notice that was dismissed, with another left": "toast-close",
+          "the last notice, dismissed": "view-board",
+          "the button that closes all notices": "view-board",
+          "the form that asked for a key": "view-board",
+        });
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await move(ids.review!, "in_review").catch(() => {});
+        for (const id of made) await remove(id).catch(() => {});
+        await page.run("for (const name of ['vigile.collapsed', 'vigile.auto-refresh']) localStorage.removeItem(name); sessionStorage.removeItem('vigile.watching')");
+        await load();
+      }
+    });
+
+    it("leaves it on a control of the graph when the line that says a large graph is being worked out has said all it had to say", async () => {
+      await page.size(1280, 900);
+      const folder = mkdtempSync(join(tmpdir(), "vigile-browser-test-status-"));
+      let many: Service | null = null;
+      try {
+        initConfig(join(folder, "config.toml"), { name: "status", port: await freePort() });
+        many = await startService({ loaded: loadConfig(join(folder, "config.toml"), {}), log: () => {}, warn: () => {} });
+        await many.engine.execute("create_project", "agent1", { title: "A large graph", prefix: "LARGE" });
+        for (let i = 0; i < 320; i++) await many.engine.execute("create_task", "agent1", { title: `Task ${i}`, description: "d", project: "LARGE" });
+        await page.open("about:blank");
+        await page.open(`${many.urls.base}/#graph`);
+        await page.until("return !document.getElementById('graph-draw').hidden", "the button that draws the graph", 20_000);
+        // The button is pressed with the keyboard. It goes with the question, and the line that took its place has
+        // the keyboard while the graph is worked out.
+        await page.run("document.getElementById('graph-draw').focus({ preventScroll: true })");
+        await page.key("Enter");
+        await page.until("return Boolean(window.vigileGraph && window.vigileGraph.scratch('settled')) && document.getElementById('graph-status').hidden", "the graph to be drawn and the line to go", 60_000);
+        assert.equal(await keyboard(), "zoom-fit", "the line went, and a control of the graph has the keyboard");
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await many?.stop();
+        rmSync(folder, { recursive: true, force: true });
+        await load();
+      }
+    });
+  });
+
   browserSuite("refreshing", () => {
     const loads = () => page.requests.filter((url) => url.endsWith("/api/list-tasks")).length;
     const listeners = async () => ((await (await fetch(`${base}/api/admin/status`, { headers: { authorization: `Bearer ${adminKey}` } })).json()) as { listeners: number }).listeners;
@@ -2019,13 +3813,12 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.equal(await ghosts(), 1, "a deleted card fades out where it was");
       await settled();
 
-      // Cards move also where the system asks for reduced motion: on this page its own switch decides.
+      // With no explicit animation choice, reduced motion leaves the changed card in place and ringed.
       await page.motion("reduce");
       await watchGhosts();
       await move(ids.address!, "in_progress");
       await page.until(`return document.querySelector('.column[data-key="in_progress"] .card[data-id="${ids.address}"]') !== null`, "the change to appear", 1500);
-      assert.deepEqual(await page.run(`const card = document.querySelector('.card[data-id="${ids.address}"]'); return [window.ghosts, card.classList.contains('changed'), getComputedStyle(card).visibility]`), [1, true, "hidden"], "the card travels under reduced motion too");
-      await settled();
+      assert.deepEqual(await page.run(`const card = document.querySelector('.card[data-id="${ids.address}"]'); return [window.ghosts, card.classList.contains('changed'), getComputedStyle(card).visibility]`), [0, true, "visible"], "the ring alone says what changed under reduced motion");
       await page.motion("no-preference");
 
       // The choice survives a reload; switching off stops the listening.
@@ -4521,9 +6314,11 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         else await page.click(".card");
         await page.until("return !document.getElementById('panel').hidden", "the panel");
         const off = await page.run<Array<[string, number, number]>>(
-          "return [...document.querySelectorAll('button > svg')].filter((i) => i.getBoundingClientRect().width > 0).map((i) => { const b = i.parentElement.getBoundingClientRect(); const r = i.getBoundingClientRect(); const shape = i.querySelector('path').getBoundingClientRect(); return [i.parentElement.id, Math.round(Math.max(Math.abs((b.left + b.right - r.left - r.right) / 2), Math.abs((b.top + b.bottom - r.top - r.bottom) / 2)) * 10) / 10, Math.round(Math.max(Math.abs((b.left + b.right - shape.left - shape.right) / 2), Math.abs((b.top + b.bottom - shape.top - shape.bottom) / 2)) * 10) / 10]; })",
+          "return [...document.querySelectorAll('button > svg')].filter((i) => i.getBoundingClientRect().width > 0).map((i) => { const b = i.parentElement.getBoundingClientRect(); const r = i.getBoundingClientRect(); const shape = i.querySelector('path').getBoundingClientRect(); return [i.parentElement.id || i.parentElement.className, Math.round(Math.max(Math.abs((b.left + b.right - r.left - r.right) / 2), Math.abs((b.top + b.bottom - r.top - r.bottom) / 2)) * 10) / 10, Math.round(Math.max(Math.abs((b.left + b.right - shape.left - shape.right) / 2), Math.abs((b.top + b.bottom - shape.top - shape.bottom) / 2)) * 10) / 10]; })",
         );
-        assert.deepEqual(off.map(([id]) => id).sort(), ["close", "focus", "refresh", "settings"]);
+        // The control that collapses a column is in every column's heading, and is held to the same rule.
+        assert.deepEqual(off.map(([id]) => id).filter((id) => id !== "column-fold").sort(), ["close", "focus", "refresh", "settings"]);
+        assert.equal(off.filter(([id]) => id === "column-fold").length, await count(".board > .column"));
         for (const [id, box, shape] of off) assert.ok(box <= 0.5 && shape <= (id === "refresh" ? 1.2 : 0.5), `the drawing in #${id} is ${box}px off the middle, its shape ${shape}px, at ${width}px`);
         await page.key("Escape");
       }
