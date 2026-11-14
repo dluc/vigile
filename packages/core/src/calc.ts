@@ -38,8 +38,11 @@ export function groupProgress(graph: GraphView, task: TaskNode): { finished: num
   return { finished: inside.filter((t) => TASK_FINISHED.includes(t.status)).length, total: inside.length };
 }
 
-/** Whether a task sits inside another task, as opposed to directly in a project or nowhere. */
-export const hasParentTask = (graph: GraphView, task: TaskNode): boolean => containers(graph, task).some((c) => c.kind === "task" && isLive(c));
+/**
+ * Whether a task sits inside another task, as opposed to directly in a project or nowhere. A deleted task in
+ * between does not take it out: what a task holds through a deleted one is inside it, as its progress counts it.
+ */
+export const hasParentTask = (graph: GraphView, task: TaskNode): boolean => liveContainers(graph, task).some((c) => c.kind === "task");
 
 export interface ProjectCalc {
   progress: { finished: number; total: number };
@@ -90,6 +93,29 @@ export function containers(graph: GraphView, task: TaskNode): Array<ProjectNode 
   for (const link of graph.in(task, CONTAINS)) {
     const node = graph.node(link.from);
     if (node && node.kind !== "user") found.push(node);
+  }
+  return found;
+}
+
+/**
+ * The live projects and tasks that hold a task: its containers that are not deleted and, in the place of each
+ * deleted task among them, the live ones that hold that one, however many deleted tasks lie in between. It is
+ * `containedTasks` read from the other end, by the same rule: through what is deleted, naming only what is
+ * live. Nothing is above a project, so a deleted project leads nowhere. By steps of its own and not by calling
+ * itself, so that a long chain of deleted groups is no trouble.
+ */
+export function liveContainers(graph: GraphView, task: TaskNode): Array<ProjectNode | TaskNode> {
+  const found: Array<ProjectNode | TaskNode> = [];
+  const seen = new Set<string>();
+  const queue: TaskNode[] = [task];
+  for (let next = 0; next < queue.length; next++) {
+    for (const holder of ordered(containers(graph, queue[next]!))) {
+      const key = `${holder.kind}:${holder.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (isLive(holder)) found.push(holder);
+      else if (holder.kind === "task") queue.push(holder);
+    }
   }
   return found;
 }

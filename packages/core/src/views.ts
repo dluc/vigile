@@ -1,4 +1,4 @@
-import { containers, dependencies, groupProgress, projectCalc, taskCalc, type Problem, type Known } from "./calc.js";
+import { containers, dependencies, groupProgress, isLive, liveContainers, projectCalc, taskCalc, type Problem, type Known } from "./calc.js";
 import type { GraphView } from "./graph.js";
 import { comparePlaces, placeOf, refText } from "./ids.js";
 import { LIMITS, type Node, type ProjectNode, type StatusEntry, type TaskNode, type UserNode } from "./model.js";
@@ -23,6 +23,12 @@ export interface TaskSummary {
   size: number | null;
   version: number;
   contained_in: string[];
+  /**
+   * Only for a task with a deleted item among `contained_in`: the live projects and tasks that hold it, counting
+   * those that hold it through deleted tasks. It is what the task is inside of, as progress and lists by project
+   * or parent count it. Without it, `contained_in` says the same.
+   */
+  live_containers?: string[];
   depends_on: string[];
   assigned_to: string[];
   is_assigned: boolean;
@@ -76,7 +82,7 @@ export interface More {
 }
 
 /** The lists of a task's summary: one for each kind of link it has, and what it waits for. */
-const SUMMARY_LISTS = ["contained_in", "depends_on", "assigned_to", "waiting_for"] as const;
+const SUMMARY_LISTS = ["contained_in", "live_containers", "depends_on", "assigned_to", "waiting_for"] as const;
 
 /** Which lists of an item were cut at the page size. A list that is returned whole is not named here. */
 export type MoreLists = Partial<Record<(typeof SUMMARY_LISTS)[number] | "timeline" | "history", More>> & {
@@ -113,6 +119,7 @@ const orderedNodes = <T extends Node>(values: T[]): T[] => values.sort((a, b) =>
 export function taskSummary(graph: GraphView, task: TaskNode, known?: Known): TaskSummary {
   const calc = taskCalc(graph, task, known);
   const progress = groupProgress(graph, task);
+  const holders = orderedNodes(containers(graph, task));
   return {
     kind: "task",
     id: task.id,
@@ -123,7 +130,8 @@ export function taskSummary(graph: GraphView, task: TaskNode, known?: Known): Ta
     value: task.value,
     size: task.size,
     version: task.version,
-    contained_in: orderedNodes(containers(graph, task)).map(refText),
+    contained_in: holders.map(refText),
+    ...(holders.every(isLive) ? {} : { live_containers: liveContainers(graph, task).map(refText) }),
     depends_on: orderedNodes(dependencies(graph, task)).map(refText),
     assigned_to: orderedNodes(calc.assigned_to).map((u) => u.username),
     is_assigned: calc.is_assigned,

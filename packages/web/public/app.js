@@ -226,40 +226,189 @@ const isOpenTrouble = (task) => isTrouble(task) && !FINISHED.includes(task.statu
  */
 const boardColumn = (task) => (state.bugsApart && isOpenTrouble(task) ? "trouble" : columnOf(task));
 
-const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, filter: "", expanded: new Set(), view: "board", trail: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
+const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, filter: "", expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
 
 /** How a project appears in a task's `contained_in`: numbered projects carry their kind in front. */
 const projectRef = (project) => (/^\d+$/.test(project.id) ? `project:${project.id}` : project.id);
 
-/** Whether a task sits in a project, directly or through the tasks that contain it. */
-function inProject(task, ref, seen = new Set()) {
-  if (seen.has(task.id)) return false;
-  seen.add(task.id);
-  return task.contained_in.some((holder) => {
-    if (holder === ref) return true;
-    const parent = state.byId.get(holder);
-    return parent ? inProject(parent, ref, seen) : false;
-  });
+/**
+ * The live projects and tasks that hold a task. The service lists them apart when a deleted item is among the
+ * task's containers: a task that a live group holds through a deleted one is still inside the live group, and
+ * the service counts it there, in the group's progress and in its lists by project and by parent. The page goes
+ * by the same list, so that it never shows a task outside a group whose count includes it.
+ */
+const holdersOf = (task) => task.live_containers ?? task.contained_in;
+
+/**
+ * What each project and task holds, of the tasks as they were last read: `held` directly, and `inside` at any
+ * depth, which is worked out for a holder when it is first asked for. Both go when the plan is read again.
+ */
+let holdings = { of: null, held: new Map(), inside: new Map() };
+
+function heldBy() {
+  if (holdings.of === state.tasks) return holdings.held;
+  holdings = { of: state.tasks, held: new Map(), inside: new Map() };
+  for (const task of state.tasks) {
+    for (const ref of holdersOf(task)) {
+      if (ref === task.id) continue;
+      if (!holdings.held.has(ref)) holdings.held.set(ref, []);
+      holdings.held.get(ref).push(task);
+    }
+  }
+  return holdings.held;
 }
 
-/** Whether a task sits inside a group, directly or through the groups in between. */
-function inGroup(task, groupId, seen = new Set()) {
-  if (seen.has(task.id)) return false;
-  seen.add(task.id);
-  return task.contained_in.some((holder) => {
-    if (holder === groupId) return true;
-    const parent = state.byId.get(holder);
-    return parent ? inGroup(parent, groupId, seen) : false;
-  });
+/**
+ * The IDs of the tasks inside a project or a task, at any depth and each once, however many ways lead to it.
+ * Found going down from the holder, by steps and not by a function that calls itself: a plan nested a thousand
+ * deep is no trouble, and the work is that of the links it follows.
+ */
+function heldIn(ref) {
+  const held = heldBy();
+  if (holdings.inside.has(ref)) return holdings.inside.get(ref);
+  const inside = new Set();
+  const queue = [ref];
+  for (let next = 0; next < queue.length; next++) {
+    for (const task of held.get(queue[next]) ?? []) {
+      if (inside.has(task.id)) continue;
+      inside.add(task.id);
+      queue.push(task.id);
+    }
+  }
+  holdings.inside.set(ref, inside);
+  return inside;
 }
 
-function matches(task) {
-  if (state.project && !inProject(task, state.project)) return false;
-  if (state.group && !inGroup(task, state.group)) return false;
-  const text = state.filter.trim().toLowerCase();
+/** Whether one holder has a task anywhere inside it, without retaining every ancestor's whole descendant set. */
+function holds(ref, wanted) {
+  const held = heldBy();
+  const seen = new Set([ref]);
+  const queue = [ref];
+  for (let next = 0; next < queue.length; next++) {
+    for (const task of held.get(queue[next]) ?? []) {
+      if (task.id === wanted) return true;
+      if (seen.has(task.id)) continue;
+      seen.add(task.id);
+      queue.push(task.id);
+    }
+  }
+  return false;
+}
+
+/** The tasks both views are narrowed to: those of the selected project that are inside the group that was zoomed into. */
+function tasksInView() {
+  let tasks = state.tasks;
+  for (const ref of [state.project, state.group]) {
+    if (!ref) continue;
+    const inside = heldIn(ref);
+    tasks = tasks.filter((task) => inside.has(task.id));
+  }
+  return tasks;
+}
+
+/** What is typed in the filter, as it is compared. */
+const filterText = () => state.filter.trim().toLowerCase();
+
+function matchesFilter(task, text = filterText()) {
   if (!text) return true;
   return [task.id, task.title, ...task.assigned_to].some((value) => value.toLowerCase().includes(text));
 }
+
+/**
+ * How deep everything in view sits, counted from the top of what is in view. An item that nothing in view holds,
+ * or that the group the board is in holds directly, is at 1; anything else is one below the nearest of the items
+ * that hold it. So a task in two groups is as near the top as the nearer of them, and is on the board as soon as
+ * either is open. `held` says what each item holds directly, and `deepest` how many levels there are.
+ */
+function levelsOf(tasks) {
+  const inView = new Set(tasks.map((task) => task.id));
+  const held = new Map();
+  const depth = new Map();
+  let front = [];
+  for (const task of tasks) {
+    let top = true;
+    for (const ref of holdersOf(task)) {
+      if (ref === task.id || !inView.has(ref)) continue;
+      top = false;
+      if (!held.has(ref)) held.set(ref, []);
+      held.get(ref).push(task);
+    }
+    if (!top && !(state.group && holdersOf(task).includes(state.group))) continue;
+    depth.set(task.id, 1);
+    front.push(task);
+  }
+  let deepest = front.length ? 1 : 0;
+  // Level by level and not by a function that calls itself, so that groups nested very deep are no trouble.
+  for (let level = 2; front.length; level++) {
+    const next = [];
+    for (const task of front) {
+      for (const inner of held.get(task.id) ?? []) {
+        if (depth.has(inner.id)) continue;
+        depth.set(inner.id, level);
+        next.push(inner);
+      }
+    }
+    if (next.length) deepest = level;
+    front = next;
+  }
+  // The service refuses a loop of containing. Should damaged data hold one all the same, nothing leads down to
+  // the tasks in it: they count as being at the top, so that no task is ever missing from the board.
+  for (const task of tasks) {
+    if (depth.has(task.id)) continue;
+    depth.set(task.id, 1);
+    deepest = Math.max(deepest, 1);
+  }
+  return { depth, held, deepest };
+}
+
+/**
+ * What a closed group stands for: how many tasks it holds at any depth, each counted once however many ways lead
+ * to it, and how many of them are in progress, waiting, have problems, are unfinished bugs, and match the filter.
+ */
+function insideOf(task, held, text) {
+  const found = { total: 0, finished: 0, busy: 0, waiting: 0, problems: 0, trouble: 0, matching: 0 };
+  const seen = new Set([task.id]);
+  const queue = [...(held.get(task.id) ?? [])];
+  for (let next = 0; next < queue.length; next++) {
+    const inner = queue[next];
+    if (seen.has(inner.id)) continue;
+    seen.add(inner.id);
+    found.total++;
+    if (FINISHED.includes(inner.status)) found.finished++;
+    if (inner.status === "in_progress") found.busy++;
+    if (columnOf(inner) === "waiting") found.waiting++;
+    if (inner.has_problems) found.problems++;
+    if (isOpenTrouble(inner)) found.trouble++;
+    if (text && matchesFilter(inner, text)) found.matching++;
+    for (const deeper of held.get(inner.id) ?? []) if (!seen.has(deeper.id)) queue.push(deeper);
+  }
+  return found;
+}
+
+/**
+ * What the board shows at its zoom, of the tasks in view. `level` is how many levels are open, or null when that
+ * is all of them. A task is on the board when it sits no deeper than that. One at the last open level that holds
+ * something deeper is closed: its card stands for everything it holds, and it stays on the board under a filter
+ * when something it holds matches.
+ */
+function boardAt(tasks) {
+  const { depth, held, deepest } = levelsOf(tasks);
+  const level = state.zoom === null || state.zoom >= deepest ? null : state.zoom;
+  const text = filterText();
+  const closed = new Map();
+  const cards = [];
+  for (const task of tasks) {
+    if (level !== null && depth.get(task.id) > level) continue;
+    const stands = level !== null && depth.get(task.id) === level && (held.get(task.id) ?? []).some((inner) => depth.get(inner.id) > level);
+    const inside = stands ? insideOf(task, held, text) : null;
+    if (inside) closed.set(task.id, inside);
+    if (matchesFilter(task, text) || inside?.matching) cards.push(task);
+  }
+  return { cards, closed, level, deepest };
+}
+
+/** A level of the board in words. */
+const levelName = (level) => (level === null ? "Everything" : level === 1 ? "Top level" : `${level} levels`);
 
 function pill(status) {
   return el("span", { class: `pill ${STATUS_TONE[status] ?? ""}` }, label(status));
@@ -327,11 +476,36 @@ const few = (items, shown = 3) => (items.length > shown ? [...items.slice(0, sho
 /** A container as a short chip: a numbered project is written without its kind. */
 const chip = (ref) => ref.replace(/^project:/, "");
 
-function card(task) {
-  const groups = task.contained_in.filter((ref) => state.byId.has(ref));
-  const projects = task.contained_in.filter((ref) => !state.byId.has(ref));
+/**
+ * What the card of a closed group showed when it was drawn, as one text: its state, title, kind and priority, how
+ * far the tasks it stands for are and how many of them are in each state or match the filter, how many it holds,
+ * and every other mark on it. A refresh that changes any of it rings the card. The text is the card itself as it
+ * was built, so nothing that is drawn on the card, now or later, can be left out of it; added to it is what the
+ * card's place in its column goes by and is not written on it. What the person changes themselves, the filter or
+ * the zoom, draws the board again at once and never between the two drawings a refresh compares, so it rings
+ * nothing.
+ */
+const shows = new WeakMap();
+
+/**
+ * A task's card. `inside` is given for a closed group, whose card stands for the tasks it holds: it then says how
+ * far they are and what state they are in, and has a button of its own that zooms into the group. That button
+ * sits beside the card and not in it, since the card is a button itself and opens the panel.
+ */
+function card(task, inside = null) {
+  const groups = holdersOf(task).filter((ref) => state.byId.has(ref));
+  const projects = holdersOf(task).filter((ref) => !state.byId.has(ref));
+  const progress = task.progress ?? (inside ? { finished: inside.finished, total: inside.total } : null);
+  const percent = progress?.total ? Math.round((progress.finished / progress.total) * 100) : 0;
   const tags = present([
-    task.progress && el("span", { class: "tag group", title: "Tasks finished inside this group" }, `${task.progress.finished}/${task.progress.total} done`),
+    progress && el("span", { class: "tag group", title: "Tasks finished inside this group" }, `${progress.finished}/${progress.total} done`),
+    inside && [
+      inside.matching > 0 && el("span", { class: "tag match", title: "Tasks inside this group that match the filter" }, `${inside.matching} inside ${inside.matching === 1 ? "matches" : "match"}`),
+      inside.busy > 0 && el("span", { class: "tag inside", "data-tone": "busy", title: "Tasks inside this group that are in progress" }, `${inside.busy} in progress`),
+      inside.waiting > 0 && el("span", { class: "tag inside", "data-tone": "wait", title: "Tasks inside this group that wait for dependencies" }, `${inside.waiting} waiting`),
+      inside.problems > 0 && el("span", { class: "tag warn", title: "Tasks inside this group that have problems" }, `⚠ ${counted(inside.problems, "problem")} inside`),
+      inside.trouble > 0 && el("span", { class: "tag trouble", title: "Unfinished bugs, issues and incidents inside this group" }, `${inside.trouble} open ${inside.trouble === 1 ? "bug or issue" : "bugs and issues"}`),
+    ],
     watched.has(task.id) && el("span", { class: "tag watched", title: "You are watching this task: a sound plays when it is done" }, "watching"),
     few(task.assigned_to).map((user) => el("span", { class: "tag who" }, user)),
     task.is_waiting && el("span", { class: "tag waiting", title: task.waiting_for.map(chip).join(", ") }, `waits for ${few(task.waiting_for.map(chip)).join(", ")}`),
@@ -339,19 +513,42 @@ function card(task) {
     few(groups).map((id) => el("span", { class: "tag", title: state.byId.get(id)?.title ?? "" }, `in ${id}`)),
     !state.project && few(projects.map(chip)).map((id) => el("span", { class: "tag" }, id)),
   ]);
-  return el(
+  const button = el(
     "button",
-    { class: `card${task.has_problems ? " problem" : ""}${isTrouble(task) ? " trouble" : ""}${task.progress ? " is-group" : ""}`, type: "button", "data-id": task.id, "data-status": task.status, onclick: () => openItem("task", task.id) },
+    {
+      class: `card${task.has_problems ? " problem" : ""}${isTrouble(task) ? " trouble" : ""}${progress ? " is-group" : ""}${inside ? " closed" : ""}`,
+      type: "button",
+      "data-id": task.id,
+      "data-status": task.status,
+      onclick: () => openItem("task", task.id),
+    },
     el(
       "div",
       { class: "card-top" },
       el("span", { class: "id" }, task.id),
+      inside && el("span", { class: "kind" }, "group"),
       isTrouble(task) && el("span", { class: "type" }, task.type),
       task.priority !== 0 && el("span", { class: `priority${task.priority >= 5 ? " high" : ""}`, title: "Priority" }, `P${task.priority}`),
     ),
     el("div", { class: "card-title" }, task.title),
+    inside && el("span", { class: "bar", role: "img", "aria-label": `${percent}% finished` }, el("i", { style: `width:${percent}%` })),
     tags.length ? el("div", { class: "tags" }, tags) : null,
   );
+  if (!inside) return button;
+  const whole = el(
+    "div",
+    { class: "holder" },
+    button,
+    el(
+      "button",
+      { class: "zoom-into", type: "button", "data-id": task.id, "aria-label": `Zoom into ${task.id}: show only the ${counted(progress.total, "task")} it holds`, title: "Show only what this group holds", onclick: () => zoomInto(task.id) },
+      el("span", {}, "Zoom in"),
+      el("span", { class: "holds" }, `holds ${counted(progress.total, "task")}`),
+    ),
+  );
+  // Among the finished, a card's place goes by when it was completed, which no card says.
+  shows.set(button, [whole.innerHTML, task.completed_at ?? ""].join("\n"));
+  return whole;
 }
 
 /** Whether each column scrolls by itself. On a phone the columns are stacked and the page scrolls. */
@@ -389,13 +586,21 @@ function doneSpan(columns, cards) {
   return 1 + Math.max(0, Math.min(Math.floor(spare / (widest + gap)), cards - 1, 3));
 }
 
-function renderBoard(tasks) {
+/** Set when the board is about to show another level or another group: its columns then start from the top. */
+let boardMoved = false;
+
+function renderBoard(tasks, closed) {
+  const cardOf = (task) => card(task, closed.get(task.id));
   const groups = Object.fromEntries(COLUMNS.map((c) => [c.key, []]));
   for (const task of tasks) (groups[boardColumn(task)] ??= []).push(task);
   const order = COLUMNS.map((c) => c.key);
-  groups.trouble.sort((a, b) => order.indexOf(columnOf(a)) - order.indexOf(columnOf(b)) || b.priority - a.priority);
+  // On a board that is zoomed out the closed groups come first in each column, and in each state of the column
+  // for bugs: they are what the view is for, and must not be looked for among the tasks that are in no group.
+  const first = (a, b) => Number(closed.has(b.id)) - Number(closed.has(a.id));
+  groups.trouble.sort((a, b) => order.indexOf(columnOf(a)) - order.indexOf(columnOf(b)) || first(a, b) || b.priority - a.priority);
   groups.next.sort((a, b) => b.priority - a.priority);
   groups.done.sort((a, b) => (b.completed_at ?? "").localeCompare(a.completed_at ?? ""));
+  if (closed.size) for (const column of COLUMNS) if (column.key !== "trouble") groups[column.key].sort(first);
 
   // With no tasks at all there is nothing to lay out: one message says why.
   const visible = tasks.length ? COLUMNS.filter((c) => groups[c.key].length || ["in_progress", "next", "done"].includes(c.key)) : [];
@@ -419,9 +624,9 @@ function renderBoard(tasks) {
     const cards = c.key === "trouble"
       ? COLUMNS.filter((s) => shown.some((task) => columnOf(task) === s.key)).flatMap((s) => [
           el("h3", { class: "lane", "data-tone": s.tone }, el("span", { class: "dot" }), s.title, el("span", { class: "count" }, String(groups.trouble.filter((task) => columnOf(task) === s.key).length))),
-          shown.filter((task) => columnOf(task) === s.key).map(card),
+          shown.filter((task) => columnOf(task) === s.key).map(cardOf),
         ])
-      : shown.map(card);
+      : shown.map(cardOf);
     return el(
       "section",
       { class: `column${span > 1 ? " wide" : ""}`, "data-tone": c.tone, "data-key": c.key, style: span > 1 ? `--span: ${span}` : undefined },
@@ -432,8 +637,9 @@ function renderBoard(tasks) {
     );
   });
   // Drawing the board again must not make a reader lose their place: each column, and the board itself, stays
-  // scrolled where it was.
-  const scrolled = new Map([...$("board").querySelectorAll(".column")].map((column) => [column.dataset.key, column.querySelector(".cards")?.scrollTop ?? 0]));
+  // scrolled where it was. Not so when the board shows another level or group: those are other cards.
+  const scrolled = new Map(boardMoved ? [] : [...$("board").querySelectorAll(".column")].map((column) => [column.dataset.key, column.querySelector(".cards")?.scrollTop ?? 0]));
+  boardMoved = false;
   const across = $("board").scrollLeft;
   $("board").replaceChildren(...columns);
   for (const column of columns) {
@@ -444,14 +650,20 @@ function renderBoard(tasks) {
   keepMarks();
 }
 
-/** The counts above the tasks, the same in both views. */
-function renderSummary(tasks) {
+/**
+ * The counts above the tasks. They count what is shown: in the graph every task in view, on the board its cards.
+ * On a board that is zoomed out the cards are fewer than the tasks, and the first count says how many tasks they
+ * stand for: every task in view that matches the filter, each counted once however many groups hold it.
+ */
+function renderSummary(tasks, all) {
   // Counted as the board shows them: with bugs in a column of their own, they are not also among the waiting or the next.
   const count = (key) => tasks.filter((t) => boardColumn(t) === key).length;
   const trouble = tasks.filter(isOpenTrouble).length;
   const problems = tasks.filter((t) => t.has_problems).length;
   $("summary").replaceChildren(...present([
-    el("span", {}, el("b", {}, String(tasks.length)), " tasks"),
+    state.level && state.view === "board"
+      ? el("span", {}, el("b", {}, String(tasks.length)), tasks.length === 1 ? " card for " : " cards for ", el("b", {}, String(all)), all === 1 ? " task" : " tasks")
+      : el("span", {}, el("b", {}, String(tasks.length)), " tasks"),
     el("span", {}, el("b", {}, String(count("in_progress"))), " in progress"),
     el("span", {}, el("b", {}, String(count("next"))), " next"),
     el("span", {}, el("b", {}, String(count("waiting"))), " waiting"),
@@ -460,58 +672,253 @@ function renderSummary(tasks) {
     problems ? el("span", { class: "tag warn" }, `⚠ ${problems} with problems`) : null,
   ]));
   const project = state.projects.find((p) => projectRef(p) === state.project);
-  const group = state.group ? state.byId.get(state.group) : null;
-  // With the top section folded away the filter is out of sight, so the line that says what is shown names it too.
+  const top = project ? `${project.id} · ${project.title}` : "all projects";
+  // The groups that were zoomed into, one inside the other: the last is the one in view.
+  const steps = state.into.map((id) => ({ id, title: state.byId.get(id)?.title ?? "" }));
+  // With the top section folded away the filter and the zoom are out of sight, so the line that says what is
+  // shown names them too.
   const filter = state.focus && state.filter.trim() ? `, matching "${state.filter.trim()}"` : "";
-  const where = [project ? `${project.id} · ${project.title}` : "all projects", group ? `${group.id} · ${group.title}` : null].filter(Boolean).join(" › ") + filter;
+  const zoom = state.focus && state.view === "board" && state.level ? `, ${state.level === 1 ? "top level only" : `${state.level} levels deep`}` : "";
+  // Each step of the trail but the last leads back out to it. Of a long trail the last steps are shown, and of
+  // the ones on the way only the ID, the project's too, so that the place the board is in is not pushed out of
+  // the line. The line's full text, which is shown on request, names the same steps with their titles: a trail
+  // is as long as the plan is deep, and a plan may be a thousand deep.
+  const shown = steps.slice(-TRAIL_SHOWN);
+  const where = [top, ...(steps.length > shown.length ? ["…"] : []), ...shown.map((step) => `${step.id} · ${step.title}`)].join(" › ") + filter + zoom;
+  // Each of them also says which group it names, for the keyboard: see keyboardPlace.
+  const out = (count, text, title) => el("button", { class: "crumb", type: "button", "data-step": String(count), "data-group": steps[count - 1]?.id, title, onclick: () => zoomOut(count) }, text);
   $("scope").replaceChildren(
     ...present([
-      el("span", { class: "scope-text", title: where }, `in ${where}`),
-      group && el("button", { class: "tag-button", type: "button", onclick: () => ((state.group = null), render()) }, "✕ leave group"),
+      el(
+        "span",
+        // The line can take the keyboard, though Tab passes it by: the keyboard goes there when a group was left
+        // and nothing else stands for it.
+        { class: `scope-text${steps.length ? " trail" : ""}`, title: where, tabindex: "-1" },
+        "in ",
+        steps.length ? out(0, project ? project.id : top, `Leave the groups and show ${project ? `${project.id} · ${project.title}` : "all projects"}`) : top,
+        steps.length > shown.length && " › …",
+        shown.map((step, at) => [
+          " › ",
+          at < shown.length - 1 ? out(steps.length - shown.length + at + 1, step.id, `Back out to ${step.id} · ${step.title}`) : `${step.id} · ${step.title}`,
+        ]),
+        filter,
+        zoom,
+      ),
+      steps.length > 0 && el("button", { class: "tag-button leave", type: "button", "data-group": steps.at(-1).id, title: steps.length > 1 ? `Back out to ${steps.at(-2).id}` : "Show everything here again", onclick: () => zoomOut(steps.length - 1) }, "✕ leave group"),
     ]),
   );
 }
+
+/**
+ * How many steps of the trail of groups the line above the board shows. The trail itself has no limit of its
+ * own: each step holds the next, so it is never longer than the plan is deep, and what an address names that
+ * does not hold together is cut when the plan is read.
+ */
+const TRAIL_SHOWN = 3;
 
 const when = (iso) => new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 /**
  * The address after the # names the view and, when one is open, the item: #board, #graph/VIG-041,
  * #board/project:VIG. So an item can be bookmarked, and the browser's Back returns to the one before it.
+ * After a ? it says where the board is zoomed to: `in` names the groups that were zoomed into, one inside the
+ * other and the last the one in view, and `zoom` how many levels are open; neither is there for the whole plan
+ * with everything shown. #board?in=VIG-003/VIG-012&zoom=1 is the top level of VIG-012, reached through VIG-003.
  */
 function readRoute() {
-  const [, view, item] = /^#(board|graph)(?:\/(.*))?$/.exec(location.hash) ?? [];
-  let id = null;
-  try {
-    id = item ? decodeURIComponent(item) : null;
-  } catch {
-    // An address that was cut off or mistyped names no item: the view is shown without one.
-  }
-  return { view: view ?? "board", open: !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : { kind: "task", id } };
+  const [, view, item, asks] = /^#(board|graph)(?:\/([^?]*))?(?:\?(.*))?$/.exec(location.hash) ?? [];
+  // An address that was cut off or mistyped names no item, or no group: the view is shown without it.
+  const decoded = (text) => {
+    try {
+      return decodeURIComponent(text);
+    } catch {
+      return "";
+    }
+  };
+  const id = item ? decoded(item) : null;
+  const asked = new Map(
+    (asks ?? "").split("&").map((ask) => {
+      const cut = ask.indexOf("=");
+      return cut < 0 ? [ask, ""] : [ask.slice(0, cut), ask.slice(cut + 1)];
+    }),
+  );
+  // A whole number of levels, from 1 up, written in digits alone: as many as a plan can be deep, so there is no
+  // limit short of the numbers that can be counted with exactly. Anything else is no zoom.
+  const levels = /^[1-9]\d*$/.test(asked.get("zoom") ?? "") ? Number(asked.get("zoom")) : NaN;
+  const zoom = Number.isSafeInteger(levels) ? levels : null;
+  const into = (asked.get("in") ?? "").split("/").map(decoded).filter(Boolean);
+  return { view: view ?? "board", open: !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : { kind: "task", id }, zoom, into };
 }
 
-const routeOf = (view, open) => `#${view}${open ? `/${open.kind === "project" ? "project:" : ""}${encodeURIComponent(open.id)}` : ""}`;
+function routeOf(view, open, zoom = state.zoom, into = state.into) {
+  const asks = [into.length > 0 && `in=${into.map(encodeURIComponent).join("/")}`, zoom !== null && `zoom=${zoom}`].filter(Boolean).join("&");
+  return `#${view}${open ? `/${open.kind === "project" ? "project:" : ""}${encodeURIComponent(open.id)}` : ""}${asks ? `?${asks}` : ""}`;
+}
 const sameItem = (a, b) => Boolean(a && b && a.kind === b.kind && a.id === b.id);
+const sameTrail = (a, b) => a.length === b.length && a.every((id, at) => id === b[at]);
 
-/** Goes to an address as a new entry in the browser's history. The entry remembers the items the panel came through. */
-function go(view, open, trail = []) {
-  const route = routeOf(view, open);
+/**
+ * Goes to an address as a new entry in the browser's history. The entry remembers the items the panel came
+ * through. The zoom stays as it is unless another one is given.
+ */
+function go(view, open, trail = [], { zoom = state.zoom, into = state.into } = {}) {
+  const route = routeOf(view, open, zoom, into);
   if (route === location.hash) return;
   history.pushState({ trail }, "", route);
   applyRoute();
 }
 
+/**
+ * The project that was selected when the page was locked out, from then until it is let in again; `undefined` at
+ * every other time, and when the page was loaded locked out and never knew. The selection is not part of the
+ * address and so belongs to no entry of the browser's history: it is the same on every entry the person goes to
+ * while the page is locked out, and those are given this one, not the selection the page was emptied of.
+ */
+let projectLockedOut;
+
+/**
+ * Locked out, the address names the view and nothing of the plan: the groups that were zoomed into and the item
+ * that was open are IDs of the plan, and the address is there for anyone to read. Where the page was is not
+ * lost for that. It is put away with the entry in the browser's history, which is where the address itself was
+ * kept, together with the project that was selected: not in the document and not in the address. An entry that
+ * has an address put away keeps that address, so that a page that is locked out twice, or loaded again while
+ * locked out, still knows where it was; the project is the one the page was locked out with, when it knows it.
+ */
+function putRouteAway() {
+  const bare = `#${readRoute().view}`;
+  const before = history.state?.kept;
+  const kept = { route: before ? before.route : location.hash, project: projectLockedOut !== undefined ? projectLockedOut : (before?.project ?? null) };
+  history.replaceState({ ...history.state, kept }, "", location.hash === "" || location.hash === bare ? undefined : bare);
+}
+
+/**
+ * Puts the address of an entry back where it was put away, and says which project was put away with it, or
+ * `undefined` when nothing was. Called when the service lets the page in, and for an entry that was gone to
+ * while the page was locked out and is come back to afterwards.
+ */
+function takeRouteBack() {
+  const { kept, ...rest } = history.state ?? {};
+  if (!kept) return undefined;
+  history.replaceState(rest, "", kept.route || undefined);
+  return kept.project ?? null;
+}
+
+/**
+ * Let in again, the page is where it was: the address says so again, and the page shows what it says, as a
+ * reload of that address would, with the project that was selected. What is no longer in the plan is dropped by
+ * the checks that follow every reading.
+ */
+function comeBack() {
+  const put = takeRouteBack();
+  const project = projectLockedOut !== undefined ? projectLockedOut : put;
+  projectLockedOut = undefined;
+  if (project === undefined) return;
+  const route = readRoute();
+  Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, trail: history.state?.trail ?? [], project });
+}
+
 /** Shows what the address says: called when it changes, by this page or by Back and Forward. */
 function applyRoute() {
+  // Back and Forward lead to addresses that name groups and items too: locked out, they are put away as well.
+  // An entry that was gone to then, and is come back to now that the page is let in, has its address again.
+  if (locked) putRouteAway();
+  else takeRouteBack();
   const route = readRoute();
   const viewChanged = route.view !== state.view;
+  const zoomChanged = route.zoom !== state.zoom || !sameTrail(route.into, state.into);
   state.view = route.view;
-  state.trail = history.state?.trail ?? [];
-  if (viewChanged) render();
+  state.zoom = route.zoom;
+  state.into = route.into;
+  state.group = route.into.at(-1) ?? null;
+  // The items the panel came through have titles: locked out, they stay with the entry and out of the page.
+  state.trail = locked ? [] : (history.state?.trail ?? []);
+  // The address may name a group that is not there: once the plan is known, it is put right.
+  if (state.loadedAt && !locked) settleZoom();
+  if (zoomChanged) boardMoved = true;
+  if (viewChanged || zoomChanged) render();
+  if (zoomChanged && state.loadedAt && !locked) sayZoom();
   if (!route.open) return hidePanel();
   const reopen = !sameItem(route.open, state.open) || $("panel").hidden;
   state.open = route.open;
   if (reopen && state.loadedAt) renderDetail();
 }
+
+/**
+ * Keeps of the trail of groups what the plan still has: each group must exist, and each one before the last must
+ * still hold the next, at whatever depth. When the group in view is gone the board is in the one before it. The
+ * address is put right in place, without a new entry in the browser's history. Says whether anything changed.
+ */
+function settleZoom() {
+  // A group that is gone drops out of the trail. The group before it stays when it still holds the one after,
+  // as it does through a group that was deleted and not for good.
+  const into = state.into.filter((id) => state.byId.has(id));
+  let from = into.length - 1;
+  while (from > 0 && holds(into[from - 1], into[from])) from--;
+  const kept = into.slice(Math.max(from, 0));
+  if (sameTrail(kept, state.into)) return false;
+  state.into = kept;
+  state.group = kept.at(-1) ?? null;
+  history.replaceState(history.state, "", routeOf(state.view, readRoute().open));
+  return true;
+}
+
+/** The trail that leads to a group: one step on from where the board is when the group is in there, and else the group alone. */
+function trailTo(id) {
+  const at = state.into.indexOf(id);
+  if (at >= 0) return state.into.slice(0, at + 1);
+  return state.group && heldIn(state.group).has(id) ? [...state.into, id] : [id];
+}
+
+/**
+ * Zooms into one group: the board, and the graph, then show only what it holds, with as many levels open as
+ * before. It is a step in the browser's history, so Back zooms out again. The keyboard goes to what stands for
+ * the group now, which is the way back out of it: the control that was used is gone with the cards.
+ */
+function zoomInto(id) {
+  go(state.view, null, [], { into: trailTo(id) });
+  keyboardTo(placeOf(id));
+}
+
+/**
+ * Zooms back out to a step of the trail: 0 is out of every group. The keyboard goes to what stands for the group
+ * that was left: on the board its card, and over the graph, which has no cards, the way out of the group it is
+ * still in, or the line that says what is in view.
+ */
+function zoomOut(steps) {
+  const left = state.into[steps];
+  go(state.view, null, [], { into: state.into.slice(0, steps) });
+  keyboardTo(placeOf(left, ".zoom-into"));
+}
+
+/** The timer that empties what was said of a zoom, so that it is not found on the page later, when it no longer holds. */
+let said = null;
+
+/**
+ * Says a zoom to a screen reader, once and in a few words: how far the board is zoomed, where it is, and how much
+ * that comes to. Nothing else says it. The cards, the counts and the trail are in no live region, so a board that
+ * is drawn again is not read out card by card; and the level between the zoom's two buttons is read with each
+ * button, not whenever it changes.
+ */
+function sayZoom() {
+  const group = state.group ? state.byId.get(state.group) : null;
+  const project = state.projects.find((p) => projectRef(p) === state.project);
+  const named = group ?? project;
+  const where = named ? `${named.id} ${named.title.length > 60 ? `${named.title.slice(0, 59)}…` : named.title}` : "all projects";
+  const counts = $("summary").firstElementChild?.textContent ?? "";
+  $("zoom-said").textContent = `${state.view === "board" ? `${levelName(state.level)} in` : "Graph of"} ${where}: ${counts}.`;
+  clearTimeout(said);
+  said = setTimeout(() => ($("zoom-said").textContent = ""), 5000);
+}
+
+/** Opens one level more or one fewer, when there is one. */
+function stepLevel(by) {
+  const { deepest = 0, level = null } = state;
+  const to = (level ?? deepest) + by;
+  if (deepest < 2 || to < 1 || to > deepest) return;
+  go(state.view, null, [], { zoom: to >= deepest ? null : to });
+}
+$("level-out").addEventListener("click", () => stepLevel(-1));
+$("level-in").addEventListener("click", () => stepLevel(1));
 
 /** Opens an item in the panel. Opened from inside the panel, it remembers the item it came from. */
 /** Finds the control the panel was opened from, as it is now, so that the keyboard can go back to it. */
@@ -904,9 +1311,9 @@ async function renderDetail(more) {
           },
           watched.has(item.id) ? "Watching. Stop" : "Tell me when it is done",
         ),
-        item.kind === "task" && item.progress && el(
+        item.kind === "task" && item.progress && state.byId.has(item.id) && el(
           "button",
-          { class: "open-group", type: "button", onclick: () => ((state.group = item.id), closeItem(), render()) },
+          { class: "open-group", type: "button", onclick: () => zoomInto(item.id) },
           `Show only this group (${item.progress.total} ${item.progress.total === 1 ? "task" : "tasks"})`,
         ),
       ),
@@ -992,7 +1399,7 @@ function hidePanel() {
   state.have = null;
   state.further = null;
   state.troubled = false;
-  if (inside) panelOpener?.()?.focus({ preventScroll: true });
+  if (inside) keyboardTo(panelOpener);
   panelOpener = null;
   document.title = state.instance?.name ? `${state.instance.name} · Vigile` : "Vigile";
 }
@@ -1105,22 +1512,52 @@ $("graph-draw").addEventListener("click", () => {
   render();
 });
 
+/** The card of a task on the board, or the button beside it that zooms into the group, when the board has one. */
+const controlOf = (id, kind = ".card") => [...$("board").querySelectorAll(kind)].find((control) => control.dataset.id === id) ?? null;
+
 /**
- * Which control has the keyboard, told in a way that outlives the drawing: a card by its task, a project by its
- * ID, a column's "show all" by its column. Drawing the board again replaces these, and whoever was on one with
- * the keyboard must still be on it afterwards.
+ * A place for the keyboard that is not a control but a task: wherever that task shows now. `kind` says which of
+ * its two controls is wanted first, its card or the button that zooms into it.
+ */
+const placeOf = (id, kind = ".card") => Object.assign(() => null, { ofBoard: true, item: id, kind });
+
+/**
+ * Which control has the keyboard, told in a way that outlives the drawing: a card by its task, and so the button
+ * that zooms into a group; a project by its ID; a column's "show all" by its column; a step of the trail by how
+ * far out it leads. Drawing the board again replaces these, and whoever was on one with the keyboard must still
+ * be on it afterwards. A control of the board, of the line above it, of its zoom or of the graph's tools can also
+ * go out of sight or be gone for good, when the board is zoomed, a group is left or the view changes: its place
+ * is marked `ofBoard`, and names the task it stands for when it has one, so that `whereNow` can find what
+ * stands for it afterwards.
  */
 function keyboardPlace() {
   const at = document.activeElement;
   if (!at?.closest) return null;
-  if (at.matches("#board .card")) {
+  const ofBoard = (find, about = {}) => Object.assign(find, { ofBoard: true, ...about });
+  if (at.matches("#board .card, #board .zoom-into")) {
     const id = at.dataset.id;
-    return () => [...$("board").querySelectorAll(".card")].find((card) => card.dataset.id === id);
+    const kind = at.matches(".card") ? ".card" : ".zoom-into";
+    return ofBoard(() => controlOf(id, kind), { item: id, kind });
   }
+  // The line above the board is written again with it. The way out of a group stands for that group, and a step
+  // of the trail, which is known by how far out it leads, for the group it names. Which group that is, is read
+  // from the control itself: by now the page may be somewhere else already.
+  if (at.matches("#scope .leave")) {
+    const group = at.dataset.group;
+    return ofBoard(() => [...$("scope").querySelectorAll(".leave")].find((button) => button.dataset.group === group), { item: group ?? null, kind: ".zoom-into" });
+  }
+  if (at.matches("#scope .crumb")) {
+    const group = at.dataset.group;
+    return ofBoard(() => [...$("scope").querySelectorAll(".crumb")].find((crumb) => crumb.dataset.group === group), { item: group ?? null, kind: ".zoom-into" });
+  }
+  if (at.matches("#scope .scope-text")) return ofBoard(() => $("scope").querySelector(".scope-text"));
   if (at.matches("#board .more")) {
     const key = at.closest(".column").dataset.key;
-    return () => [...$("board").querySelectorAll(".column")].find((column) => column.dataset.key === key)?.querySelector(".more");
+    return ofBoard(() => [...$("board").querySelectorAll(".column")].find((column) => column.dataset.key === key)?.querySelector(".more"));
   }
+  // The board's zoom and the graph's tools are not drawn again, and are out of sight in the other view, or
+  // where there is nothing to zoom.
+  if (at.closest("#levels, #graph-panel")) return ofBoard(() => (at.isConnected ? at : null));
   const project = at.closest("#projects .project, #projects .project-chip");
   if (project) {
     const id = project.querySelector(".project-id")?.textContent;
@@ -1136,12 +1573,94 @@ function keyboardPlace() {
   return null;
 }
 
+/**
+ * Whether a control can take the keyboard: it is on the page, drawn, and in sight. A card on its way to another
+ * column waits unseen where it will land while a copy of it travels: wanted by the keyboard, it lands at once.
+ */
+function reachable(control) {
+  if (!control?.isConnected) return null;
+  const flying = control.matches("#board .card, #board .zoom-into") ? flights.get(control.dataset.id) : null;
+  if (flying) {
+    flights.delete(control.dataset.id);
+    for (const animation of flying.getAnimations()) animation.cancel();
+    flying.remove();
+    keepMarks();
+  }
+  return control.getClientRects().length > 0 && getComputedStyle(control).visibility !== "hidden" ? control : null;
+}
+
+/**
+ * What stands for a task on the page as it is now. On the board: its own card or its button to zoom, whichever
+ * `kind` asks for first; else the card of the nearest closed group that holds it. In either view, when the task
+ * is a group the page is in or came through: the way out of it, or its step of the trail.
+ */
+function standsFor(id, kind) {
+  if (state.view === "board") {
+    const own = reachable(controlOf(id, kind)) ?? reachable(controlOf(id));
+    if (own) return own;
+    const reveal = (task, wanted = ".card") => {
+      if (!task || !state.boardCards?.some((card) => card.id === task.id)) return null;
+      state.expanded.add(boardColumn(task));
+      draw();
+      return reachable(controlOf(task.id, wanted)) ?? reachable(controlOf(task.id));
+    };
+    // The task belongs on this board but its column stopped at its rendering limit. Open that column rather than
+    // treating the task as absent and sending the keyboard to the board's zoom control.
+    const revealed = reveal(state.byId.get(id), kind);
+    if (revealed) return revealed;
+    // Up through what holds it, the nearest first, and not by a function that calls itself.
+    const seen = new Set([id]);
+    const queue = [id];
+    for (let next = 0; next < queue.length; next++) {
+      const held = state.byId.get(queue[next]);
+      for (const holder of held ? holdersOf(held) : []) {
+        if (seen.has(holder) || !state.byId.has(holder)) continue;
+        seen.add(holder);
+        const around = state.closed?.has(holder) ? reachable(controlOf(holder)) : null;
+        if (around) return around;
+        if (state.closed?.has(holder)) {
+          const revealedHolder = reveal(state.byId.get(holder));
+          if (revealedHolder) return revealedHolder;
+        }
+        queue.push(holder);
+      }
+    }
+  }
+  const step = state.into.indexOf(id);
+  if (step < 0) return null;
+  const crumb = [...$("scope").querySelectorAll(".crumb")].find((button) => button.dataset.step === String(step + 1));
+  return (step < state.into.length - 1 ? reachable(crumb) : null) ?? reachable($("scope").querySelector(".leave"));
+}
+
+/**
+ * Where the keyboard goes now, for a place it was at before the page was drawn again. Every case goes through
+ * here: a redraw, a zoom, a group entered or left, a change of view, a panel that closes. The same control, when
+ * it is still there and in sight. For a control of the board that is not: what stands for its task now; and
+ * failing that the board's zoom, the way out of the group, the line that says what is in view, or the link to
+ * the view, whichever is in sight first. So the keyboard is never left on something hidden or gone. Elsewhere on
+ * the page, where controls do not come and go with the zoom, it is the same control or nothing, as it always was.
+ */
+function whereNow(place) {
+  const same = place();
+  if (!place.ofBoard) return same ?? null;
+  return (
+    reachable(same) ??
+    (place.item ? standsFor(place.item, place.kind) : null) ??
+    [state.view === "board" ? $(state.level === null ? "level-out" : "level-in") : null, $("scope").querySelector(".leave"), $("scope").querySelector(".scope-text"), $(`view-${state.view}`)].find(reachable) ??
+    null
+  );
+}
+
+/** Puts the keyboard where it goes now, without scrolling: the reader keeps their place on the page as well. */
+function keyboardTo(place) {
+  const to = place ? whereNow(place) : null;
+  if (to && document.activeElement !== to) to.focus({ preventScroll: true });
+}
+
 function render() {
   const place = keyboardPlace();
   draw();
-  // Put back without scrolling: the reader keeps their place on the page as well.
-  const again = place?.();
-  if (again && document.activeElement !== again) again.focus({ preventScroll: true });
+  keyboardTo(place);
 }
 
 /**
@@ -1154,17 +1673,30 @@ const TYPING_PAUSE_MS = 300;
 
 function draw() {
   renderProjects();
-  const tasks = state.tasks.filter(matches);
-  renderSummary(tasks);
-  $("empty").hidden = tasks.length > 0;
-  $("empty").textContent = state.tasks.length === 0 ? "No tasks yet." : state.filter.trim() ? `No task matches "${state.filter.trim()}".` : "No tasks in this project.";
+  const inView = tasksInView();
+  const text = filterText();
+  const tasks = inView.filter((task) => matchesFilter(task, text));
   const graph = state.view === "graph";
+  // The zoom is the board's: the graph has its own way of showing groups closed, and draws every task in view.
+  const board = graph ? null : boardAt(inView);
+  state.boardCards = board?.cards ?? null;
+  state.level = board ? board.level : null;
+  state.deepest = board ? board.deepest : 0;
+  state.closed = board ? board.closed : null;
+  renderSummary(board ? board.cards : tasks, tasks.length);
+  showLevels(board);
+  $("empty").hidden = tasks.length > 0;
+  $("empty").textContent =
+    state.tasks.length === 0 ? "No tasks yet."
+    : state.filter.trim() ? `No task matches "${state.filter.trim()}".`
+    : state.group ? `${state.group} holds no tasks${state.project ? " in this project" : ""}.`
+    : "No tasks in this project.";
   // Full screen hides the header and the views. With no graph on screen, which is where its way out is, it ends.
   if (state.full && (!graph || tasks.length === 0)) stopFullScreen();
   document.body.classList.toggle("graph-view", graph);
   document.body.classList.toggle("graph-full", graph && state.full);
   document.body.classList.toggle("focus", state.focus);
-  document.body.classList.toggle("scoped", Boolean(state.project || state.group || state.filter.trim()));
+  document.body.classList.toggle("scoped", Boolean(state.project || state.group || state.filter.trim() || state.level));
   $("focus").setAttribute("aria-pressed", String(state.focus));
   $("focus").setAttribute("aria-label", state.focus ? "Show everything above the board again" : "Hide everything above the board");
   $("graph-full").setAttribute("aria-pressed", String(state.full));
@@ -1178,11 +1710,36 @@ function draw() {
     if (state.view === view) $(`view-${view}`).setAttribute("aria-current", "page");
     else $(`view-${view}`).removeAttribute("aria-current");
   }
-  if (!graph) renderBoard(tasks);
+  linkViews();
+  if (board) renderBoard(board.cards, board.closed);
   else if (typing === null) renderGraphView(tasks);
   fitBoard();
 }
+/** The links to the two views lead to the same group, and the board is at the same zoom when it is come back to. */
+function linkViews() {
+  for (const view of ["board", "graph"]) $(`view-${view}`).setAttribute("href", routeOf(view, null));
+}
 
+/**
+ * The control above the board that zooms it: out to fewer levels of groups, in to more, with the level in words
+ * between the two. Where nothing in view holds anything there is one level only, and the control steps aside.
+ * A button with nothing further to go to says so and stays where it is, so that the keyboard does not lose it.
+ */
+function showLevels(board) {
+  $("levels").hidden = !board || board.deepest < 2;
+  // Out of sight it says nothing: how many levels were open says how deep the plan is.
+  $("level").textContent = $("levels").hidden ? "" : levelName(board.level);
+  if ($("levels").hidden) return;
+  const ends = { "level-out": board.level === 1, "level-in": board.level === null };
+  const titles = {
+    "level-out": ends["level-out"] ? "Only the top level is shown: there is nothing further to zoom out to" : "Zoom out: close one level of groups",
+    "level-in": ends["level-in"] ? "Everything is shown: there is nothing further to zoom in to" : "Zoom in: open one more level of groups",
+  };
+  for (const id of ["level-out", "level-in"]) {
+    $(id).setAttribute("aria-disabled", String(ends[id]));
+    $(id).title = titles[id];
+  }
+}
 
 function showKeyForm(message) {
   // Leave a form that already says this alone, so a refresh never wipes a key that is being typed.
@@ -1222,8 +1779,32 @@ function lockOut(refused = "") {
   // The key that was refused is forgotten. Another one, given in another tab while the answer was on its way,
   // was not refused and stays.
   if (refused) localStorage.removeItemIf(KEY_NAME, refused);
-  // Nothing is loaded any more, and the header must go on saying that the page is not connected.
-  Object.assign(state, { projects: [], tasks: [], byId: new Map(), snapshot: "", shown: null, drawn: null, item: null, have: null, further: null, troubled: false, loadedAt: null, loadedMs: null, failed: true });
+  // Where the page was names groups and items of the plan. It leaves the address, and is kept with the entry in
+  // the browser's history for when the page is let in again, with the project that is selected now: the page is
+  // about to be emptied of it. A page that is locked out already has none to keep, and one that was loaded
+  // locked out goes by what was put away with its entry before.
+  if (state.loadedAt) projectLockedOut = state.project;
+  else if (projectLockedOut === undefined && history.state?.kept) projectLockedOut = history.state.kept.project ?? null;
+  putRouteAway();
+  // Nothing is loaded any more, and the header must go on saying that the page is not connected. Nor does the
+  // page go on holding where it was, what was open or which project was selected: all of it is of the plan.
+  Object.assign(state, { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, shown: null, drawn: null, item: null, have: null, further: null, troubled: false, openTitle: "", loadedAt: null, loadedMs: null, failed: true });
+  $("instance").textContent = "";
+  Object.assign(state, { project: null, zoom: null, into: [], group: null, open: null, trail: [] });
+  holdings = { of: null, held: new Map(), inside: new Map() };
+  panelOpener = null;
+  // What was typed into the filter is often a title or an ID, and is repeated in the line that says what is in
+  // view and where the page says that nothing matches. It goes before the page is drawn again, and with it the
+  // drawing of the graph that waits for the typing to pause.
+  state.filter = "";
+  $("filter").value = "";
+  clearTimeout(typing);
+  typing = null;
+  // What was said of a zoom for a screen reader names a group or a project, and sits outside what is hidden
+  // below. It goes now, and so does the timer that would have emptied it later.
+  clearTimeout(said);
+  said = null;
+  $("zoom-said").textContent = "";
   $("main").hidden = true;
   $("you").textContent = "";
   $("panel").hidden = true;
@@ -1264,14 +1845,22 @@ function lockOut(refused = "") {
 
 async function refresh() {
   try {
+    const session = sessions;
     const turn = ++readings;
     const [instance, projects, tasks] = await Promise.all([api("instance"), all("list-projects", "projects"), all("list-tasks", "tasks")]);
+    // Another request or tab may have locked the page while these answers were on their way. They belong to the
+    // credential and route from before that lockout and may restore neither the plan nor its hidden address.
+    if (session !== sessions) return;
     // Redraw only when something changed, so a refresh never swaps a card out from under a click.
     const snapshot = JSON.stringify([projects, tasks]);
     const changed = snapshot !== state.snapshot;
     Object.assign(state, { instance, projects, tasks, snapshot, byId: new Map(tasks.map((t) => [t.id, t])), failed: false });
+    // The service lets the page in: when it was locked out before, also before it was loaded again, it is
+    // where it was then.
+    comeBack();
     if (state.project && !projects.some((p) => projectRef(p) === state.project)) state.project = null;
-    if (state.group && !state.byId.has(state.group)) state.group = null;
+    // A group the board was in may be gone, or no longer hold the one after it in the trail.
+    const left = settleZoom();
     $("instance").textContent = instance.name ?? "";
     if (!state.open) document.title = instance.name ? `${instance.name} · Vigile` : "Vigile";
     $("you").textContent = `${instance.you.username}${instance.you.keyless ? " (no key)" : ""}`;
@@ -1293,9 +1882,12 @@ async function refresh() {
     showWatched();
     showAge();
     // A change that arrives while the board is in sight is shown as movement, so the eye can follow it.
-    const before = changed && !first && state.view === "board" ? cardPlaces() : null;
+    // Not when the board had to leave a group: it then shows other cards, and none of them moved.
+    const before = changed && !first && !left && state.view === "board" ? cardPlaces() : null;
     if (changed) render();
     else fitBoard();
+    // The plan took away the group the page was in: where it is now is said, as when the person zooms.
+    if (left && !first) sayZoom();
     if (before) showMoves(before);
     announce(tasks, (id) => state.byId.get(id) ?? null, turn);
     // An item named in the address opens once there is data; an open one follows the changes, and one that
@@ -1541,7 +2133,7 @@ function cardPlaces() {
       const room = card.closest(".cards").getBoundingClientRect();
       const inSight = box.bottom > room.top && box.top < room.bottom;
       const from = { left: box.left, top: inSight ? box.top : box.top < room.top ? room.top : room.bottom - box.height, width: box.width, height: box.height };
-      return [card.dataset.id, { box, from, inSight, column: card.closest(".column").dataset.key, status: card.dataset.status, node: card }];
+      return [card.dataset.id, { box, from, inSight, column: card.closest(".column").dataset.key, status: card.dataset.status, shows: shows.get(card), node: card }];
     }),
   );
 }
@@ -1595,6 +2187,9 @@ function keepMarks() {
     // Drawn again, the ring goes on fading from where it was instead of starting over.
     card.style.animationDelay = at === undefined ? "" : `${-Math.round(now - at)}ms`;
     card.style.visibility = flights.has(card.dataset.id) ? "hidden" : "";
+    // The button that zooms into a closed group sits beside its card, and is out of sight with it.
+    const beside = card.parentElement.matches(".holder") ? card.nextElementSibling : null;
+    if (beside) beside.style.visibility = card.style.visibility;
   }
 }
 
@@ -1634,9 +2229,11 @@ function showMoves(before) {
     after.add(id);
     const was = before.get(id);
     const now = card.getBoundingClientRect();
+    // A closed group's card moves together with the button beside it that zooms into the group.
+    const whole = card.parentElement.matches(".holder") ? card.parentElement : card;
     if (!was) {
       mark(id);
-      if (!still) card.animate([{ opacity: 0, transform: "scale(0.9)" }, { opacity: 1, transform: "none" }], { duration: 340, easing: "ease-out" });
+      if (!still) whole.animate([{ opacity: 0, transform: "scale(0.9)" }, { opacity: 1, transform: "none" }], { duration: 340, easing: "ease-out" });
     } else if (was.column !== card.closest(".column").dataset.key) {
       mark(id);
       // A card that is already on its way turns towards its new place from where it is now: the copy that was
@@ -1653,8 +2250,9 @@ function showMoves(before) {
         flying.remove();
       }
       // The card that has the keyboard stays where the keyboard can reach it: hidden for a flight it would lose
-      // it, so it is ringed in its new place and does not travel.
-      if (still || document.activeElement === card || travellers++ >= MOST) continue;
+      // it, so it is ringed in its new place and does not travel. The same when the keyboard is on the button
+      // beside it that zooms into the group, which is hidden with the card.
+      if (still || whole.contains(document.activeElement) || travellers++ >= MOST) continue;
       // Where it lands: its new place, or the nearest edge of its column when that place is scrolled out of sight.
       const room = card.closest(".cards").getBoundingClientRect();
       const inSight = now.bottom > room.top && now.top < room.bottom;
@@ -1671,9 +2269,10 @@ function showMoves(before) {
       });
     } else {
       // A card may change state and stay in its column, as a bug does in the column for bugs: it is ringed too.
-      if (was.status !== card.dataset.status) mark(id);
+      // So is the card of a closed group when anything it shows changed: of itself, or of the tasks it stands for.
+      if (was.status !== card.dataset.status || was.shows !== shows.get(card)) mark(id);
       if (still || Math.abs(was.box.left - now.left) >= 1 || Math.abs(was.box.top - now.top) < 1) continue;
-      card.animate([{ transform: `translateY(${was.box.top - now.top}px)` }, { transform: "none" }], { duration: 260, easing: "ease-in-out" });
+      whole.animate([{ transform: `translateY(${was.box.top - now.top}px)` }, { transform: "none" }], { duration: 260, easing: "ease-in-out" });
     }
   }
   let leavers = 0;
@@ -2320,7 +2919,8 @@ document.addEventListener("visibilitychange", () => !locked && (auto || state.fa
 
 {
   const route = readRoute();
-  Object.assign(state, { view: route.view, open: route.open, trail: history.state?.trail ?? [] });
+  Object.assign(state, { view: route.view, open: route.open, trail: history.state?.trail ?? [], zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null });
+  linkViews();
 }
 setAutoRefresh(localStorage.getItem(AUTO_NAME) === "on");
 saveWatched();

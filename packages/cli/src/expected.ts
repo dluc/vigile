@@ -130,6 +130,7 @@ const TASK: Record<string, Sort> = {
   size: orNothing(NUMBER),
   version: VERSION_OF_ITEM,
   contained_in: refsTo(["project", "task"], "a list of the projects and tasks it is in"),
+  live_containers: optional(refsTo(["project", "task"], "a list of the live projects and tasks it is inside of")),
   depends_on: refsTo(["task", "project"], "a list of the tasks and projects it depends on"),
   assigned_to: listOf(NAME_OF_USER, "a list of usernames"),
   is_assigned: YES_NO,
@@ -241,7 +242,7 @@ const theItem =
 /** Where a list that is read on by itself stands in an answer of `get`: a list of links under its name, the timeline, the history. */
 type At = paging.At;
 /** The lists of a task's summary, which `get` cuts and counts, and which are read on as lists of links. */
-const COUNTED = ["contained_in", "depends_on", "assigned_to", "waiting_for"] as const;
+const COUNTED = ["contained_in", "live_containers", "depends_on", "assigned_to", "waiting_for"] as const;
 
 /**
  * What an answer of `get` says of its lists that go on, `more`, held against those lists. The service names a
