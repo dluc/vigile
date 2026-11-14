@@ -1119,7 +1119,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.size(1280, 900);
       const panel = () =>
         page.run<{ same: boolean; selected: number; focus: string; priority: string }>(
-          "const watch = [...document.querySelectorAll('#detail button')].find((b) => /Tell me when/.test(b.textContent)); return { same: document.querySelector('#detail .detail').dataset.mark === 'kept', selected: String(getSelection()).length, focus: document.activeElement === watch ? 'watch' : document.activeElement.tagName, priority: [...document.querySelectorAll('#detail dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling.textContent ?? '' }",
+          "const watch = [...document.querySelectorAll('#detail button')].find((b) => /Tell me when/.test(b.textContent)); const priority = [...document.querySelectorAll('#detail dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling; return { same: document.querySelector('#detail .detail').dataset.mark === 'kept', selected: String(getSelection()).length, focus: document.activeElement === watch ? 'watch' : document.activeElement.tagName, priority: priority?.querySelector('output')?.value ?? priority?.textContent ?? '' }",
         );
       const other = (await run("create_task", { title: "Changes elsewhere", description: "d", project: "WEB" })) as { id: string };
       const twice: string[] = [];
@@ -1142,7 +1142,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         // The open task itself changes: the panel is drawn again, and the keyboard is on the same button of the new drawing.
         const current = await run("get", { id: ids.address });
         await run("update_task", { id: ids.address, version: current.version, priority: current.priority + 1 });
-        await page.until(`return [...document.querySelectorAll('#detail dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling.textContent === '${current.priority + 1}'`, "the panel to show the new priority", 4000);
+        await page.until(`return [...document.querySelectorAll('#detail dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling.querySelector('output')?.value === '${current.priority + 1}'`, "the panel to show the new priority", 4000);
         const after = await panel();
         assert.deepEqual([after.same, after.focus], [false, "watch"], "drawn anew, with the keyboard on the watch button again");
         // The fold of the history counts its entries in its label, which every change makes say something else:
@@ -1168,12 +1168,220 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await page.run(`${both}.at(-1).focus()`);
         const held = (await run("get", { id: group.id })) as { version: number; priority: number };
         await run("update_task", { id: group.id, version: held.version, priority: held.priority + 1 });
-        await page.until(`return [...document.querySelectorAll('#detail dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling.textContent === '${held.priority + 1}'`, "the panel to be drawn again", 4000);
+        await page.until(`return [...document.querySelectorAll('#detail dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling.querySelector('output')?.value === '${held.priority + 1}'`, "the panel to be drawn again", 4000);
         assert.equal(await page.run<string>("return document.activeElement.closest('.relation')?.dataset.relation ?? 'elsewhere'"), relations.at(-1), "the keyboard is on the link under the same heading");
       } finally {
         for (const id of twice) await run("delete", { id, version: (await run("get", { id })).version });
         await run("delete", { id: other.id, version: (await run("get", { id: other.id })).version });
         await page.run("localStorage.removeItem('vigile.auto-refresh')");
+        await load();
+      }
+    });
+
+    it("raises and lowers priority from the panel without losing quick clicks or overwriting a concurrent change", async () => {
+      await page.size(1280, 900);
+      const first = (await run("create_task", { title: "Priority from the page", description: "d", project: "WEB", priority: 1 })) as { id: string; version: number };
+      const other = (await run("create_task", { title: "Priority to pass", description: "d", project: "WEB", priority: 2 })) as { id: string; version: number };
+      try {
+        const qualifiedBookmark = `task:${first.id.toLowerCase().replace(/-0+(?=\d)/, "-")}`;
+        await load(`/#board/${qualifiedBookmark}`);
+        await page.until("return document.getElementById('priority-up') && document.querySelector('.priority-control output')?.value === '1'", "the priority controls");
+        assert.deepEqual(
+          await page.run("return [document.getElementById('priority-down').getAttribute('aria-label'), document.getElementById('priority-up').getAttribute('aria-label'), document.querySelector('.priority-control output').getAttribute('aria-label')]"),
+          ["Lower priority from 1 to 0", "Raise priority from 1 to 2", "Priority"],
+        );
+
+        // Four clicks in one turn become one change of +2: no click races another or is lost.
+        await page.run("const up = document.getElementById('priority-up'); const down = document.getElementById('priority-down'); up.click(); up.click(); up.click(); down.click()");
+        await page.until("return document.querySelector('.priority-control output')?.value === '3' && /Priority is now 3/.test(document.querySelector('.priority-result')?.textContent)", "all quick clicks to be stored");
+        let changed = await run("get", { id: first.id });
+        assert.deepEqual([changed.priority, changed.version], [3, first.version + 1], "one stored change carries all four clicks");
+        const next = (await run("list_next_tasks", {})).tasks.map((task: any) => task.id);
+        assert.ok(next.indexOf(first.id) < next.indexOf(other.id), "the raised priority changes execution order");
+
+        // Clicks that arrive after the first write has been stored but before its answer is released are queued
+        // for a second write, which uses the version returned by the first.
+        await page.run(`
+          window.priorityFetch = window.fetch;
+          window.priorityHold = new Promise((resolve) => (window.releasePriority = resolve));
+          window.priorityStarted = false;
+          window.fetch = async (url, options) => {
+            const reply = await window.priorityFetch(url, options);
+            if (!window.priorityStarted && String(url).endsWith('/api/update-task')) {
+              window.priorityStarted = true;
+              await window.priorityHold;
+            }
+            return reply;
+          };
+        `);
+        await page.click("#priority-up");
+        await page.until("return window.priorityStarted", "the first priority write to be in flight");
+        await page.run("document.getElementById('priority-up').click(); document.getElementById('priority-up').click()");
+        await page.until("return /2 steps waiting/.test(document.querySelector('.priority-result')?.textContent)", "the clicks during the write to be announced as waiting");
+        await page.run("window.releasePriority()");
+        await page.until("return document.querySelector('.priority-control output')?.value === '6' && /Priority is now 6/.test(document.querySelector('.priority-result')?.textContent)", "the queued clicks to be stored after the first write");
+        changed = await run("get", { id: first.id });
+        assert.deepEqual([changed.priority, changed.version], [6, first.version + 3], "the second write used the version returned by the first");
+        await page.run("window.fetch = window.priorityFetch; delete window.priorityFetch; delete window.priorityHold; delete window.releasePriority; delete window.priorityStarted");
+
+        // A click waiting behind a successful write still belongs to the version that write returned. If another
+        // caller moves the version before the reread, the queued click conflicts instead of silently adopting it.
+        await page.run(`
+          window.priorityFetch = window.fetch;
+          window.priorityHold = new Promise((resolve) => (window.releasePriority = resolve));
+          window.priorityStarted = false;
+          window.fetch = async (url, options) => {
+            const reply = await window.priorityFetch(url, options);
+            if (!window.priorityStarted && String(url).endsWith('/api/update-task')) {
+              window.priorityStarted = true;
+              await window.priorityHold;
+            }
+            return reply;
+          };
+        `);
+        await page.click("#priority-up");
+        await page.until("return window.priorityStarted", "another first write to be in flight");
+        await page.run("document.getElementById('priority-up').click()");
+        changed = await run("get", { id: first.id });
+        await run("update_task", { id: first.id, version: changed.version, priority: 10 });
+        await page.run("window.releasePriority()");
+        await page.until("return document.querySelector('.priority-control output')?.value === '10' && /changed elsewhere/.test(document.querySelector('.priority-result')?.textContent)", "the queued click to conflict with the concurrent version");
+        assert.equal((await run("get", { id: first.id })).priority, 10);
+        await page.run("window.fetch = window.priorityFetch; delete window.priorityFetch; delete window.priorityHold; delete window.releasePriority; delete window.priorityStarted");
+
+        // Keyboard activation survives the panel redraw and leaves the keyboard on the same control.
+        await page.run("document.getElementById('priority-up').focus()");
+        await page.key("Enter");
+        await page.until("return document.querySelector('.priority-control output')?.value === '11' && /Priority is now 11/.test(document.querySelector('.priority-result')?.textContent)", "the keyboard change to be stored");
+        assert.equal(await page.run("return document.activeElement.id"), "priority-up");
+
+        // Another caller wins between this page's request and the write. The page shows the current value and
+        // asks for the choice again; it never retries over the other change by itself.
+        await page.run(`
+          window.priorityFetch = window.fetch;
+          window.priorityConflict = true;
+          window.priorityRecoveryHold = new Promise((resolve) => (window.releasePriorityRecovery = resolve));
+          window.priorityRecovering = false;
+          window.fetch = async (url, options) => {
+            if (window.priorityConflict && String(url).endsWith('/api/update-task')) {
+              window.priorityConflict = false;
+              const asked = JSON.parse(options.body);
+              const reply = await window.priorityFetch(url, { ...options, body: JSON.stringify({ ...asked, priority: asked.priority + 10 }) });
+              await reply.json();
+            }
+            const reply = await window.priorityFetch(url, options);
+            if (!window.priorityConflict && !window.priorityRecovering && String(url).endsWith('/api/list-tasks')) {
+              window.priorityRecovering = true;
+              await window.priorityRecoveryHold;
+            }
+            return reply;
+          };
+        `);
+        await page.click("#priority-down");
+        await page.until("return window.priorityRecovering", "the conflict recovery to be reading the current plan");
+        await page.run("document.getElementById('priority-up').click()");
+        await page.until("return /1 step waiting/.test(document.querySelector('.priority-result')?.textContent)", "a click made during conflict recovery to be visible");
+        await page.run("window.releasePriorityRecovery()");
+        await page.until("return /changed elsewhere/.test(document.querySelector('.priority-result')?.textContent)", "the conflict to be shown");
+        changed = await run("get", { id: first.id });
+        assert.equal(changed.priority, 20, "the other caller's change was not overwritten");
+        assert.equal(await page.run("return document.querySelector('.priority-control output').value"), "20");
+        await page.click("#priority-up");
+        await page.until("return document.querySelector('.priority-control output')?.value === '21' && /Priority is now 21/.test(document.querySelector('.priority-result')?.textContent)", "a fresh choice after the conflict");
+        changed = await run("get", { id: first.id });
+        assert.equal(changed.priority, 21, "the click made during recovery was cleared, not submitted with the fresh one");
+
+        // A refusal is a confirmed non-change: the optimistic target goes back to the last confirmed value.
+        await page.run(`
+          window.fetch = async (url, options) => String(url).endsWith('/api/update-task')
+            ? new Response(JSON.stringify({ error: { code: 'forbidden', message: 'Not for this caller.' } }), { status: 403, headers: { 'content-type': 'application/json' } })
+            : window.priorityFetch(url, options);
+        `);
+        await page.click("#priority-up");
+        await page.until("return /was not changed/.test(document.querySelector('.priority-result')?.textContent)", "the refusal to be shown");
+        assert.equal(await page.run("return document.querySelector('.priority-control output').value"), "21", "the refused target is not shown as stored");
+        assert.equal((await run("get", { id: first.id })).priority, 21);
+
+        // No answer is an unknown outcome. Here the service stores the change and the connection then appears to
+        // fail: the page rereads before it says which priority is current.
+        await page.run(`
+          window.fetch = async (url, options) => {
+            if (!String(url).endsWith('/api/update-task')) return window.priorityFetch(url, options);
+            await window.priorityFetch(url, options);
+            throw new TypeError('connection ended after the write');
+          };
+        `);
+        await page.click("#priority-up");
+        await page.until("return document.querySelector('.priority-control output')?.value === '22' && /current priority is 22/.test(document.querySelector('.priority-result')?.textContent)", "the unknown outcome to be reread");
+        assert.equal((await run("get", { id: first.id })).priority, 22);
+
+        // A later change between this write's reply and the serialized load wins on screen too; the older reply
+        // is not cached over it.
+        await page.run(`
+          window.fetch = async (url, options) => {
+            const reply = await window.priorityFetch(url, options);
+            if (String(url).endsWith('/api/update-task')) {
+              const stored = await reply.clone().json();
+              await window.priorityFetch(url, { ...options, body: JSON.stringify({ id: stored.id, version: stored.version, priority: stored.priority + 5 }) });
+            }
+            return reply;
+          };
+        `);
+        await page.click("#priority-up");
+        await page.until("return document.querySelector('.priority-control output')?.value === '28' && /Priority is now 28/.test(document.querySelector('.priority-result')?.textContent)", "the latest fetched priority to replace the older reply");
+        assert.equal((await run("get", { id: first.id })).priority, 28);
+
+        // Leaving A, opening B and returning to A cannot create another worker for A while its write is in
+        // flight. The click after returning waits for the first answer and uses the version it returns.
+        await page.run(`
+          window.fetch = window.priorityFetch;
+          window.priorityHold = new Promise((resolve) => (window.releasePriority = resolve));
+          window.priorityStarted = false;
+          window.fetch = async (url, options) => {
+            if (!window.priorityStarted && String(url).endsWith('/api/update-task')) {
+              window.priorityStarted = true;
+              await window.priorityHold;
+            }
+            return window.priorityFetch(url, options);
+          };
+        `);
+        await page.click("#priority-up");
+        await page.until("return window.priorityStarted", "A's priority worker to be waiting");
+        await page.run(`location.hash = '#board/${other.id}'`);
+        await page.until("return document.querySelector('.priority-control')?.dataset.id === '" + other.id + "'", "B's panel");
+        await page.run("history.back()");
+        await page.until("return document.querySelector('.priority-control')?.dataset.id === '" + first.id + "'", "A's panel again");
+        await page.click("#priority-up");
+        await page.until("return /1 step waiting/.test(document.querySelector('.priority-result')?.textContent)", "A's returned panel to use its existing worker");
+        await page.run("window.releasePriority()");
+        await page.until("return document.querySelector('.priority-control output')?.value === '30' && /Priority is now 30/.test(document.querySelector('.priority-result')?.textContent)", "both serial priority choices to be stored");
+        changed = await run("get", { id: first.id });
+        assert.deepEqual([changed.priority, changed.version], [30, first.version + 13], "one worker kept the writes in version order across navigation");
+      } finally {
+        await page.run("if (window.priorityFetch) { window.fetch = window.priorityFetch; delete window.priorityFetch; delete window.priorityConflict; delete window.priorityRecoveryHold; delete window.releasePriorityRecovery; delete window.priorityRecovering; }");
+        for (const id of [first.id, other.id]) {
+          const item = await run("get", { id });
+          if (!item.deleted_at) await run("delete", { id, version: item.version });
+        }
+        await load();
+      }
+    });
+
+    it("does not offer a priority change for a deleted task", async () => {
+      const made = (await run("create_task", { title: "A deleted priority", description: "d", project: "WEB" })) as { id: string; version: number };
+      try {
+        await load(`/#board/${made.id}`);
+        await page.until("return document.getElementById('priority-up') && !document.getElementById('priority-up').disabled", "the live task's priority controls");
+        await run("delete", { id: made.id, version: made.version });
+        await page.click("#priority-up");
+        await page.until("return document.getElementById('priority-up')?.disabled && document.getElementById('priority-down')?.disabled", "the deleted task's disabled priority controls");
+        assert.equal(await page.run("return [...document.querySelectorAll('#detail .detail-head .pill')].some((pill) => pill.textContent === 'deleted')"), true);
+        assert.equal(await page.run("return document.querySelector('.priority-control output').value"), "0");
+        assert.equal(await page.run("return document.querySelector('.panel-card').contains(document.activeElement)"), true, "focus stays in the panel when the recovered button becomes disabled");
+      } finally {
+        await run("restore", { id: made.id });
+        const current = await run("get", { id: made.id });
+        await run("delete", { id: made.id, version: current.version });
         await load();
       }
     });
@@ -1255,7 +1463,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       page.run<{ hidden: boolean; title: string | null; version: string | null; priority: string | null; contains: string | null; links: number; more: string | null; history: number; changes: string | null; trouble: string | null; empty: string | null; retry: boolean }>(`
         const detail = document.getElementById('detail');
         const relation = detail.querySelector('.relation[data-relation="contains"]');
-        const fact = (name) => [...detail.querySelectorAll('.facts dt')].find((dt) => dt.textContent === name)?.nextElementSibling.textContent ?? null;
+        const fact = (name) => { const value = [...detail.querySelectorAll('.facts dt')].find((dt) => dt.textContent === name)?.nextElementSibling; return value?.querySelector('output')?.value ?? value?.textContent ?? null; };
         const history = detail.querySelector('.fold-block');
         return {
           hidden: document.getElementById('panel').hidden,
@@ -1485,7 +1693,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       try {
         await run("update_task", { id: group, version: before.version, priority: before.priority + 1 });
         await press("#refresh");
-        await page.until(`return [...document.querySelectorAll('#detail .facts dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling.textContent === ${JSON.stringify(String(before.priority + 1))} && !document.querySelector('#detail .not-read') && document.querySelectorAll('#detail .relation[data-relation="contains"] .link').length === 200`, "the rejected continuation to be replaced by a fresh one");
+        await page.until(`return [...document.querySelectorAll('#detail .facts dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling.querySelector('output')?.value === ${JSON.stringify(String(before.priority + 1))} && !document.querySelector('#detail .not-read') && document.querySelectorAll('#detail .relation[data-relation="contains"] .link').length === 200`, "the rejected continuation to be replaced by a fresh one");
         await links(200, "the already-open page after a fresh reading");
         const [whole, further] = [await asked("whole"), await asked("further")];
         assert.deepEqual([(await shown()).title, (await shown()).trouble], [was, null]);
@@ -6327,6 +6535,115 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
   });
 
   browserSuite("access", () => {
+    it("refreshes idle priority controls after a valid key is replaced", async () => {
+      const made = (await run("create_task", { title: "Priority after an idle key change", description: "d", project: "WEB", priority: 1 })) as { id: string; version: number };
+      const person = (await service.engine.execute("reset_user_key", "admin", { user: "user" })) as { api_key: string };
+      await load();
+      setValue(config, "auth.keyless_user", "");
+      await page.run(`localStorage.setItem('vigile.key', ${JSON.stringify(adminKey)})`);
+      try {
+        await load(`/#board/${made.id}`);
+        await page.until("return document.getElementById('priority-up')", "the idle priority control read with the admin key");
+        await page.run(`localStorage.setItem('vigile.key', ${JSON.stringify(person.api_key)})`);
+        await page.click("#priority-up");
+        await page.until("return document.getElementById('you').textContent.startsWith('user') && document.getElementById('priority-up')", "the panel to be reread with the replacement key");
+        await page.click("#priority-up");
+        await page.until("return document.querySelector('.priority-control output')?.value === '2' && /Priority is now 2/.test(document.querySelector('.priority-result')?.textContent)", "a choice from the reread panel to be stored");
+        assert.deepEqual([(await run("get", { id: made.id })).priority, (await run("get", { id: made.id })).version], [2, made.version + 1]);
+      } finally {
+        await page.run("localStorage.clear()");
+        setValue(config, "auth.keyless_user", "agent1");
+        const task = await run("get", { id: made.id });
+        if (!task.deleted_at) await run("delete", { id: made.id, version: task.version });
+        await load();
+      }
+    });
+
+    it("does not send queued priority choices with a valid replacement key", async () => {
+      const made = (await run("create_task", { title: "Priority across valid keys", description: "d", project: "WEB", priority: 1 })) as { id: string; version: number };
+      const person = (await service.engine.execute("reset_user_key", "admin", { user: "user" })) as { api_key: string };
+      setValue(config, "auth.keyless_user", "");
+      await page.run(`localStorage.setItem('vigile.key', ${JSON.stringify(adminKey)})`);
+      try {
+        await load(`/#board/${made.id}`);
+        await page.until("return document.getElementById('priority-up')", "the priority control read with the admin key");
+        await page.run(`
+          window.priorityFetch = window.fetch;
+          window.priorityHold = new Promise((resolve) => (window.releasePriority = resolve));
+          window.priorityStarted = false;
+          window.fetch = async (url, options) => {
+            if (!window.priorityStarted && String(url).endsWith('/api/update-task')) {
+              window.priorityStarted = true;
+              await window.priorityHold;
+            }
+            return window.priorityFetch(url, options);
+          };
+        `);
+        await page.click("#priority-up");
+        await page.until("return window.priorityStarted", "the admin priority write to be waiting");
+        await page.run("document.getElementById('priority-up').click()");
+        await page.until("return /1 step waiting/.test(document.querySelector('.priority-result')?.textContent)", "the second admin choice to be queued");
+        await page.run(`localStorage.setItem('vigile.key', ${JSON.stringify(person.api_key)}); window.releasePriority()`);
+        await page.until("return document.querySelector('.priority-control output')?.value === '2' && !document.getElementById('priority-up').disabled && !document.getElementById('priority-down').disabled", "the enabled panel to be reread with the replacement key");
+        await page.wait(300);
+        const task = await run("get", { id: made.id });
+        assert.deepEqual([task.priority, task.version], [2, made.version + 1], "only the choice bound to the admin panel was stored");
+        assert.equal(await page.run("return document.getElementById('main').hidden"), false, "the valid replacement key caused no lockout");
+      } finally {
+        await page.run("if (window.priorityFetch) window.fetch = window.priorityFetch; delete window.priorityFetch; delete window.priorityHold; delete window.releasePriority; delete window.priorityStarted; localStorage.clear()");
+        setValue(config, "auth.keyless_user", "agent1");
+        const task = await run("get", { id: made.id });
+        if (!task.deleted_at) await run("delete", { id: made.id, version: task.version });
+        await load();
+      }
+    });
+
+    it("sends no queued priority write under another identity when its key is refused during the first write", async () => {
+      const made = (await run("create_task", { title: "Priority while the key changes", description: "d", project: "WEB", priority: 1 })) as { id: string; version: number };
+      setValue(config, "auth.keyless_user", "");
+      await page.run(`localStorage.setItem('vigile.key', ${JSON.stringify(adminKey)})`);
+      try {
+        await load(`/#board/${made.id}`);
+        await page.until("return document.getElementById('priority-up')", "the priority control under the admin key");
+        await page.run(`
+          window.priorityFetch = window.fetch;
+          window.priorityHold = new Promise((resolve) => (window.releasePriority = resolve));
+          window.priorityStarted = false;
+          window.fetch = async (url, options) => {
+            const reply = await window.priorityFetch(url, options);
+            if (!window.priorityStarted && String(url).endsWith('/api/update-task')) {
+              window.priorityStarted = true;
+              await window.priorityHold;
+            }
+            return reply;
+          };
+        `);
+        await page.click("#priority-up");
+        await page.until("return window.priorityStarted", "the admin's first priority write to be in flight");
+        await page.run("document.getElementById('priority-up').click()");
+        await page.until("return /1 step waiting/.test(document.querySelector('.priority-result')?.textContent)", "another click to wait behind it");
+
+        const reset = (await service.engine.execute("reset_user_key", "admin", { user: "admin" })) as { api_key: string };
+        adminKey = reset.api_key;
+        // Once the old key is refused it is removed. Without the session check, the queued click would then be
+        // sent without a key and stored as agent1 under this keyless setting.
+        setValue(config, "auth.keyless_user", "agent1");
+        await page.wait(150);
+        await page.run("window.releasePriority()");
+        await page.until("return document.getElementById('main').hidden && Boolean(document.querySelector('#notice input'))", "the old key to lock the page out");
+        await page.wait(500);
+        const task = await run("get", { id: made.id });
+        assert.deepEqual([task.priority, task.version], [2, made.version + 1], "only the write sent under the authenticated admin was stored");
+        assert.equal(await page.run("return localStorage.getItem('vigile.key')"), null);
+      } finally {
+        await page.run("if (window.priorityFetch) window.fetch = window.priorityFetch; delete window.priorityFetch; delete window.priorityHold; delete window.releasePriority; delete window.priorityStarted; localStorage.clear()");
+        setValue(config, "auth.keyless_user", "agent1");
+        const task = await run("get", { id: made.id });
+        if (!task.deleted_at) await run("delete", { id: made.id, version: task.version });
+        await load();
+      }
+    });
+
     it("asks for a key when one is needed, says when it is wrong, and shows nothing until it is right", async () => {
       await page.size(1280, 900);
       await load();
@@ -8546,7 +8863,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         undo.push(() => change("update_task", { id: M[8]!, priority }));
         await plan("add_link", { from: M[8]!, type: "assigned to", to: "agent1" });
         undo.push(() => plan("remove_link", { from: M[8]!, type: "assigned to", to: "agent1" }));
-        await page.until("return [...document.querySelectorAll('#detail dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling.textContent === '9' && /agent1/.test(document.querySelector('#detail .relation[data-relation=\"assigned to\"]')?.textContent ?? '')", "the new priority and assignment in the panel");
+        await page.until("return [...document.querySelectorAll('#detail dt')].find((dt) => dt.textContent === 'Priority')?.nextElementSibling.querySelector('output')?.value === '9' && /agent1/.test(document.querySelector('#detail .relation[data-relation=\"assigned to\"]')?.textContent ?? '')", "the new priority and assignment in the panel");
         await page.key("Escape");
         assert.equal(await page.run<string>(`return JSON.stringify(${node(M[8]!)}.data())`), seen);
 
