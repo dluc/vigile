@@ -2,6 +2,7 @@ import { LARGE, STATES, clearGraph, renderGraph, resizeGraph, zoomGraph } from "
 import { lights } from "./lights.js";
 // The rules for reading a list in pages are the service's own modules, handed over as they are.
 import { ENDS, NotAList, begun, describeItemList, describeList, readToEnd, resume, takePage } from "/shared/paging.js";
+import { boardChanges, cardModel, forgetMarks, inStrip, isTrouble, markedAt, setMarks } from "./board.js";
 
 /**
  * What the browser remembers for the page. A browser may refuse to remember anything, as one that blocks all
@@ -215,8 +216,6 @@ function columnOf(task) {
 }
 
 const FINISHED = ["done", "cancelled"];
-const isTrouble = (task) => task.type !== "task";
-
 const isOpenTrouble = (task) => isTrouble(task) && !FINISHED.includes(task.status);
 
 /**
@@ -476,6 +475,9 @@ const few = (items, shown = 3) => (items.length > shown ? [...items.slice(0, sho
 /** A container as a short chip: a numbered project is written without its kind. */
 const chip = (ref) => ref.replace(/^project:/, "");
 
+/** What a card goes by besides its task: the plan, the project the page is narrowed to, and what is watched. */
+const cardContext = () => ({ byId: state.byId, project: state.project, watched });
+
 /**
  * What the card of a closed group showed when it was drawn, as one text: its state, title, kind and priority, how
  * far the tasks it stands for are and how many of them are in each state or match the filter, how many it holds,
@@ -493,46 +495,21 @@ const shows = new WeakMap();
  * sits beside the card and not in it, since the card is a button itself and opens the panel.
  */
 function card(task, inside = null) {
-  const groups = holdersOf(task).filter((ref) => state.byId.has(ref));
-  const projects = holdersOf(task).filter((ref) => !state.byId.has(ref));
-  const progress = task.progress ?? (inside ? { finished: inside.finished, total: inside.total } : null);
-  const percent = progress?.total ? Math.round((progress.finished / progress.total) * 100) : 0;
-  const tags = present([
-    progress && el("span", { class: "tag group", title: "Tasks finished inside this group" }, `${progress.finished}/${progress.total} done`),
-    inside && [
-      inside.matching > 0 && el("span", { class: "tag match", title: "Tasks inside this group that match the filter" }, `${inside.matching} inside ${inside.matching === 1 ? "matches" : "match"}`),
-      inside.busy > 0 && el("span", { class: "tag inside", "data-tone": "busy", title: "Tasks inside this group that are in progress" }, `${inside.busy} in progress`),
-      inside.waiting > 0 && el("span", { class: "tag inside", "data-tone": "wait", title: "Tasks inside this group that wait for dependencies" }, `${inside.waiting} waiting`),
-      inside.problems > 0 && el("span", { class: "tag warn", title: "Tasks inside this group that have problems" }, `⚠ ${counted(inside.problems, "problem")} inside`),
-      inside.trouble > 0 && el("span", { class: "tag trouble", title: "Unfinished bugs, issues and incidents inside this group" }, `${inside.trouble} open ${inside.trouble === 1 ? "bug or issue" : "bugs and issues"}`),
-    ],
-    watched.has(task.id) && el("span", { class: "tag watched", title: "You are watching this task: a sound plays when it is done" }, "watching"),
-    few(task.assigned_to).map((user) => el("span", { class: "tag who" }, user)),
-    task.is_waiting && el("span", { class: "tag waiting", title: task.waiting_for.map(chip).join(", ") }, `waits for ${few(task.waiting_for.map(chip)).join(", ")}`),
-    task.has_problems && el("span", { class: "tag warn" }, "⚠ problem"),
-    few(groups).map((id) => el("span", { class: "tag", title: state.byId.get(id)?.title ?? "" }, `in ${id}`)),
-    !state.project && few(projects.map(chip)).map((id) => el("span", { class: "tag" }, id)),
-  ]);
+  const shown = cardModel(task, cardContext(), inside);
   const button = el(
     "button",
-    {
-      class: `card${task.has_problems ? " problem" : ""}${isTrouble(task) ? " trouble" : ""}${progress ? " is-group" : ""}${inside ? " closed" : ""}`,
-      type: "button",
-      "data-id": task.id,
-      "data-status": task.status,
-      onclick: () => openItem("task", task.id),
-    },
+    { class: ["card", ...shown.marks].join(" "), type: "button", "data-id": shown.id, "data-status": shown.status, onclick: () => openItem("task", shown.id) },
     el(
       "div",
       { class: "card-top" },
-      el("span", { class: "id" }, task.id),
-      inside && el("span", { class: "kind" }, "group"),
-      isTrouble(task) && el("span", { class: "type" }, task.type),
-      task.priority !== 0 && el("span", { class: `priority${task.priority >= 5 ? " high" : ""}`, title: "Priority" }, `P${task.priority}`),
+      el("span", { class: "id" }, shown.id),
+      shown.closed && el("span", { class: "kind" }, "group"),
+      shown.type && el("span", { class: "type" }, shown.type),
+      shown.priority && el("span", { class: `priority${shown.priority.high ? " high" : ""}`, title: "Priority" }, shown.priority.text),
     ),
-    el("div", { class: "card-title" }, task.title),
-    inside && el("span", { class: "bar", role: "img", "aria-label": `${percent}% finished` }, el("i", { style: `width:${percent}%` })),
-    tags.length ? el("div", { class: "tags" }, tags) : null,
+    el("div", { class: "card-title" }, shown.title),
+    shown.closed && el("span", { class: "bar", role: "img", "aria-label": `${shown.progress.percent}% finished` }, el("i", { style: `width:${shown.progress.percent}%` })),
+    shown.tags.length ? el("div", { class: "tags" }, shown.tags.map((tag) => el("span", { class: tag.kind ? `tag ${tag.kind}` : "tag", title: tag.title, "data-tone": tag.tone }, tag.text))) : null,
   );
   if (!inside) return button;
   const whole = el(
@@ -541,13 +518,13 @@ function card(task, inside = null) {
     button,
     el(
       "button",
-      { class: "zoom-into", type: "button", "data-id": task.id, "aria-label": `Zoom into ${task.id}: show only the ${counted(progress.total, "task")} it holds`, title: "Show only what this group holds", onclick: () => zoomInto(task.id) },
+      { class: "zoom-into", type: "button", "data-id": task.id, "aria-label": `Zoom into ${task.id}: show only the ${counted(shown.progress.total, "task")} it holds`, title: "Show only what this group holds", onclick: () => zoomInto(task.id) },
       el("span", {}, "Zoom in"),
-      el("span", { class: "holds" }, `holds ${counted(progress.total, "task")}`),
+      el("span", { class: "holds" }, `holds ${counted(shown.progress.total, "task")}`),
     ),
   );
   // Among the finished, a card's place goes by when it was completed, which no card says.
-  shows.set(button, [whole.innerHTML, task.completed_at ?? ""].join("\n"));
+  shows.set(button, [whole.innerHTML, shown.completed_at].join("\n"));
   return whole;
 }
 
@@ -573,16 +550,201 @@ function fitBoard() {
 }
 
 /**
+ * Collapsed columns. A column of the board can be collapsed to a strip that keeps its name and its count, which
+ * leaves the room to the columns one cares to see. Which columns are collapsed is remembered in this browser, by
+ * the column's name. It is this browser's own business: it is not in the page's address, so a shared link
+ * collapses nobody else's columns, and it is never sent to the service.
+ */
+const COLLAPSED_NAME = "vigile.collapsed";
+const collapsedColumns = new Set(readCollapsedColumns());
+
+/** The collapsed columns as the browser remembers them. Something else under that name is taken for none, and a name that no column has is left out. */
+function readCollapsedColumns() {
+  try {
+    const keys = JSON.parse(localStorage.getItem(COLLAPSED_NAME) ?? "[]");
+    return Array.isArray(keys) ? keys.filter((key) => COLUMNS.some((c) => c.key === key)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The columns that are being collapsed or opened, while the board is drawn again for it. */
+let folding = null;
+/** What the board is narrowed to: the project, the group, the filter, and whether bugs have a column of their own. Whatever else comes to narrow it belongs here. */
+const boardScope = () => JSON.stringify([state.project, state.group, state.filter.trim().toLowerCase(), state.bugsApart, state.level]);
+
+/**
+ * The board as it was last drawn, whether or not a card is drawn for each task: what it is narrowed to, what its
+ * cards go by, and every task on it with its column. A refresh is told from the board before it and the board
+ * after it, and so are the rings: a task beyond what its column shows, or in a collapsed column, is on the board
+ * like any other.
+ */
+let onBoard = { scope: "", context: null, tasks: new Map() };
+
+/** The control of the collapsed column that holds a task, or nothing: what stands for the task's card while its column is collapsed. */
+function stripFor(id) {
+  const column = onBoard.tasks.get(id)?.column;
+  const strip = column && collapsedColumns.has(column) ? columnOnBoard(column) : null;
+  return strip?.classList.contains("collapsed") ? strip.querySelector(".column-fold") : null;
+}
+
+/**
+ * Whether a control can take the keyboard: it is on the page, drawn, in sight, and neither switched off nor in a
+ * part of the page that is. A control with no place on the page, as one inside something hidden, cannot.
+ */
+function takesKeyboard(control) {
+  if (!control?.isConnected || control === document.body || control.disabled || control.closest("[inert], [hidden]")) return false;
+  return control.getClientRects().length > 0 && getComputedStyle(control).visibility !== "hidden";
+}
+
+/**
+ * Puts the keyboard on the first of the candidates that can take it, without scrolling, and says which it was.
+ * A candidate is a control, a way to find one, or nothing. Whatever moves the keyboard because the control that
+ * had it is gone goes through here, so that it never ends on a control that is hidden, or on nothing while
+ * something can take it.
+ */
+function focusVisible(...candidates) {
+  for (const candidate of candidates) {
+    const control = typeof candidate === "function" ? candidate() : candidate;
+    if (!takesKeyboard(control)) continue;
+    if (document.activeElement !== control) control.focus({ preventScroll: true });
+    if (document.activeElement === control) return control;
+  }
+  return null;
+}
+
+/**
+ * Where the keyboard goes when nothing nearer can take it: the link of the view that is shown, which is there
+ * but for the graph at full screen; the button that leaves full screen, which is there then; and the filter and
+ * the settings, should a page be drawn one day with neither of the first two.
+ */
+const keyboardFallbacks = () => [() => $("panel").querySelector(".panel-card"), $(`view-${state.view}`), $("graph-full"), $("filter"), $("settings")];
+
+/**
+ * Sees to the keyboard after the page was changed. `had` is what had it before. When that is gone, hidden or
+ * switched off, the keyboard goes to the first candidate that can take it, and failing those to where it always
+ * can go: it is never left on nothing, or on something out of sight. A page whose keyboard was nowhere before is
+ * left as it is: nothing was lost, and nothing is to be read out.
+ */
+function keepKeyboard(had, ...candidates) {
+  if (!had || had === document.body || takesKeyboard(document.activeElement)) return;
+  focusVisible(...candidates, ...keyboardFallbacks());
+}
+
+/**
+ * What stands for a task on the page now, where the keyboard can go: its card, or, while its column is
+ * collapsed, the strip that holds it; nothing when the task has neither in sight. Whatever puts the keyboard on
+ * a task asks here and nowhere else: the board drawn again under a card that had the keyboard, a card moved by a
+ * refresh, a column collapsed under it, the panel that closes. A card on its way to another column waits unseen
+ * where it will land: wanted by the keyboard, it lands at once.
+ */
+function representative(id) {
+  const card = [...$("board").querySelectorAll(".card")].find((drawn) => drawn.dataset.id === id);
+  const flying = card ? flights.get(id) : null;
+  if (flying) {
+    flights.delete(id);
+    for (const animation of flying.getAnimations()) animation.cancel();
+    flying.remove();
+    keepMarks();
+  }
+  return [card, stripFor(id)].find(takesKeyboard) ?? null;
+}
+
+/**
+ * Collapses columns or opens them again, and remembers it. The board is drawn again with the other columns left
+ * as they stand: collapsing one column must not cost the drawing of every card on the board.
+ */
+function collapseColumns(keys, on) {
+  for (const key of keys) on ? collapsedColumns.add(key) : collapsedColumns.delete(key);
+  localStorage.setItem(COLLAPSED_NAME, JSON.stringify(COLUMNS.map((c) => c.key).filter((key) => collapsedColumns.has(key))));
+  $("columns-open-choice").hidden = collapsedColumns.size === 0;
+  if (state.view !== "board" || !state.loadedAt) return;
+  // A card on its way would land where its column no longer is: the journeys end, each card in its place.
+  for (const copy of flights.values()) {
+    for (const animation of copy.getAnimations()) animation.cancel();
+    copy.remove();
+  }
+  flights.clear();
+  folding = new Set(keys);
+  try {
+    render();
+  } finally {
+    folding = null;
+  }
+}
+const openAllColumns = () => collapseColumns([...collapsedColumns], false);
+$("columns-open-choice").hidden = collapsedColumns.size === 0;
+$("columns-open").addEventListener("click", () => {
+  // The row has nothing left to offer and goes: the keyboard moves to the button of the menu it is in, before
+  // the row is taken away under it.
+  focusVisible($("settings"));
+  openAllColumns();
+});
+
+/** The column of that name as it is on the board, or nothing. */
+const columnOnBoard = (key) => [...$("board").children].find((child) => child.dataset.key === key) ?? null;
+
+/** A column as it stands on the board, if it still takes the room it took: Done is drawn again when it gets more or less of the spare width. */
+function standingColumn(key, span) {
+  const column = columnOnBoard(key);
+  return column && Number(column.style.getPropertyValue("--span") || 1) === span ? column : null;
+}
+
+/**
+ * Gives each column its room on the board. Open columns share the width as they always did. A strip has a width
+ * of its own, so with one on the board the row is spelled out, column by column.
+ */
+function layColumns(visible) {
+  const tracks = visible.flatMap((c) => (collapsedColumns.has(c.key) ? ["var(--column-strip)"] : Array(c.key === "done" ? state.span : 1).fill("var(--column-track)")));
+  if (visible.some((c) => collapsedColumns.has(c.key))) $("board").style.setProperty("--columns", tracks.join(" "));
+  else $("board").style.removeProperty("--columns");
+}
+
+const SVG = "http://www.w3.org/2000/svg";
+
+/** The arrowhead on the control that collapses a column, drawn as the page's other small drawings are. The styles turn it to point where the column goes. */
+function arrowhead() {
+  const drawing = document.createElementNS(SVG, "svg");
+  for (const [name, value] of Object.entries({ viewBox: "0 0 16 16", width: "14", height: "14", "aria-hidden": "true" })) drawing.setAttribute(name, value);
+  const line = document.createElementNS(SVG, "path");
+  for (const [name, value] of Object.entries({ d: "M10.2 3.6 5.8 8l4.4 4.4", fill: "none", stroke: "currentColor", "stroke-width": "1.7", "stroke-linecap": "round", "stroke-linejoin": "round" })) line.setAttribute(name, value);
+  drawing.append(line);
+  return drawing;
+}
+
+/**
+ * The control in a column's heading that collapses the column, and opens it again. Its name says what it will
+ * do, and of a collapsed column how many cards are in it, which is all there is to know of them from outside.
+ */
+function foldControl(c, shut, cards) {
+  const name = shut ? `Open the ${c.title} column, ${counted(cards, "card")}` : `Collapse the ${c.title} column`;
+  return el("button", { class: "column-fold", type: "button", "aria-expanded": String(!shut), "aria-label": name, title: name, onclick: () => collapseColumns([c.key], !shut) }, arrowhead());
+}
+
+/** A collapsed column: its heading and nothing else. The styles make it a strip, and its control as large as the strip. */
+const collapsedColumn = (c, cards) =>
+  el("section", { class: "column collapsed", "data-tone": c.tone, "data-key": c.key }, el("div", { class: "column-head" }, el("span", { class: "dot" }), c.title, el("span", { class: "count" }, String(cards)), foldControl(c, true, cards)));
+
+/** With every column collapsed the board is a row of strips and nothing else: a line beside them says so, and opens them all. */
+function allCollapsed(visible) {
+  if (!visible.length || visible.some((c) => !collapsedColumns.has(c.key))) return null;
+  return el("p", { class: "columns-note" }, "Every column is collapsed.", el("button", { type: "button", onclick: openAllColumns }, "Open all"));
+}
+
+/**
  * How many card-widths the Done column takes. It is usually the longest column, so when the window is wider
  * than the columns need, it gets the spare room, up to four card-widths and never more than it has cards.
+ * `columns` counts the open columns and `strips` the collapsed ones.
  */
-function doneSpan(columns, cards) {
+function doneSpan(columns, cards, strips = 0) {
   const board = $("board");
   if (narrow.matches || !board.clientWidth) return 1;
   const style = getComputedStyle(board);
   const widest = parseFloat(style.getPropertyValue("--column-widest"));
   const gap = parseFloat(style.columnGap) || 0;
-  const spare = board.clientWidth - (columns * widest + (columns - 1) * gap);
+  // A collapsed column takes the width of its strip, and what it leaves is spare room like any other.
+  const narrowest = parseFloat(style.getPropertyValue("--column-strip")) || 0;
+  const spare = board.clientWidth - (columns * widest + strips * narrowest + (columns + strips - 1) * gap);
   return 1 + Math.max(0, Math.min(Math.floor(spare / (widest + gap)), cards - 1, 3));
 }
 
@@ -604,9 +766,17 @@ function renderBoard(tasks, closed) {
 
   // With no tasks at all there is nothing to lay out: one message says why.
   const visible = tasks.length ? COLUMNS.filter((c) => groups[c.key].length || ["in_progress", "next", "done"].includes(c.key)) : [];
-  state.span = doneSpan(visible.length, groups.done.length);
-  state.spanFor = [visible.length, groups.done.length];
-  const columns = visible.map((c) => {
+  const strips = visible.filter((c) => collapsedColumns.has(c.key));
+  // A collapsed Done column takes no spare room: it counts as one that has no cards to lay side by side.
+  state.spanFor = [visible.length - strips.length, collapsedColumns.has("done") ? 0 : groups.done.length, strips.length];
+  state.span = doneSpan(...state.spanFor);
+  layColumns(visible);
+  // A board that is narrowed to something else is another board. The marks of the one before are not carried to
+  // it, and are gone when that one is come back to: they were news of the plan as it was shown then.
+  if (boardScope() !== onBoard.scope) marked.clear();
+  // The tasks that are watched are a list that changes in place: the board keeps the list as it is now.
+  onBoard = { scope: boardScope(), context: { ...cardContext(), watched: new Set(watched) }, tasks: new Map(visible.flatMap((c) => groups[c.key].map((task) => [task.id, { task, column: c.key, closed: closed.get(task.id) ?? null }]))) };
+  const drawColumn = (c) => {
     let shown = groups[c.key];
     let more = null;
     const span = c.key === "done" ? state.span : 1;
@@ -630,18 +800,20 @@ function renderBoard(tasks, closed) {
     return el(
       "section",
       { class: `column${span > 1 ? " wide" : ""}`, "data-tone": c.tone, "data-key": c.key, style: span > 1 ? `--span: ${span}` : undefined },
-      el("div", { class: "column-head" }, el("span", { class: "dot" }), c.title, el("span", { class: "count" }, String(groups[c.key].length))),
+      el("div", { class: "column-head" }, el("span", { class: "dot" }), c.title, el("span", { class: "count" }, String(groups[c.key].length)), foldControl(c, false, groups[c.key].length)),
       c.note && el("p", { class: "column-note" }, c.note),
       shown.length ? el("div", { class: "cards" }, cards) : el("p", { class: "nothing" }, "Nothing here."),
       more,
     );
-  });
+  };
+  // While a column is collapsed or opened, the others stand as they are, cards and all.
+  const columns = visible.map((c) => (folding && !folding.has(c.key) ? standingColumn(c.key, c.key === "done" ? state.span : 1) : null) ?? (collapsedColumns.has(c.key) ? collapsedColumn(c, groups[c.key].length) : drawColumn(c)));
   // Drawing the board again must not make a reader lose their place: each column, and the board itself, stays
   // scrolled where it was. Not so when the board shows another level or group: those are other cards.
   const scrolled = new Map(boardMoved ? [] : [...$("board").querySelectorAll(".column")].map((column) => [column.dataset.key, column.querySelector(".cards")?.scrollTop ?? 0]));
   boardMoved = false;
   const across = $("board").scrollLeft;
-  $("board").replaceChildren(...columns);
+  $("board").replaceChildren(...columns, ...present([allCollapsed(visible)]));
   for (const column of columns) {
     const cards = column.querySelector(".cards");
     if (cards && scrolled.get(column.dataset.key)) cards.scrollTop = scrolled.get(column.dataset.key);
@@ -1355,8 +1527,8 @@ async function renderDetail(more) {
   if (!again) card.scrollTop = 0;
   // The panel is a dialog: the keyboard goes into it when it opens and when it shows another item. Drawn again
   // for the same item, the control that had the keyboard has it back.
-  if (!again) card.focus({ preventScroll: true });
-  else if (place) (place() ?? card).focus({ preventScroll: true });
+  if (!again) focusVisible(card);
+  else if (place) focusVisible(place, card);
 }
 
 /** Which control of the panel has the keyboard, told so that it can be found again after the panel is drawn anew. */
@@ -1390,6 +1562,7 @@ function describeChange(data) {
 
 /** Takes the panel off the screen. */
 function hidePanel() {
+  const item = state.open;
   state.open = null;
   // The keyboard goes back to what the panel was opened from, when it was in the panel or lost with it.
   const inside = !$("panel").hidden && ($("panel").contains(document.activeElement) || document.activeElement === document.body);
@@ -1399,7 +1572,14 @@ function hidePanel() {
   state.have = null;
   state.further = null;
   state.troubled = false;
-  if (inside) keyboardTo(panelOpener);
+  // On what it was opened from, as that is now; failing that on what stands for the task that was open; failing
+  // that where the keyboard always can go.
+  if (inside)
+    focusVisible(
+      () => restoredControl(panelOpener),
+      () => (item?.kind === "task" ? (state.view === "board" ? reachable(stripFor(item.id)) ?? standsFor(item.id, ".card") : representative(item.id)) : null),
+      ...keyboardFallbacks(),
+    );
   panelOpener = null;
   document.title = state.instance?.name ? `${state.instance.name} · Vigile` : "Vigile";
 }
@@ -1466,8 +1646,11 @@ function showGraphStatus(stands) {
   // Written only when it says something else: the line is read out by a screen reader whenever it is written.
   if ($("graph-status-text").textContent !== text) $("graph-status-text").textContent = text;
   if ($("graph-draw").textContent !== button) $("graph-draw").textContent = button;
+  const had = document.activeElement;
   $("graph-draw").hidden = !button;
   $("graph-status").hidden = !text;
+  // The line goes when it has nothing more to say, and the keyboard may be on it since its button was pressed.
+  keepKeyboard(had, $("graph-status"), $("zoom-fit"));
 }
 
 /**
@@ -1508,7 +1691,7 @@ $("graph-draw").addEventListener("click", () => {
   state.large = true;
   graphScope = null;
   // The button goes while the graph is worked out. The keyboard stays on the line, which says what happens next.
-  $("graph-status").focus({ preventScroll: true });
+  focusVisible($("graph-status"));
   render();
 });
 
@@ -1567,6 +1750,13 @@ function keyboardPlace() {
       return part ? again?.querySelector(part) : again;
     };
   }
+  // The control that collapses a column is known by its column: used, it is drawn again as the one that undoes it.
+  if (at.matches("#board .column-fold")) {
+    const key = at.closest(".column").dataset.key;
+    return () => columnOnBoard(key)?.querySelector(".column-fold");
+  }
+  // "Open all" goes with the line it is in, once the columns are open: the keyboard is then on the first of them.
+  if (at.matches("#board .columns-note button")) return () => $("board").querySelector(".columns-note button") ?? $("board").querySelector(".column-fold");
   // Any other control outside the panel, such as those of the header, is not drawn again: it is that very one,
   // for as long as it is on the page.
   if (at !== document.body && !$("panel").contains(at)) return () => (at.isConnected ? at : null);
@@ -1616,7 +1806,7 @@ function standsFor(id, kind) {
       for (const holder of held ? holdersOf(held) : []) {
         if (seen.has(holder) || !state.byId.has(holder)) continue;
         seen.add(holder);
-        const around = state.closed?.has(holder) ? reachable(controlOf(holder)) : null;
+        const around = state.closed?.has(holder) ? reachable(stripFor(holder)) ?? reachable(controlOf(holder)) : null;
         if (around) return around;
         if (state.closed?.has(holder)) {
           const revealedHolder = reveal(state.byId.get(holder));
@@ -1644,6 +1834,8 @@ function whereNow(place) {
   const same = place();
   if (!place.ofBoard) return same ?? null;
   return (
+    (place.item ? reachable(stripFor(place.item)) : null) ??
+    (place.item && place.kind === ".card" ? representative(place.item) : null) ??
     reachable(same) ??
     (place.item ? standsFor(place.item, place.kind) : null) ??
     [state.view === "board" ? $(state.level === null ? "level-out" : "level-in") : null, $("scope").querySelector(".leave"), $("scope").querySelector(".scope-text"), $(`view-${state.view}`)].find(reachable) ??
@@ -1657,10 +1849,16 @@ function keyboardTo(place) {
   if (to && document.activeElement !== to) to.focus({ preventScroll: true });
 }
 
+/** A saved place resolves through the board's logical task and zoom fallbacks. */
+const restoredControl = (place) => (place ? whereNow(place) : null);
+
 function render() {
+  const had = document.activeElement;
   const place = keyboardPlace();
   draw();
-  keyboardTo(place);
+  // Put back without scrolling: the reader keeps their place on the page as well. What had the keyboard may be
+  // gone from the new drawing, or hidden by it: the keyboard then goes where it can.
+  keepKeyboard(had, () => restoredControl(place));
 }
 
 /**
@@ -2119,13 +2317,37 @@ document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!$("settings-menu").hidden) {
     showSettings(false);
-    $("settings").focus();
+    focusVisible($("settings"), ...keyboardFallbacks());
   } else if (!$("panel").hidden) closeItem();
   else if (state.full) leaveFullScreen();
 });
 
-/** Where every card is on screen and which column it is in, taken before the board is drawn again. */
+/** The box of a task that had no card: it is nowhere, and no card slides from it. */
+const NOWHERE = { left: Number.POSITIVE_INFINITY, top: Number.POSITIVE_INFINITY, width: 0, height: 0 };
+
+/**
+ * Where everything on the board is, taken before the board is drawn again: what a refresh moved then sets off
+ * from where it was, whatever the new drawing keeps of that place. Every task on the board is in it. One with a
+ * card has the card's place. One in a collapsed column has the place of its strip, or none when the strip has
+ * no place on the page. One that its column shows only on request has no place. A journey with no place to set
+ * off from is not made. The board itself, as it was drawn, is kept with the places: the rings are told from it.
+ */
 function cardPlaces() {
+  const places = cardsOnBoard();
+  const rooms = new Map();
+  for (const strip of $("board").querySelectorAll(".column.collapsed")) {
+    const box = strip.getBoundingClientRect();
+    rooms.set(strip.dataset.key, box.width > 0 && box.height > 0 ? box : null);
+  }
+  for (const [id, { task, column }] of onBoard.tasks) {
+    if (!places.has(id)) places.set(id, { held: rooms.has(column), room: rooms.get(column) ?? null, column, status: task.status, box: NOWHERE, inSight: false });
+  }
+  places.board = onBoard;
+  return places;
+}
+
+/** Where every card is on screen and which column it is in, taken before the board is drawn again. */
+function cardsOnBoard() {
   return new Map(
     [...$("board").querySelectorAll(".card")].map((card) => {
       const box = card.getBoundingClientRect();
@@ -2148,25 +2370,33 @@ const LAND_MS = 300;
 const PACE = 1.6;
 const LEAST_MS = 400;
 const MOST_MS = 1200;
-/** Whether cards move: they do, unless the person switches it off in the settings. Then the ring alone says what changed. */
-const moving = () => state.motion !== "off";
+/** Whether cards move: an explicit choice wins; otherwise the system's reduced-motion preference is honoured. */
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const moving = () => state.motion === "on" || (state.motion !== "off" && !reducedMotion.matches);
 $("motion").checked = moving();
+reducedMotion.addEventListener("change", () => {
+  if (state.motion === null) $("motion").checked = moving();
+});
 $("motion").addEventListener("change", (event) => {
   state.motion = event.target.checked ? "on" : "off";
   localStorage.setItem(MOTION_NAME, state.motion);
 });
 
-/** Sends a copy of a card from where it was to where it is now. Returns the journey, which ends when the copy has landed. */
-function fly(copy, dx, dy, lands) {
+/**
+ * Sends a copy of a card from where it was to where it is now. Returns the journey, which ends when the copy has
+ * landed. A card that comes out of a collapsed column grows out of the strip as it lifts off, from the size
+ * `out`, and one that goes into a collapsed column shrinks into the strip as it lands, to the size `into`.
+ */
+function fly(copy, dx, dy, lands, { out = 1, into = 1, opacity = out === 1 ? 1 : 0 } = {}) {
   const way = Math.round(Math.min(MOST_MS, Math.max(LEAST_MS, Math.hypot(dx, dy) / PACE)));
   const total = LIFT_MS + way + LAND_MS;
   return copy.animate(
     [
-      { transform: "none", offset: 0, easing: "ease-out" },
+      { transform: out === 1 ? "none" : `scale(${out})`, offset: 0, easing: "ease-out", opacity },
       // The same at both ends, so that half the time is half the way: it neither darts off nor rushes in.
-      { transform: "scale(1.06)", offset: LIFT_MS / total, easing: "cubic-bezier(0.3, 0, 0.7, 1)" },
+      { transform: "scale(1.06)", offset: LIFT_MS / total, easing: "cubic-bezier(0.3, 0, 0.7, 1)", ...(out === 1 ? {} : { opacity: 1 }) },
       { transform: `translate(${dx}px, ${dy}px) scale(1.06)`, offset: (LIFT_MS + way) / total, easing: "ease-in", opacity: 1 },
-      { transform: `translate(${dx}px, ${dy}px)`, offset: 1, opacity: lands ? 1 : 0 },
+      { transform: `translate(${dx}px, ${dy}px)${into === 1 ? "" : ` scale(${into})`}`, offset: 1, opacity: lands ? 1 : 0 },
     ],
     // It stays where it landed until it is taken away, so it is never seen back where it started.
     { duration: total, fill: "forwards" },
@@ -2180,12 +2410,28 @@ const flights = new Map();
 /** Rings the cards that changed lately and keeps the ones in flight unseen. Called whenever the board has been drawn. */
 function keepMarks() {
   const now = performance.now();
-  for (const [id, at] of marked) if (now - at >= MARKED_MS) marked.delete(id);
+  // A mark lasts its time, and no longer than its task is on the board: the board narrowed to something else, or
+  // a task that is gone, takes the mark away.
+  forgetMarks(marked, now, MARKED_MS, (name) => onBoard.tasks.has(name) || COLUMNS.some((c) => stripMark(c.key) === name));
+  // A collapsed column that something changed in is marked on its strip, for as long as a card is.
+  for (const column of $("board").querySelectorAll(".column.collapsed")) {
+    const at = markedAt(marked, stripMark(column.dataset.key), onBoard.scope);
+    column.classList.toggle("changed", at !== undefined);
+    column.style.animationDelay = "";
+    if (at !== undefined) {
+      const animation = [...column.getAnimations()].find((one) => one.animationName === "changed-strip");
+      if (animation) animation.currentTime = Math.max(0, now - at);
+    }
+  }
   for (const card of $("board").querySelectorAll(".card")) {
-    const at = marked.get(card.dataset.id);
+    const at = markedAt(marked, card.dataset.id, onBoard.scope);
     card.classList.toggle("changed", at !== undefined);
     // Drawn again, the ring goes on fading from where it was instead of starting over.
-    card.style.animationDelay = at === undefined ? "" : `${-Math.round(now - at)}ms`;
+    card.style.animationDelay = "";
+    if (at !== undefined) {
+      const animation = [...card.getAnimations()].find((one) => one.animationName === "changed");
+      if (animation) animation.currentTime = Math.max(0, now - at);
+    }
     card.style.visibility = flights.has(card.dataset.id) ? "hidden" : "";
     // The button that zooms into a closed group sits beside its card, and is out of sight with it.
     const beside = card.parentElement.matches(".holder") ? card.nextElementSibling : null;
@@ -2194,9 +2440,12 @@ function keepMarks() {
 }
 
 function mark(id) {
-  marked.set(id, performance.now());
+  setMarks(marked, [id], performance.now(), onBoard.scope);
   setTimeout(keepMarks, MARKED_MS + 50);
 }
+
+/** The name a collapsed column is marked under, among the cards: no task has an ID with a space in it. */
+const stripMark = (key) => `column ${key}`;
 
 /**
  * Shows what a refresh changed, so that the eye can follow it. A card that went to another column lifts off
@@ -2209,6 +2458,40 @@ function showMoves(before) {
   const still = !moving();
   const MOST = 12;
   let travellers = 0;
+  // A board that is narrowed to something else than it was shows other cards: none of them moved, and none is news.
+  if (before.board.scope !== onBoard.scope) return void keepMarks();
+  // The strips of the collapsed columns, and for a task that is in one of them now, its column and the strip.
+  const strips = new Map([...$("board").querySelectorAll(".column.collapsed")].map((strip) => [strip.dataset.key, strip]));
+  const held = (id) => {
+    const column = onBoard.tasks.get(id)?.column;
+    return strips.has(column) ? { column, strip: strips.get(column) } : null;
+  };
+  /**
+   * Where a card's journey starts: at `from`, or, when a copy of it is already on its way, where that copy is
+   * now. The copy that was heading for the old place is taken away.
+   */
+  const setOff = (id, from) => {
+    const flying = flights.get(id);
+    if (!flying) return from;
+    const at = flying.getBoundingClientRect();
+    const width = parseFloat(flying.style.width);
+    const height = parseFloat(flying.style.height);
+    const opacity = Number(getComputedStyle(flying).opacity);
+    flights.delete(id);
+    for (const animation of flying.getAnimations()) animation.cancel();
+    flying.remove();
+    return { left: at.left + (at.width - width) / 2, top: at.top + (at.height - height) / 2, width, height, scale: at.width / width, opacity };
+  };
+  /** Sends a copy on its way as its card's own, and takes it away when it has landed. */
+  const send = (id, copy, dx, dy, lands, sizes) => {
+    flights.set(id, copy);
+    fly(copy, dx, dy, lands, sizes).finished.catch(() => {}).then(() => {
+      copy.remove();
+      // Only the copy that is still this card's own ends its flight; one that was replaced on the way does not.
+      if (flights.get(id) === copy) flights.delete(id);
+      keepMarks();
+    });
+  };
   /** A copy of a card that floats above the page, for movement that would be cut off inside a scrolling column. */
   const ghost = (source, box) => {
     const copy = source.cloneNode(true);
@@ -2238,17 +2521,14 @@ function showMoves(before) {
       mark(id);
       // A card that is already on its way turns towards its new place from where it is now: the copy that was
       // heading for the old place is taken away, and a new one sets off from that spot.
-      const flying = flights.get(id);
-      let from = was.from;
-      if (flying) {
-        const at = flying.getBoundingClientRect();
-        const width = parseFloat(flying.style.width);
-        const height = parseFloat(flying.style.height);
-        from = { left: at.left + (at.width - width) / 2, top: at.top + (at.height - height) / 2, width, height };
-        flights.delete(id);
-        for (const animation of flying.getAnimations()) animation.cancel();
-        flying.remove();
-      }
+      // One that comes out of a collapsed column sets off from where its strip was, and grows out of it. The strip
+      // may be gone by now, when this was its last task: its place was taken before the board was drawn again.
+      const start = was.held && was.room ? inStrip(now, was.room) : null;
+      const out = start && !flights.has(id) ? start.scale : 1;
+      const from = setOff(id, was.held ? start : was.from);
+      // With no place to set off from there is no journey: the card is in its place at once, ringed, and does not
+      // fade in as a new one does.
+      if (!from) continue;
       // The card that has the keyboard stays where the keyboard can reach it: hidden for a flight it would lose
       // it, so it is ringed in its new place and does not travel. The same when the keyboard is on the button
       // beside it that zooms into the group, which is hidden with the card.
@@ -2258,15 +2538,7 @@ function showMoves(before) {
       const inSight = now.bottom > room.top && now.top < room.bottom;
       const dx = now.left - from.left;
       const dy = (inSight ? now.top : now.top < room.top ? room.top : room.bottom - from.height) - from.top;
-      const copy = ghost(card, from);
-      flights.set(id, copy);
-      const travel = fly(copy, dx, dy, inSight);
-      travel.finished.catch(() => {}).then(() => {
-        copy.remove();
-        // Only the copy that is still this card's own ends its flight; one that was replaced on the way does not.
-        if (flights.get(id) === copy) flights.delete(id);
-        keepMarks();
-      });
+      send(id, ghost(card, from), dx, dy, inSight, { out: from.scale ?? out, opacity: from.opacity });
     } else {
       // A card may change state and stay in its column, as a bug does in the column for bugs: it is ringed too.
       // So is the card of a closed group when anything it shows changed: of itself, or of the tasks it stands for.
@@ -2278,19 +2550,37 @@ function showMoves(before) {
   let leavers = 0;
   for (const [id, was] of before) {
     if (after.has(id)) continue;
-    // A card that is gone has no place to land any more: a copy of it that was on its way is taken away.
-    const flying = flights.get(id);
-    if (flying) {
-      flights.delete(id);
-      for (const animation of flying.getAnimations()) animation.cancel();
-      flying.remove();
+    const now = held(id);
+    if (now) {
+      // The task is in a collapsed column. One that was there already stays, and a copy of its card that is still
+      // on its way to the strip goes on. One that came from an open column has its card travel to the strip,
+      // which takes it in. Between two strips there is no card to travel: their marks say what happened.
+      if (was.held && was.column === now.column) continue;
+      const from = setOff(id, was.from);
+      // The strip is in the drawing that was just made, a new strip too. One that has no place on the page is
+      // no place to land.
+      const room = now.strip.getBoundingClientRect();
+      if (still || !was.node || !room.width || !room.height || travellers++ >= MOST) continue;
+      const to = inStrip(from, room);
+      send(id, ghost(was.node, from), to.left - from.left, to.top - from.top, false, { out: from.scale, opacity: from.opacity, into: to.scale });
       continue;
     }
+    // A card that is gone has no place to land any more: a copy of it that was on its way is taken away.
+    if (setOff(id, null)) continue;
     // A card that left while it was scrolled out of sight has nothing to show for it.
     if (still || !was.inSight || leavers++ >= MOST) continue;
     const copy = ghost(was.node, was.box);
     copy.animate([{ opacity: 1 }, { opacity: 0, transform: "scale(0.9)" }], { duration: 300, easing: "ease-in" }).finished.catch(() => {}).then(() => copy.remove());
   }
+  // A task is marked for any change in what its card shows, not only for a new state or column: its title, its
+  // kind, its priority, who has it, what it waits for, and whatever else is drawn on a card. The marks are told
+  // from the board before and the board after, not from the cards that happen to be drawn: a task in a collapsed
+  // column, or one that its column shows only on request, is marked like any other, and a card that is drawn for
+  // it in time is ringed. Many may be marked at once, and are looked at once when their time is up.
+  const { cards, strips: rung } = boardChanges(before.board, onBoard, (column) => collapsedColumns.has(column));
+  const changed = [...cards, ...[...rung].map(stripMark)];
+  setMarks(marked, changed, performance.now(), onBoard.scope);
+  if (changed.length) setTimeout(keepMarks, MARKED_MS + 50);
   keepMarks();
 }
 
@@ -2724,22 +3014,27 @@ function showNotices() {
   $("toasts-count").textContent = notices.length > shown.length ? `${notices.length} notifications, showing the latest ${shown.length}` : `${notices.length} notifications`;
 }
 $("toasts-clear").addEventListener("click", () => {
+  const had = document.activeElement;
   notices.length = 0;
   showNotices();
+  keepKeyboard(had);
 });
 
 /** Shows a notice that stays until it is dismissed, since the person may be looking elsewhere. */
 function toast(kind, what, title, id) {
   const dismiss = () => {
+    const had = document.activeElement;
     notices.splice(notices.indexOf(notice), 1);
     showNotices();
+    // The notice went with the button that was pressed: the keyboard goes to the notice that is last now.
+    keepKeyboard(had, () => [...$("toasts").querySelectorAll(".toast-close")].at(-1));
   };
   const notice = el(
     "div",
     { class: `toast ${kind}` },
     el("span", { class: "toast-mark", "aria-hidden": "true" }, kind === "done" ? "✓" : "–"),
     el("div", {}, el("div", { class: "toast-what" }, what), title && el("div", { class: "toast-title", title }, title)),
-    id && el("button", { type: "button", onclick: () => (dismiss(), openItem("task", id)) }, "Open"),
+    id && el("button", { type: "button", onclick: () => (openItem("task", id), dismiss()) }, "Open"),
     el("button", { class: "toast-close", type: "button", "aria-label": "Dismiss", onclick: dismiss }, "✕"),
   );
   notices.push(notice);

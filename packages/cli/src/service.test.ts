@@ -177,7 +177,7 @@ describe("service over HTTP", () => {
 
   it("tells the browser what the page may do, as a second line of defence", async () => {
     // The worker that lays out the graph is among them: the policy it is served with is the one that holds inside it.
-    for (const path of ["/", "/app.js", "/boot.js", "/shared/paging.js", "/shared/ids.js", "/vendor/cytoscape.min.js", "/vendor/elk-api.js", "/vendor/elk-worker.min.js", "/vendor/cytoscape-elk.js"]) {
+    for (const path of ["/", "/app.js", "/board.js", "/boot.js", "/shared/paging.js", "/shared/ids.js", "/vendor/cytoscape.min.js", "/vendor/elk-api.js", "/vendor/elk-worker.min.js", "/vendor/cytoscape-elk.js"]) {
       const response = await fetch(`${running.service.urls.base}${path}`);
       await response.arrayBuffer();
       assert.equal(response.status, 200, path);
