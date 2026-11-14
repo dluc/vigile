@@ -16,10 +16,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Build and test
+  test-shard:
+    name: Test / ${{ matrix.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: non-browser
+            shard: non-browser
+            browser: false
+          - name: browser refreshing
+            shard: browser-refreshing
+            browser: true
+          - name: browser panel and access
+            shard: browser-panel-access
+            browser: true
+          - name: browser visuals
+            shard: browser-visual
+            browser: true
     steps:
       # v7.0.0 — pinned so a public pull request cannot make a moved tag run different code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -39,9 +55,25 @@ jobs:
       # The browser tests are skipped when no browser is found, which would pass for the wrong reason: make sure
       # the one the runner comes with is there.
       - name: Check that there is a browser for the browser tests
+        if: matrix.browser
         run: test -x /usr/bin/google-chrome && /usr/bin/google-chrome --version
 
-      - name: Build and run every test
-        run: pnpm test
+      - name: Build
+        run: pnpm build
+
+      - name: Run test shard
+        run: node scripts/run-test-shard.mjs "${{ matrix.shard }}"
         env:
           VIGILE_TEST_BROWSER: /usr/bin/google-chrome
+
+  test:
+    name: Build and test
+    if: always()
+    needs: test-shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every test shard
+        run: test "$RESULT" = success
+        env:
+          RESULT: ${{ needs.test-shard.result }}

@@ -4442,15 +4442,16 @@ describe("a service that takes the connection and does not answer", () => {
     try {
       const lines: string[] = [];
       const ui: Ui = { fancy: false, paint: (_style, text) => text, out: (line = "") => void lines.push(line), err: (line = "") => void lines.push(line) };
-      const command = async (...args: string[]): Promise<any> => {
-        await user(parseArgs([...args, "--json", "--config", file]), ui, 300);
+      const commandWithin = async (answerWithinMs: number, ...args: string[]): Promise<any> => {
+        await user(parseArgs([...args, "--json", "--config", file]), ui, answerWithinMs);
         return JSON.parse(lines.at(-1)!);
       };
+      const command = (...args: string[]): Promise<any> => commandWithin(1000, ...args);
       const first = await command("add", "zed");
       assert.deepEqual(await zed(), [["zed", first.user.id, 1]]);
 
       // A removal for good gets no answer: its body is still on its way.
-      await assert.rejects(command("remove", "zed", "--permanent"), (error) => {
+      await assert.rejects(commandWithin(300, "remove", "zed", "--permanent"), (error) => {
         assert.ok(error instanceof NoAnswerError && error.change, `${error}`);
         assert.equal(error.advice![1], `This request names the user it read by its ID, ${first.user.id}, and its version, 1: it removes that user at most once, and no user that gets the name zed later. Running the command again looks the name up afresh, and removes whoever has it then: look first, with vigile user list, that it is the user you mean.`);
         promisesNothing(error.advice!);
@@ -4471,7 +4472,7 @@ describe("a service that takes the connection and does not answer", () => {
 
       // The same with a reset of the key: it gets no answer, the name passes to another user, and the reset
       // that is carried out late does not replace that user's key.
-      await assert.rejects(command("reset-key", "zed"), (error) => {
+      await assert.rejects(commandWithin(300, "reset-key", "zed"), (error) => {
         assert.ok(error instanceof NoAnswerError && error.change, `${error}`);
         assert.equal(error.advice![2], `This request names the user it read by its ID, ${second.user.id}: it does not touch a user that gets the name zed later. Running the command again looks the name up afresh, and resets the key of whoever has it then.`);
         promisesNothing(error.advice!);
