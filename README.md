@@ -26,8 +26,9 @@ The pictures in this file show made-up data.
 
 - **More than one agent is working, and they must not pick the same task.**
   Each agent asks for what can start now, marks a task as in progress when it
-  really starts, and a second agent that tries to start the same task is
-  refused.
+  really starts, and another agent is refused while it is in progress or
+  assigned to someone else. Taking work over explicitly changes its assignment,
+  recording the handoff before it starts.
 - **A plan should outlive the session that made it.** An agent's context ends;
   the plan stays, with every task's description, reason and history, for the
   next session or the next agent to pick up.
@@ -154,8 +155,9 @@ An agent that connects is told the routine, and can read more with `get_guide`:
 
 1. `list_next_tasks` lists what can start now, most important first.
 2. `get` shows a task in full: description, reason, links and version.
-3. `set_task_status` with `in_progress` when it really starts. This assigns the
-   task to the agent.
+3. `set_task_status` with `in_progress` when it really starts. This assigns an
+   unassigned task to the agent. Work assigned to someone else is refused until
+   its assignment is explicitly changed, so a takeover is recorded.
 4. `set_task_status` with `done` when the work is shown to work. `in_review` and
    `paused` are there for when they apply.
 
