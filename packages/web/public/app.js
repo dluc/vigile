@@ -194,8 +194,8 @@ async function all(path, field, input = {}) {
 const COLUMNS = [
   { key: "trouble", title: "Bugs, issues and incidents", tone: "bug", note: "Not finished yet, in any state" },
   { key: "in_progress", title: "In progress", tone: "busy" },
-  { key: "in_review", title: "In review", tone: "review" },
   { key: "next", title: "Next", tone: "go" },
+  { key: "in_review", title: "In review", tone: "review" },
   { key: "waiting", title: "Waiting for dependencies", tone: "wait" },
   { key: "paused", title: "Paused", tone: "idle" },
   { key: "draft", title: "Draft", tone: "idle" },

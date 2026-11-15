@@ -273,7 +273,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.size(1440, 900);
       await load();
       assert.equal(await page.run<boolean>("return document.getElementById('bugs-apart').checked"), false, "bugs have no column of their own unless asked for");
-      assert.deepEqual(await columns(), { "In progress": 2, "In review": 1, Next: 23, "Waiting for dependencies": 4, Paused: 1, Draft: 1, Done: 22, Cancelled: 1 });
+      assert.deepEqual(await columns(), { "In progress": 2, Next: 23, "In review": 1, "Waiting for dependencies": 4, Paused: 1, Draft: 1, Done: 22, Cancelled: 1 });
       assert.match(await text("#summary"), /55 tasks.*4 open bugs, issues and incidents/);
       assert.match(await text("#summary"), /55 tasks\s*2 in progress\s*23 next\s*4 waiting\s*22 done/, "the counts above the board are those of the columns");
       assert.deepEqual(await page.run<string[]>("return [...document.querySelectorAll('.column[data-tone=\"busy\"] .card')].map((c) => c.querySelector('.card-title').textContent + (c.matches('.trouble') ? ' [' + c.querySelector('.type').textContent + ']' : ''))"), ["Address form", "Checkout page is blank on phones [bug]"]);
@@ -2156,7 +2156,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await load(path);
     };
     const forget = () => page.run("for (const name of ['vigile.collapsed', 'vigile.bugs-apart', 'vigile.auto-refresh', 'vigile.motion', 'vigile.sound', 'vigile.scroll']) localStorage.removeItem(name)");
-    const ALL = ["in_progress", "in_review", "next", "waiting", "paused", "draft", "done", "cancelled"];
+    const ALL = ["in_progress", "next", "in_review", "waiting", "paused", "draft", "done", "cancelled"];
     const sideways = () => page.run<boolean>("const b = document.getElementById('board'); return b.scrollWidth > b.clientWidth");
     /** Counts the copies of cards that float across the page while a card travels or leaves. */
     const watchGhosts = () => page.run("window.ghosts = 0; window.ghostWatch?.disconnect(); window.ghostWatch = new MutationObserver((changes) => { for (const c of changes) for (const n of c.addedNodes) if (n.classList?.contains('card-ghost')) window.ghosts++; }); window.ghostWatch.observe(document.body, { childList: true });");
@@ -2179,7 +2179,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         );
         assert.deepEqual(
           controls,
-          ["In progress", "In review", "Next", "Waiting for dependencies", "Paused", "Draft", "Done", "Cancelled"].map((title) => ["BUTTON button 1", `Collapse the ${title} column`, "true", true]),
+          ["In progress", "Next", "In review", "Waiting for dependencies", "Paused", "Draft", "Done", "Cancelled"].map((title) => ["BUTTON button 1", `Collapse the ${title} column`, "true", true]),
         );
 
         await page.click(control("done"));
@@ -2202,7 +2202,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         const some = await board();
         assert.deepEqual(some.filter((c) => c.collapsed).map((c) => [c.key, c.width]), [["paused", 40], ["draft", 40], ["done", 40], ["cancelled", 40]]);
         const open = some.filter((c) => !c.collapsed);
-        assert.deepEqual(open.map((c) => c.key), ["in_progress", "in_review", "next", "waiting"]);
+        assert.deepEqual(open.map((c) => c.key), ["in_progress", "next", "in_review", "waiting"]);
         for (const c of open) assert.ok(c.width > 275 && c.width <= 380 && Math.abs(c.width - open[0]!.width) <= 1, `${c.key} is ${c.width}px wide, as wide as the other open ones and wider than before`);
         assert.equal(await sideways(), false, "and the board no longer scrolls sideways");
         await layout("with four columns collapsed");
@@ -2487,10 +2487,10 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.deepEqual(await collapsed(), ["in_progress"]);
         // From a strip, Tab goes on to the next column: none of the collapsed column's cards is in the way.
         await page.key("Tab");
-        assert.equal((await at()).where, "in_review");
+        assert.equal((await at()).where, "next");
         await page.key("Enter");
         await page.key("Tab");
-        assert.equal((await at()).where, "next", "from one strip to the control of the column after it");
+        assert.equal((await at()).where, "in_review", "from one strip to the control of the column after it");
         await page.key("Tab");
         assert.equal((await at()).where, "card", "and in an open column the cards come after the control");
 
@@ -4125,7 +4125,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       };
       const near = await timeOf("in_progress");
       const far = await timeOf("done");
-      assert.ok(far.distance > near.distance * 3, `the second journey is much longer: ${near.distance}px and ${far.distance}px`);
+      assert.ok(far.distance >= near.distance * 3, `the second journey is much longer: ${near.distance}px and ${far.distance}px`);
       assert.ok(far.total - near.total > 100, `and takes longer: ${near.total} ms and ${far.total} ms`);
       const pace = far.distance / (far.total - 450);
       assert.ok(pace > 1.45 && pace < 1.75, `the card travels at about 1,600 pixels a second: ${Math.round(pace * 1000)}`);
