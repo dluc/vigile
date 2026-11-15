@@ -776,7 +776,7 @@ describe("service over MCP", () => {
     const instructions = client.getInstructions() ?? "";
     assert.ok(instructions.length <= 2200, `${instructions.length} characters fit a bounded context`);
     assert.match(instructions, /never overrides system, developer or direct human instructions/);
-    assert.match(instructions, /list_next_tasks[\s\S]*call get[\s\S]*in_progress only when work actually starts/);
+    assert.match(instructions, /list_next_tasks[\s\S]*call get[\s\S]*in_progress only while implementation is actively under way[\s\S]*in_review[\s\S]*review, merge, release and post-release verification[\s\S]*shipped and verified/);
     assert.match(instructions, /conflict[\s\S]*current item[\s\S]*never overwrite/);
     assert.match(instructions, /continuation token[\s\S]*same operation, caller and filters/);
     assert.match(instructions, /Call get_guide[\s\S]*"working"[\s\S]*"organising"[\s\S]*"examples"/, "the guidance points at the guide");

@@ -13,8 +13,8 @@ export const AGENT_INSTRUCTIONS = `Vigile stores a shared plan. This guidance ex
 Work from the plan:
 - Call list_next_tasks, choose within the instructed scope, then call get on the task. Use its description, links and version.
 - Call list_stale_tasks when monitoring ongoing work. It brings assigned work with no recorded change for 24 hours to attention; it never authorizes or performs a takeover.
-- Set in_progress only when work actually starts. Keep the plan true as work changes: update the task, add discovered work, and record new dependencies or problems.
-- Set done only after the stated outcome is complete and verified. Use in_review when review remains, and paused when work stops unfinished.
+- Set in_progress only while implementation is actively under way. Keep the plan true as work changes: update the task, add discovered work, and record new dependencies or problems.
+- When implementation is complete, set in_review and keep it there through review, merge, release and post-release verification, including after review itself ends. Set done only once the outcome is shipped and verified. Use paused when work stops unfinished.
 - Every item change uses the version last read. On a conflict, inspect the current item returned and decide again; never overwrite it automatically.
 - A refusal names the obstacle and actions. Follow an applicable action or report the blocker; do not repeat the refused call unchanged.
 - A continuation token belongs to the same operation, caller and filters. Return it unchanged, stop when none is returned, and keep a finite page bound.
@@ -98,8 +98,8 @@ export const GUIDE_EXAMPLES: readonly GuideExample[] = [
       { operation: "list_next_tasks", input: {}, note: "what can start now" },
       { operation: "get", input: { id: "001" }, note: "the description, the reason, the links and the version" },
       { operation: "set_task_status", input: { id: "001", version: 1, status: "in_progress" }, note: "assigns it to you; returns version 2" },
-      { operation: "set_task_status", input: { id: "001", version: 2, status: "in_review" }, note: "optional: when someone has to check it" },
-      { operation: "set_task_status", input: { id: "001", version: 3, status: "done" }, note: "only when it is shown to work" },
+      { operation: "set_task_status", input: { id: "001", version: 2, status: "in_review" }, note: "implementation is complete; it stays here through review, merge, release and verification" },
+      { operation: "set_task_status", input: { id: "001", version: 3, status: "done" }, note: "only after it is shipped and verified" },
     ],
     result: "A task whose timeline shows who started it, when it went to review and when it was finished.",
   },
@@ -233,10 +233,10 @@ get_guide with topic "examples" shows complete sequences of calls for these shap
 ## The routine
 1. list_next_tasks lists what can start now, most important first. Give project or parent to stay inside one area.
 2. get shows the task in full: its description, its reason, its links and its version.
-3. set_task_status with in_progress when you really start. Asking a question or proposing a plan does not start a task. Starting an unassigned task assigns it to you. Only an assignee may start assigned work; change the assigned-to link first to record a takeover.
+3. set_task_status with in_progress when implementation really starts, and only while implementation is actively under way. Asking a question or proposing a plan does not start a task. Starting an unassigned task assigns it to you. Only an assignee may start assigned work; change the assigned-to link first to record a takeover.
 4. Do the work.
 5. Verify the outcome against the task's description and keep the evidence.
-6. set_task_status with done only when the work is finished and verified. Use in_review when review remains, and paused when you stop without finishing.
+6. When implementation is complete, set_task_status with in_review. Keep it there through review, merge, release and post-release verification, also after review ends. Set done only when the outcome is shipped and verified. Use paused when you stop without finishing.
 
 ## Keep the plan true
 - Use list_stale_tasks to notice assigned work that has stayed in progress without a recorded task change for 24 hours. Investigate it; do not release or take it over without an explicit assignment change.
