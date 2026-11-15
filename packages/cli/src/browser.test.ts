@@ -5539,7 +5539,12 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await layout("in a small graph on a very wide window");
       for (const [width, height] of [[1280, 800], [1600, 1000]] as const) {
         await page.size(width, height);
-        await page.until("const b = document.getElementById('graph-box').getBoundingClientRect(); return Math.abs(innerHeight - b.bottom - 12) <= 1.5 && Math.abs(window.vigileGraph.height() - document.getElementById('graph-box').clientHeight) < 2", `the box to reach the bottom of a ${width}x${height} window`);
+        try {
+          await page.until("const b = document.getElementById('graph-box').getBoundingClientRect(); return Math.abs(innerHeight - b.bottom - 12) <= 1.5 && Math.abs(window.vigileGraph.height() - document.getElementById('graph-box').clientHeight) < 2", `the box to reach the bottom of a ${width}x${height} window`);
+        } catch (error) {
+          const seen = await page.run("const box = document.getElementById('graph-box'); const b = box.getBoundingClientRect(); return { innerHeight, top: b.top, bottom: b.bottom, height: b.height, setHeight: box.style.height, graphHeight: window.vigileGraph.height(), scrollY, pageHeight: document.documentElement.scrollHeight }");
+          assert.fail(`${(error as Error).message}: ${JSON.stringify(seen)}`);
+        }
         assert.equal((await room()).scrolls, false);
       }
       // In a window too short to leave it room, the box keeps a usable height and the page scrolls the rest.
@@ -6376,7 +6381,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.size(1280, 900);
       await load();
       await page.click("#settings");
-      await page.click("#board-heading");
+      await page.click(".column-head");
       assert.equal(await settingsOpen(), false, "a click elsewhere closes it");
       // By keyboard: Enter opens it, Tab goes through its choices in order, Escape closes it and returns to the button.
       await page.run("document.getElementById('settings').focus()");
@@ -6420,7 +6425,8 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.click("#focus");
       const folded = await place("board");
       assert.equal(await page.run<string | null>("return document.getElementById('focus').getAttribute('aria-pressed')"), "true");
-      assert.deepEqual(await page.run("return ['projects-section', 'summary', 'filter', 'board-heading'].map((id) => Math.round(document.getElementById(id).getBoundingClientRect().height))"), [0, 0, 0, 0], "the projects, the heading, the filter and the counts are gone");
+      assert.deepEqual(await page.run("return ['projects-section', 'summary', 'filter'].map((id) => Math.round(document.getElementById(id).getBoundingClientRect().height))"), [0, 0, 0], "the projects, filter and counts are gone");
+      assert.deepEqual(await page.run("const heading = document.getElementById('board-heading'); const holder = heading.closest('.board-head'); const box = holder.getBoundingClientRect(); return [Math.round(box.width), Math.round(box.height), holder.classList.contains('visually-hidden'), heading.isConnected];"), [1, 1, true, true], "the Tasks heading remains in screen-reader heading navigation");
       assert.ok(folded.top - (await header()) <= 14, `the board starts right under the header: ${folded.top - (await header())}px below it`);
       assert.ok(800 - folded.bottom <= 14 && folded.bottom <= 800, "and reaches the bottom of the window");
       assert.ok(folded.height - open.height > 250, `the board gained ${folded.height - open.height}px`);
@@ -7266,8 +7272,8 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.deepEqual(await cards(), these(...FOUR));
       assert.deepEqual(await says("pit"), { column: "next", kind: "group", tags: ["0/1 done", `in ${z.deep}`, "ZOO"], bar: "0% finished", button: "Zoom in / holds 1 task", name: `Zoom into ${z.pit}: show only the 1 task it holds` });
       assert.deepEqual(
-        await page.run(`const button = document.querySelector(${JSON.stringify(zoomOf("pit"))}); const style = getComputedStyle(button); const cardStyle = getComputedStyle(button.previousElementSibling); return [Math.round(button.getBoundingClientRect().height), style.backgroundColor !== cardStyle.backgroundColor, getComputedStyle(button, '::before').content];`),
-        [40, true, '"↳"'],
+        await page.run(`const button = document.querySelector(${JSON.stringify(zoomOf("pit"))}); const style = getComputedStyle(button); const cardStyle = getComputedStyle(button.previousElementSibling); const icon = button.querySelector('.zoom-into-icon'); return [Math.round(button.getBoundingClientRect().height), style.backgroundColor !== cardStyle.backgroundColor, Math.round(icon.getBoundingClientRect().width), getComputedStyle(icon, '::before').borderTopStyle, getComputedStyle(icon, '::after').width];`),
+        [40, true, 24, "solid", "8px"],
         "the useful action has a full-size, accented affordance of its own",
       );
       assert.match(await text("#summary"), /^17 cards for 18 tasks\s*2 in progress\s*13 next\s*1 waiting\s*1 done/);
@@ -7532,12 +7538,12 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.equal(await text("#scope .scope-text"), `in all projects › ${z.alpha} · Alpha, top level only`);
         await page.click('#scope .crumb[data-step="0"]');
         assert.equal(await text("#scope .scope-text"), "in all projects, top level only");
-        assert.ok(await page.run<boolean>("return document.querySelector('.board-head').getBoundingClientRect().height > 0"), "the line is there for the zoom alone");
+        assert.ok(await page.run<boolean>("return document.getElementById('levels').getBoundingClientRect().height > 0"), "the position line is there for the zoom alone");
         await layout("zoomed out with everything above the board folded away");
         await open("/#board?zoom=3");
         assert.equal(await text("#scope .scope-text"), "in all projects, 3 levels deep");
         await open("/");
-        assert.equal(await page.run<number>("return Math.round(document.querySelector('.board-head').getBoundingClientRect().height)"), 0, "with everything shown there is nothing to say");
+        assert.deepEqual(await page.run("return [document.getElementById('level-out').hidden, document.getElementById('level-in').hidden, document.querySelector('#scope .scope-text').textContent]"), [false, false, "in all projects"], "with no narrowing, position remains beside the available zoom");
         await page.click("#focus");
         assert.equal(await text("#scope .scope-text"), "in all projects");
 
@@ -7563,12 +7569,60 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       }
     });
 
+    it("puts position, zoom, search and counts in three related control surfaces, with the breadcrumb inside zoom on a wide window and a phone", async () => {
+      await page.size(1280, 900);
+      await open();
+      assert.deepEqual(
+        await page.run(`
+          const filters = document.querySelector('.filters');
+          const tools = ['levels', 'filter', 'summary'].map((id) => document.getElementById(id).closest('.board-tool'));
+          const styles = tools.map((tool) => getComputedStyle(tool));
+          const boxes = tools.map((tool) => tool.getBoundingClientRect());
+          return [
+            document.getElementById('scope').parentElement.id,
+            document.getElementById('leave-group').parentElement.id,
+            tools.map((tool) => tool.parentElement === filters),
+            styles.every((style) => style.borderTopStyle === 'solid' && style.borderRadius === styles[0].borderRadius),
+            Math.max(...boxes.map((box) => box.top)) - Math.min(...boxes.map((box) => box.top)) < 2,
+          ];
+        `),
+        ["levels", "levels", [true, true, true], true, true],
+      );
+      assert.equal(await page.run<boolean>("return document.getElementById('clear-filter').hidden"), true);
+      assert.deepEqual(await page.run("const filter = document.getElementById('filter'); const clear = document.getElementById('clear-filter'); return [[...filter.labels].map((label) => label.textContent), clear.getAttribute('aria-label')];"), [["Filter tasks"], "Clear search"], "search and its clear action have independent names");
+      await page.click("#filter");
+      await page.type("Alpha");
+      assert.deepEqual(
+        await page.run("const button = document.getElementById('clear-filter'); const box = button.getBoundingClientRect(); return [button.hidden, button.getAttribute('aria-label'), Math.round(box.width), Math.round(box.height)];"),
+        [false, "Clear search", 40, 40],
+        "a nonempty search offers one full-size clear target",
+      );
+      await page.click("#clear-filter");
+      assert.deepEqual(
+        await page.run("return [document.getElementById('filter').value, document.getElementById('clear-filter').hidden, document.activeElement.id]"),
+        ["", true, "filter"],
+        "one click clears the filter and keeps the keyboard in search",
+      );
+      await page.size(390, 844);
+      assert.deepEqual(
+        await page.run(`
+          const filters = document.querySelector('.filters').getBoundingClientRect();
+          const tools = ['levels', 'filter', 'summary'].map((id) => document.getElementById(id).closest('.board-tool').getBoundingClientRect());
+          const scope = document.getElementById('scope').getBoundingClientRect();
+          const zoom = document.getElementById('level-out').getBoundingClientRect();
+          return [tools.every((tool) => tool.width >= filters.width - 2), scope.top > zoom.top];
+        `),
+        [true, true],
+      );
+      assert.deepEqual(page.errors, []);
+    });
+
     it("can be zoomed with the keyboard alone: the control and the button on a card are reached with Tab, show where the keyboard is, are named for a screen reader, and keep the keyboard as the board is drawn again", async () => {
       await page.size(1280, 900);
       await open();
       assert.deepEqual(
         await page.run("const group = document.getElementById('levels'); return [group.getAttribute('role'), group.getAttribute('aria-label'), document.getElementById('level-out').getAttribute('aria-label'), document.getElementById('level-in').getAttribute('aria-label')]"),
-        ["group", "Zoom of the board: how many levels of groups are open", "Zoom out", "Zoom in"],
+        ["group", "Board position and zoom", "Zoom out", "Zoom in"],
       );
       const ring = () => page.run<string>("const style = getComputedStyle(document.activeElement); return style.outlineStyle + ' ' + style.outlineWidth");
       // The control comes before search; Enter and Space work it, and the keyboard stays on the button.
@@ -7592,6 +7646,15 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.equal(await hash(), "#board?zoom=1");
 
       // On a closed group's card, Enter opens the panel; the next Tab is on the button that zooms in.
+      assert.deepEqual(
+        await page.run(`
+          const icon = document.querySelector('.zoom-into-icon');
+          const box = icon.getBoundingClientRect();
+          return [icon.getAttribute('aria-hidden'), Math.round(box.width), Math.round(box.height), getComputedStyle(icon, '::before').borderTopStyle, getComputedStyle(icon, '::after').width];
+        `),
+        ["true", 24, 24, "solid", "8px"],
+        "a card's zoom action uses a crisp, decorative magnifier-plus icon",
+      );
       await page.run(`${card("alpha")}.focus()`);
       await page.key("Enter");
       await page.until("return !document.getElementById('panel').hidden", "the panel, opened with Enter");
@@ -7617,11 +7680,37 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.key("Enter");
       await page.run("document.querySelector('#scope .crumb[data-step=\"1\"]').focus({ preventScroll: true })");
       assert.deepEqual([await page.run<string>("return document.activeElement.textContent"), await ring()], [z.alpha, "solid 2px"]);
+      await page.size(700, 900);
+      assert.deepEqual(
+        await page.run(`
+          const text = document.querySelector('#scope .scope-text');
+          const crumb = text.querySelector('.crumb');
+          crumb.textContent = 'A deliberately long breadcrumb label that must wrap instead of hiding this focused navigation button';
+          const holder = document.getElementById('levels').getBoundingClientRect();
+          const boxes = [...text.querySelectorAll('.crumb')].map((button) => button.getBoundingClientRect());
+          return [text.getBoundingClientRect().height > 24, boxes.every((box) => box.left >= holder.left && box.right <= holder.right && box.top >= holder.top && box.bottom <= holder.bottom)];
+        `),
+        [true, true],
+        "a long desktop trail wraps and keeps every breadcrumb button visible",
+      );
+      await page.size(390, 844);
+      assert.equal(
+        await page.run(`
+          const holder = document.getElementById('levels').getBoundingClientRect();
+          return [...document.querySelectorAll('#scope .crumb')].every((button) => {
+            const box = button.getBoundingClientRect();
+            return box.left >= holder.left && box.right <= holder.right && box.top >= holder.top && box.bottom <= holder.bottom;
+          });
+        `),
+        true,
+        "the narrow trail grows enough to keep every tabbable breadcrumb visible",
+      );
+      await page.size(1280, 900);
       await page.key("Enter");
       assert.deepEqual([await hash(), await focused()], [`#board?in=${z.alpha}&zoom=1`, `${z.sub} zoom-into`]);
 
-      // Focus mode hides the control cluster. Entering a group still leaves the keyboard on a working way out:
-      // the parent step of the breadcrumb, rather than its noninteractive text.
+      // Focus mode keeps the position part of the unified surface and folds its controls away. Entering a group
+      // leaves the keyboard on the visible breadcrumb out, rather than on noninteractive text.
       await page.click("#leave-group");
       await page.click("#focus");
       await page.run(`document.querySelector('#board .zoom-into[data-id="${z.alpha}"]').focus()`);
@@ -8506,7 +8595,10 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
           }
         }
         // On a phone the trail takes a second line before the group in view is cut off.
-        assert.ok(await page.run<boolean>("const line = document.querySelector('#scope .scope-text'); return line.scrollWidth <= line.clientWidth + 1 && line.getBoundingClientRect().height < 50"));
+        const trailFit = await page.run<{ scrollWidth: number; clientWidth: number; height: number; text: string }>(
+          "const line = document.querySelector('#scope .scope-text'); return { scrollWidth: line.scrollWidth, clientWidth: line.clientWidth, height: line.getBoundingClientRect().height, text: line.textContent }",
+        );
+        assert.ok(trailFit.scrollWidth <= trailFit.clientWidth + 1 && trailFit.height < 50, JSON.stringify(trailFit));
         assert.deepEqual(page.errors, []);
       } finally {
         await page.scheme("light");
