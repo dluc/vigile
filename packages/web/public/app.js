@@ -2349,8 +2349,18 @@ function lockOut(refused = "") {
 async function refresh() {
   try {
     const session = sessions;
-    const turn = ++readings;
-    const [instance, projects, tasks] = await Promise.all([api("instance"), all("list-projects", "projects"), all("list-tasks", "tasks")]);
+    let turn = ++readings;
+    const [instance, projects, firstTasks] = await Promise.all([api("instance"), all("list-projects", "projects"), all("list-tasks", "tasks")]);
+    // An empty plan is valid, but losing every task for one successful-looking reading is also the most damaging
+    // transient answer the page can draw: it looks exactly like lost data. Confirm that boundary before replacing
+    // a populated board. The second ordinary reading also lets the page recover immediately without a reload.
+    let tasks = firstTasks;
+    if (state.loadedAt && state.tasks.length > 0 && firstTasks.length === 0) {
+      // The confirmation is a newer reading than the empty answer. A sound/watch-only reading that began while
+      // the first request was pending must not make this newer task data look stale to `announce`.
+      turn = ++readings;
+      tasks = await all("list-tasks", "tasks");
+    }
     // Another request or tab may have locked the page while these answers were on their way. They belong to the
     // credential and route from before that lockout and may restore neither the plan nor its hidden address.
     if (session !== sessions) return;
