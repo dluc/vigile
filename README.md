@@ -216,7 +216,7 @@ priority by one. The change uses the version the panel read, so another change
 meanwhile is shown as a conflict and never overwritten. Priority affects where
 the task appears in `list_next_tasks`.
 
-- **Board.** Tasks in columns by state: in progress, in review, next, waiting
+- **Board.** Tasks in columns by state: in progress, next, in review, waiting
   for dependencies, paused, draft, done, cancelled.
 - **Graph.** Projects and groups as boxes around their tasks, and an arrow from
   each task to the tasks that wait for it. Drag to move it; zoom with the wheel
