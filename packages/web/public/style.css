@@ -468,6 +468,24 @@ body.graph-full main { padding: 10px 12px 12px; }
 .detail-top[data-tone="busy"] { border-top-color: var(--busy); }
 .detail-top[data-tone="review"] { border-top-color: var(--review); }
 .detail-head { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; padding-right: 44px; min-height: 28px; }
+.copy-id { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 6px 8px; border: 0; border-radius: var(--r-s); background: none; cursor: pointer; }
+.copy-id:hover { background: var(--idle-soft); color: var(--text); }
+.copy-id:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.copy-glyph { position: relative; width: 14px; height: 14px; color: var(--muted); }
+.copy-glyph::before, .copy-glyph::after { content: ""; position: absolute; width: 8px; height: 8px; border: 1.5px solid currentColor; border-radius: 2px; }
+.copy-glyph::before { left: 1px; top: 4px; }
+.copy-glyph::after { left: 4px; top: 1px; background: var(--surface); }
+.copy-feedback { padding: 1px 6px; border-radius: var(--r-pill); background: var(--go-soft); color: var(--go); font: 600 11px var(--sans); }
+.copy-feedback:empty { position: absolute; width: 1px; height: 1px; overflow: hidden; padding: 0; clip-path: inset(50%); white-space: nowrap; }
+.copy-id.copy-failed .copy-feedback { background: var(--stop-soft); color: var(--stop); }
+.description-copy { position: relative; min-width: 0; }
+.description-copy .description { padding-right: 36px; }
+.copy-description { position: absolute; top: -8px; right: -8px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 40px; height: 40px; padding: 0 10px; border: 0; border-radius: var(--r-s); background: var(--raised); color: var(--muted); box-shadow: 0 1px 3px color-mix(in srgb, var(--text) 12%, transparent); cursor: pointer; opacity: 0; transition-property: opacity, background-color, color; transition-duration: 140ms; transition-timing-function: ease-out; }
+.description-copy:hover .copy-description, .description-copy:focus-within .copy-description, .copy-description:has(.copy-feedback:not(:empty)) { opacity: 1; }
+.copy-description:hover { background: var(--idle-soft); color: var(--text); }
+.copy-description:focus-visible { opacity: 1; outline: 2px solid var(--busy); outline-offset: 2px; }
+.copy-description.copy-failed .copy-feedback { background: var(--stop-soft); color: var(--stop); }
+@media (hover: none) { .copy-description { opacity: 1; } }
 .detail-title { margin: 8px 0 0; font-size: 20px; line-height: 1.25; letter-spacing: -0.01em; text-wrap: balance; overflow-wrap: anywhere; }
 .back { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); border-radius: var(--r-m); background: var(--raised); cursor: pointer; text-align: left; color: var(--muted); font-size: 13px; }
 .back:hover { box-shadow: var(--shadow); color: var(--text); }

@@ -460,6 +460,43 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       });
     });
 
+    it("copies an open item's ID and description by click or keyboard, and says when copying is refused", async () => {
+      await page.size(1280, 900);
+      await load();
+      await page.run("Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => { window.copiedId = text; } } })");
+      await page.click(`.column[data-tone='busy'] .card`);
+      await page.until("return !document.getElementById('panel').hidden", "the panel");
+      const id = await text(".detail-head .copy-id");
+      assert.equal(id, ids.address);
+      assert.deepEqual(
+        await page.run("const button = document.querySelector('.copy-id'); const box = button.getBoundingClientRect(); return [button.getAttribute('aria-label'), button.title, Math.round(box.height), button.querySelector('.copy-glyph').getAttribute('aria-hidden')];"),
+        [`Copy ID ${ids.address}`, `Copy ${ids.address} to the clipboard`, 40, "true"],
+      );
+      await page.run("document.querySelector('.copy-id').focus()");
+      await page.key("Enter");
+      await page.until(`return window.copiedId === ${JSON.stringify(ids.address)} && document.querySelector('.copy-feedback').textContent === 'Copied'`, "the ID to be copied and confirmed");
+      assert.equal(await page.run<string>("return document.activeElement.className"), "id copy-id", "copying keeps the keyboard on the control");
+
+      const hoverless = await page.run<boolean>("return matchMedia('(hover: none)').matches");
+      assert.deepEqual(
+        await page.run("const button = document.querySelector('.copy-description'); return [button.getAttribute('aria-label'), button.title, getComputedStyle(button).opacity, matchMedia('(hover: none)').matches, button.querySelector('.copy-glyph').getAttribute('aria-hidden')];"),
+        ["Copy description", "Copy description to the clipboard", hoverless ? "1" : "0", hoverless, "true"],
+        "the description offers a small copy control only on interaction",
+      );
+      await page.run("document.querySelector('.copy-description').focus()");
+      await page.until("return getComputedStyle(document.querySelector('.copy-description')).opacity === '1'", "keyboard focus to reveal the hover control");
+      await page.key("Space");
+      await page.until("return window.copiedId === 'Description of Address form.' && document.querySelector('.copy-description .copy-feedback').textContent === 'Copied'", "the exact description to be copied and confirmed");
+      assert.equal(await page.run<string>("return document.activeElement.className"), "copy-description", "copying the description keeps the keyboard on its control");
+
+      await page.run("navigator.clipboard.writeText = async () => { throw new Error('refused'); }");
+      await page.click(".copy-id");
+      await page.until("return document.querySelector('.copy-feedback').textContent === 'Copy failed'", "the refused copy to be reported");
+      assert.equal(await panelOpen(), true, "a refused clipboard write leaves the item open");
+      assert.deepEqual(page.errors, []);
+      await page.key("Escape");
+    });
+
     it("follows a link inside the panel to the linked item, and scrolls a long panel inside itself", async () => {
       await load();
       await page.click(`.card`, await page.run<number>(`return [...document.querySelectorAll('.card')].findIndex((c) => c.querySelector('.id').textContent === ${JSON.stringify(ids.many)})`));
