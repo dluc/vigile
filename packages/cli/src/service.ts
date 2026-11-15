@@ -1,13 +1,16 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { isIP } from "node:net";
+import { uptime } from "node:os";
 import { join } from "node:path";
-import { LiveAuth, masked, staleKeys, type LoadedConfig } from "@vigile/config";
+import { LiveAuth, masked, saidNothingOf, staleKeys, type LoadedConfig } from "@vigile/config";
 import { Engine, VERSION, VigileError, echo, readAll, type OperationLog } from "@vigile/core";
 import { createApiHandler, sendError } from "@vigile/http-api";
 import { createMcpHandler } from "@vigile/mcp";
 import { SqliteStorage, everHeld, holdFolder } from "@vigile/storage-sqlite";
 import { serveWeb } from "@vigile/web";
+import { BACKUP_TIMES, startBackups, type BackupSchedule } from "./backup-schedule.js";
+import { BACKUPS_LOCK, backupMemory, backupPlaceRefused, refusedPlace, sqliteBackups, unknownRefusal, type BackupHooks } from "./backup.js";
 import { recoverAtStart } from "./restore.js";
 import { codeStamp } from "./stamp.js";
 
@@ -22,6 +25,8 @@ export interface Service {
   urls: { base: string; mcp: string; web: string };
   /** Whether the address it is bound to is this machine talking to itself, however the config writes it. */
   loopbackOnly: boolean;
+  /** The backups the service takes by itself: where they stand, and a look at whether one is due. */
+  backups: Pick<BackupSchedule, "status" | "ready" | "check" | "over">;
   stop(): Promise<void>;
 }
 
@@ -31,6 +36,12 @@ export interface ServiceOptions {
   warn(line: string): void;
   /** Other limits than the usual ones, for tests that cannot wait half a minute. */
   limits?: Partial<typeof LIMITS>;
+  /** Other clocks for the automatic backups, and other times to look at them, for tests that cannot wait a day. */
+  now?(): number;
+  monotonic?(): number;
+  backupTimes?: Partial<typeof BACKUP_TIMES>;
+  /** For tests of a backup that is cut short: see `BackupHooks`. */
+  backupHooks?: BackupHooks;
 }
 
 /**
@@ -259,8 +270,44 @@ export async function startService(options: ServiceOptions): Promise<Service> {
   const started = Date.now();
   const startedCode = codeStamp();
 
+  // Where the automatic backups go is asked of the config as it was loaded, the file with what the environment
+  // and the options of this run put over it: no setting says by itself whether the place is one a backup may
+  // go to. A config that has them go where they may not does not start the service. One exception, for one
+  // reason only, that the folder is this instance's own data folder: a config that says nothing of backups,
+  // from before the service took any, and whose data folder is where they would go by default. "Says nothing" is where the settings came from, not what they are: not one setting of
+  // backups is written in the file, set in the environment or given as an option, whatever its value, and the
+  // data folder is the file's own. Nothing new has to be set for such a config: the service starts, takes no
+  // backup, and says so with what to do, in its log and to the doctor.
+  const refusal = backupPlaceRefused(loaded);
+  if (refusal) {
+    const refused = (): StartupError =>
+      new StartupError(`The automatic backups cannot go where the config has them go. ${refusedPlace(refusal).message}`, [
+        `The backups would go to ${refusal.backups} (backup.folder), and the data is in ${refusal.data} (data_dir).`,
+        "Give the backups a folder of their own: vigile config set backup.folder <folder>. Or turn them off: vigile config set backup.enabled false",
+      ]);
+    switch (refusal.code) {
+      case "same_data_folder_of_this_instance":
+        // The one reason the exception is for, and only for a config that says nothing of backups and whose
+        // data folder is the file's own.
+        if (!(saidNothingOf(loaded, "backup") && (loaded.sources.data_dir === "file" || loaded.sources.data_dir === "default"))) throw refused();
+        break;
+      case "data_folder_of_another_instance":
+        // Never let through, whatever the config says or leaves out: the folder is someone else's data.
+        throw refused();
+      default:
+        unknownRefusal(refusal);
+    }
+  }
+
+  if (existsSync(join(dataDir, BACKUPS_LOCK))) {
+    throw new StartupError(`${dataDir} has been used as an automatic-backup folder and cannot be used as data.`, ["Choose a data folder that has never been a backup destination, or move the backups elsewhere before removing the backup-folder marker."]);
+  }
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const releaseLock = takeLock(dataDir);
+  if (existsSync(join(dataDir, BACKUPS_LOCK))) {
+    releaseLock();
+    throw new StartupError(`${dataDir} was designated as an automatic-backup folder while data ownership was being acquired.`, ["Choose another data folder."]);
+  }
   // A restore that was killed half-way may have left a tenant without its file. Opened like that, the tenant
   // would be begun anew, empty. The folder is this service's now, so it is put in order first.
   try {
@@ -341,6 +388,9 @@ export async function startService(options: ServiceOptions): Promise<Service> {
     return { username: identity.username, id: user.id, keyless: identity.keyless };
   };
 
+  /** Says that automatic backups are off until the service listens, which is when their schedule starts. */
+  let backups: BackupSchedule = startBackups({ everyHours: config.backup.every_hours, folder: loaded.backupDir, keep: config.backup.keep, source: null, now: Date.now, monotonic: () => performance.now(), times: BACKUP_TIMES, log, warn });
+
   const instance = () => ({ name: config.name, version: VERSION });
   const api = createApiHandler({
     engine,
@@ -356,6 +406,7 @@ export async function startService(options: ServiceOptions): Promise<Service> {
       settings: masked(config),
       auth: { keyless_user: auth.current().keyless_user, users_with_keys: Object.keys(auth.current().keys).sort(), keys_of_someone_else: notTheirOwn(auth.current().keys) },
       listen: { loopback_only: loopbackOnly },
+      backups: backups.status(),
     }),
   });
   const mcp = createMcpHandler({ engine, caller, onUnexpected: (error) => warn(`A request to /mcp failed unexpectedly: ${explain(error)}`) });
@@ -438,6 +489,31 @@ export async function startService(options: ServiceOptions): Promise<Service> {
     throw error;
   }
 
+  // Only now that the service listens: a backup that is due at the start is taken a little later, and whatever
+  // happens to it, the service is up.
+  backups = startBackups({
+    everyHours: config.backup.every_hours,
+    folder: loaded.backupDir,
+    keep: config.backup.keep,
+    source: config.backup.enabled ? sqliteBackups({ dataDir, folder: loaded.backupDir, keep: config.backup.keep, hooks: options.backupHooks }) : null,
+    memory: config.backup.enabled ? backupMemory(dataDir) : null,
+    now: options.now ?? Date.now,
+    monotonic: options.monotonic ?? (() => uptime() * 1000),
+    times: { ...BACKUP_TIMES, ...options.backupTimes },
+    log: (line) => {
+      if (config.log_level !== "quiet") log(line);
+    },
+    warn,
+  });
+  // Give ordinary startup recovery time to finish, but never let a stalled backup mount keep the stoppable
+  // service object from being returned. A timed-out readiness operation remains owned by the backup source and
+  // is joined during stop before the data-folder lock is released.
+  const readiness = backups.ready();
+  let readinessTimer: NodeJS.Timeout | undefined;
+  await Promise.race([readiness, new Promise<void>((resolve) => (readinessTimer = setTimeout(resolve, (options.backupTimes?.stopMs ?? BACKUP_TIMES.stopMs))))]);
+  clearTimeout(readinessTimer);
+  readiness.catch((error: unknown) => warn(`The automatic backup folder could not be read: ${explain(error)}`));
+
   let stopping: Promise<void> | null = null;
   return {
     engine,
@@ -445,8 +521,12 @@ export async function startService(options: ServiceOptions): Promise<Service> {
     server,
     urls: { base, mcp: `${base}/mcp`, web: `${base}/` },
     loopbackOnly,
+    backups,
     stop: () =>
       (stopping ??= (async () => {
+        // A backup under way is ended first: it reads the data that is about to be closed. Whatever goes wrong
+        // with that, the service stops.
+        await backups.stop().catch((error: unknown) => warn(`The automatic backup under way could not be ended cleanly: ${explain(error)}`));
         // A page that listens for changes holds its connection open for as long as it likes: end those first.
         api.close();
         await new Promise<void>((resolve) => {
@@ -461,7 +541,15 @@ export async function startService(options: ServiceOptions): Promise<Service> {
         });
         // Waits for the write in flight before the store is closed.
         await engine.close();
-        releaseLock();
+        // A state writer that outlives the bounded stop still owns this data folder. Stop serving now, but keep
+        // the folder lock until final backup settlement confirms that no writer can touch it again.
+        const settled = backups.over();
+        let isSettled = false;
+        let settlementTimer: NodeJS.Timeout | undefined;
+        await Promise.race([settled.then(() => void (isSettled = true)), new Promise<void>((resolve) => (settlementTimer = setTimeout(resolve, 50)))]);
+        clearTimeout(settlementTimer);
+        if (isSettled) releaseLock();
+        else void settled.finally(releaseLock);
       })()),
   };
 }

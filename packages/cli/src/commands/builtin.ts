@@ -42,7 +42,7 @@ export const BUILTINS: readonly Builtin[] = [
     group: "Run",
     words: [],
     // Any setting can be overridden for one run, as in `--listen.port 8701`.
-    options: SETTINGS.map((setting) => ({ name: setting.key, value: setting.type === "number" ? "number" : "text", text: `for this run: ${setting.description.charAt(0).toLowerCase()}${setting.description.slice(1)}` })),
+    options: SETTINGS.map((setting) => ({ name: setting.key, value: setting.type === "number" || setting.type === "decimal" ? "number" : setting.type === "boolean" ? "true|false" : "text", text: `for this run: ${setting.description.charAt(0).toLowerCase()}${setting.description.slice(1)}` })),
     text: "start the service: MCP, HTTP API and web page on one port",
     more: ["Runs until it is stopped. A setting given here counts for this run and is not written to the config."],
   },
@@ -60,7 +60,7 @@ export const BUILTINS: readonly Builtin[] = [
     words: [{ name: "folder" }],
     options: [],
     text: "write a consistent copy of the data, while the service runs",
-    more: ["The folder is created if needed. Each tenant becomes one file in it."],
+    more: ["The folder is created if needed. Each tenant becomes one file in it.", "The service also takes backups by itself: see the settings backup.enabled, backup.every_hours, backup.folder and backup.keep."],
   },
   {
     name: "restore-backup",
@@ -68,7 +68,7 @@ export const BUILTINS: readonly Builtin[] = [
     words: [{ name: "backup file" }],
     options: [{ name: "tenant", value: "name", text: "the tenant the file is a backup of, when the file's name does not say" }],
     text: "put a backup in the place of the data, while the service is stopped",
-    more: ["The file is one that vigile backup wrote. Stop the service first."],
+    more: ["The file is one that vigile backup wrote, or one the service wrote by itself. Stop the service first."],
   },
   {
     name: "config init",

@@ -1,7 +1,8 @@
 import { resolve } from "node:path";
-import { SETTINGS, initConfig, loadConfig, masked, setValue, unsetValue, type Config } from "@vigile/config";
+import { SETTINGS, initConfig, loadConfig, masked, setValue, unsetValue, type Config, type ResultingConfig } from "@vigile/config";
 import { allUsers } from "../answers.js";
 import { UsageError, configPath, flag, type Args } from "../args.js";
+import { backupPlaceRefused, refusedPlace, unknownRefusal } from "../backup.js";
 import { ANSWER_WITHIN_MS, NoAnswerError } from "../client.js";
 import { connect, inTheServicesPlace } from "../reach.js";
 import { accent, dim, fields, heading, note, pad, type Ui } from "../ui.js";
@@ -17,6 +18,29 @@ const RESTART = "Restart the service for this to take effect.";
 const UNTIL_THEN: Record<string, string> = { name: "it still goes by its old name", data_dir: "it still holds the data folder it was started on" };
 const applies = (key: string): string =>
   key.startsWith("auth.") ? "Auth settings apply at once, without a restart." : Object.hasOwn(UNTIL_THEN, key) ? `${RESTART} Until then the commands that call the service refuse to: ${UNTIL_THEN[key]}.` : RESTART;
+
+/**
+ * The settings that decide whether automatic backups are taken and where they and the data are. A change to any
+ * of them is looked at as the config that results, before it is written: where backups may go depends on all
+ * three together, so turning backups on is as much a change of place as naming a folder is.
+ */
+const PLACE_BACKUPS = new Set(["backup.enabled", "backup.folder", "backup.every_hours", "backup.keep", "data_dir"]);
+const placesBackups = (key: string, change: string): ((resulting: ResultingConfig) => void) | undefined =>
+  PLACE_BACKUPS.has(key)
+    ? (resulting) => {
+        const refusal = backupPlaceRefused(resulting);
+        if (!refusal) return;
+        const where = `${change}, the automatic backups would go to ${refusal.backups} (backup.folder) and the data is in ${refusal.data} (data_dir). Nothing was changed.`;
+        switch (refusal.code) {
+          case "same_data_folder_of_this_instance":
+            throw new UsageError(refusedPlace(refusal).message, [where, "Give the backups a folder of their own first: vigile config set backup.folder <folder>. Or turn them off: vigile config set backup.enabled false"]);
+          case "data_folder_of_another_instance":
+            throw new UsageError(refusedPlace(refusal).message, [where, "Name a folder that is no instance's data folder: vigile config set backup.folder <folder>. Or turn them off: vigile config set backup.enabled false"]);
+          default:
+            return unknownRefusal(refusal);
+        }
+      }
+    : undefined;
 
 /** How long the service is given to answer is a parameter for the tests, and so is what is called once the data folder is held for a write in the service's place. */
 export async function config(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_MS, taken?: () => unknown): Promise<void> {
@@ -59,11 +83,12 @@ export async function config(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
       given(builtin("config show"), args);
       const loaded = loadConfig(path);
       const shown = masked(loaded.config);
-      if (json) return ui.out(JSON.stringify({ path: loaded.path, data_dir: loaded.dataDir, config: shown, sources: loaded.sources }, null, 2));
+      if (json) return ui.out(JSON.stringify({ path: loaded.path, data_dir: loaded.dataDir, backup_folder: loaded.backupDir, config: shown, sources: loaded.sources }, null, 2));
       heading(ui, "Config");
       fields(ui, [
         ["File", loaded.path],
         ["Data", loaded.dataDir],
+        ["Backups", loaded.config.backup.enabled ? loaded.backupDir : `${loaded.backupDir} (automatic backups are off)`],
       ]);
       ui.out();
       const size = Math.max(...SETTINGS.map((s) => s.key.length));
@@ -115,7 +140,7 @@ export async function config(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
       }
       // Any other setting, and this one when the service was asked, is written beside a service that may run:
       // it reads the file when it starts, or took part in the check.
-      updated ??= setValue(path, key, value);
+      updated ??= setValue(path, key, value, placesBackups(key, `With ${key} = ${JSON.stringify(value)}`));
       if (json) return ui.out(JSON.stringify({ [key]: valueAt(updated, key), ...(unchecked ? { warning: unchecked } : {}) }));
       note(ui, "ok", `${key} = ${JSON.stringify(valueAt(updated, key))}`, unchecked ?? applies(key));
       return;
@@ -123,7 +148,7 @@ export async function config(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
 
     case "unset": {
       const [key] = given(builtin("config unset"), args).words as [string];
-      const updated = unsetValue(path, key);
+      const updated = unsetValue(path, key, placesBackups(key, `With ${key} back to its default`));
       if (json) return ui.out(JSON.stringify({ [key]: valueAt(updated, key) }));
       note(ui, "ok", `${key} is back to its default: ${JSON.stringify(valueAt(updated, key))}`, applies(key));
       return;

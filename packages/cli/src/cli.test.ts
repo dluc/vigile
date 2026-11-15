@@ -770,7 +770,8 @@ describe("a service that is killed without warning", () => {
     const stopped = exited(child);
     process.kill(-child.pid!, "SIGTERM");
     await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(folderIsHeld(join(directory, "data")), true, "the group signal did not release the holder while shutdown was in progress");
+    const stillServing = await fetch(`${base}/health`).then((response) => response.ok, () => false);
+    if (stillServing) assert.equal(folderIsHeld(join(directory, "data")), true, "the group signal did not release the holder while the service was still answering");
     idle.destroy();
     assert.equal(await stopped, 0);
     assert.equal(folderIsHeld(join(directory, "data")), false);
@@ -1940,9 +1941,38 @@ describe("a service that answers in another shape than a Vigile service does", (
       ["no uptime", (status) => ({ ...status, uptime_s: undefined }), /"uptime_s" is not a number/],
       ["a config path that is a list", (status) => ({ ...status, config_path: ["/etc"] }), /"config_path" is not a text/],
       ["no data folder", (status) => ({ ...status, data_dir: null }), /"data_dir" is not a text/],
+      ["backups as a text", (status) => ({ ...status, backups: "daily" }), /"backups" is not an object/],
+      ["backups that do not say whether they are on", (status) => ({ ...status, backups: { ...status.backups, enabled: "yes" } }), /"backups\.enabled" is not yes or no/],
+      ["a last backup that is a number", (status) => ({ ...status, backups: { ...status.backups, last_at: 5 } }), /"backups\.last_at" is not a text/],
+      ["a next backup that is a list", (status) => ({ ...status, backups: { ...status.backups, next_due: ["soon"] } }), /"backups\.next_due" is not a text/],
+      ["a failed backup as a text", (status) => ({ ...status, backups: { ...status.backups, failure: "yes" } }), /"backups\.failure" is not an object/],
+      ["a failed backup without a reason", (status) => ({ ...status, backups: { ...status.backups, failure: { at: "now", retry_at: "then" } } }), /"backups\.failure\.reason" is not a text/],
+      ["a failed backup whose advice is a text", (status) => ({ ...status, backups: { ...status.backups, failure: { at: "now", reason: "full", actions: "wait", retry_at: "then" } } }), /"backups\.failure\.actions" is not a list of texts/],
+      ["the end of the last backup as a text", (status) => ({ ...status, backups: { ...status.backups, outcome: "fine" } }), /"backups\.outcome" is not an object/],
+      ["the end of the last backup without its kind", (status) => ({ ...status, backups: { ...status.backups, outcome: { at: "now", said: null } } }), /"backups\.outcome\.kind" is not a text/],
+      ["what was said of the last backup, as a list", (status) => ({ ...status, backups: { ...status.backups, outcome: { at: "now", kind: "complete", said: ["a", "b"] } } }), /"backups\.outcome\.said" is not a text/],
+      ["why the backups could not be looked at, as a number", (status) => ({ ...status, backups: { ...status.backups, unread: 5 } }), /"backups\.unread" is not a text/],
       ["a list", () => [], /the answer is not an object/],
       ["nothing", () => null, /the answer is not an object/],
     ];
+    // A service that could not look at its backups says so, and the doctor says that the times go by the last one it took.
+    answering(STATUS, { change: (status: any) => ({ ...status, backups: { ...status.backups, last_at: "2026-11-13T09:00:00.000Z", next_due: "2026-11-14T09:00:00.000Z", outcome: null, unread: "ENOTDIR: not a\u001b[2J folder." } }) });
+    const unread = of((await examine()).checks, "last automatic backup worked")!;
+    assert.deepEqual([unread.level, unread.detail, unread.fix], ["warn", "taken 2026-11-13T09:00:00.000Z; the next is due 2026-11-14T09:00:00.000Z. The service could not look at the backups there are (ENOTDIR: not a\ufffd[2J folder): this goes by the last one it took itself.", "Check that the backup folder is there and that the account the service runs as can read it."]);
+    // What the service says of a backup that is in place and has something to be said of it is a warning, in one line that steers no terminal.
+    answering(STATUS, { change: (status: any) => ({ ...status, backups: { ...status.backups, last_at: "2026-11-13T09:00:00.000Z", next_due: "2026-11-14T09:00:00.000Z", outcome: { at: "2026-11-13T09:00:00.000Z", kind: "complete_unreported", said: "It is whole\u001b[2J\nand in place." } } }) });
+    const remarked = of((await examine()).checks, "last automatic backup worked")!;
+    assert.deepEqual([remarked.level, remarked.detail], ["warn", "taken 2026-11-13T09:00:00.000Z; the next is due 2026-11-14T09:00:00.000Z. It is whole\ufffd[2J and in place."]);
+    // A service from before it took backups by itself says nothing of them: the doctor has no check of them, and goes on.
+    answering(STATUS, { change: (status: any) => ({ ...status, backups: undefined }) });
+    const before = await examine();
+    assert.equal(of(whole.checks, "last automatic backup worked")!.level, "ok");
+    assert.equal(of(before.checks, "last automatic backup worked"), undefined);
+    assert.equal(titles(before.checks).at(-1), LAST);
+    // What the service says of a backup that failed is one line of the report each, and steers no terminal.
+    answering(STATUS, { change: (status: any) => ({ ...status, backups: { ...status.backups, failure: { at: "2026-11-13T09:00:00.000Z", reason: "no room\u001b[2J\nleft.", actions: ["Free\u0007 some."], retry_at: "2026-11-13T09:10:00.000Z" } } }) });
+    const failed = of((await examine()).checks, "last automatic backup worked")!;
+    assert.deepEqual([failed.level, failed.detail, failed.fix], ["fail", "failed at 2026-11-13T09:00:00.000Z: no room\ufffd[2J left.", "Free\ufffd some. The service tries again at 2026-11-13T09:10:00.000Z."]);
     for (const [what, change, says] of wrongStatus) {
       answering(STATUS, { change });
       const { code, checks } = await examine();

@@ -1,10 +1,9 @@
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
-import { loadConfig } from "@vigile/config";
+import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { basename, join } from "node:path";
+import { NoPlace, kindOf, loadConfig, placeOf, samePlace } from "@vigile/config";
 import { assertTenantName } from "@vigile/storage";
 import { backupTenantFile, holdFolder, holdTenantFiles, inspectTenantFile } from "@vigile/storage-sqlite";
 import { UsageError, configPath, flag, type Args } from "../args.js";
-import { samePlace } from "../paths.js";
 import { BESIDE, BESIDE_COPY, FILES_WAIT_MS, isWorkingFile, putInPlace, recoverRestore, restoreInterrupted, stagingFile, openAsPlan } from "../restore.js";
 import { StartupError, earlierService, earlierServiceRuns } from "../service.js";
 import { dim, note, type Ui } from "../ui.js";
@@ -13,8 +12,11 @@ import { builtin, given } from "./builtin.js";
 /** What a check found, without the "ok" of the part of it that passed. */
 const found = (messages: string[]): string => (messages.filter((message) => message !== "ok").join("; ") || messages.join("; "));
 
-/** A backup is named after its tenant and the moment it was taken: default-20261113-090247-123.sqlite. */
-const BACKUP_NAME = /^([a-z][a-z0-9-]*)-\d{8}-\d{6}(?:-\d{3})?\.sqlite$/;
+/**
+ * A backup is named after its tenant and the moment it was taken: default-20261113-090247-123.sqlite. One that
+ * the service took by itself says so after the moment: default-20261113-090247-123-auto.sqlite.
+ */
+const BACKUP_NAME = /^([a-z][a-z0-9-]*)-\d{8}-\d{6}(?:-\d{3})?(?:-auto)?\.sqlite$/;
 
 /**
  * Puts a backup in the place of a tenant's data. The service must be stopped: the data folder is held for as
@@ -29,9 +31,20 @@ export async function restoreBackup(args: Args, ui: Ui): Promise<void> {
   const json = flag(args, "json");
   const loaded = loadConfig(configPath(args));
   const typed = given(builtin("restore-backup"), args);
-  const source = resolve(typed.words[0]!);
+  // The file the words lead to, as the system walks them: the one that is then read, checked and named.
+  let source: string;
+  try {
+    source = placeOf(typed.words[0]!);
+  } catch (error) {
+    // A path that leads nowhere is said to, with why: no other file is looked for in its place.
+    if (error instanceof NoPlace) throw new UsageError(`${error.message}.`, ["Give the backup file by a path that leads to it."]);
+    throw error;
+  }
   if (!existsSync(source)) throw new UsageError(`There is no file ${source}.`);
-  const tenant = typed.value("tenant") ?? BACKUP_NAME.exec(basename(source))?.[1];
+  // A backup is a plain file. Anything else under the name, a pipe or a folder, is not opened to find out.
+  const kind = kindOf(statSync(source));
+  if (kind !== "file") throw new UsageError(`${source} is not a file: it is a ${kind}.`, ["Give a file that vigile backup wrote, or one of the service's automatic backups."]);
+  const tenant = typed.value("tenant") ?? BACKUP_NAME.exec(basename(typed.words[0]!))?.[1];
   if (!tenant) throw new UsageError(`The name of ${basename(source)} does not say which tenant it is a backup of.`, ["Say it: vigile restore-backup <backup file> --tenant default"]);
   // A tenant's name is a file's name in the data folder, and nothing that leads out of it.
   try {
@@ -41,8 +54,8 @@ export async function restoreBackup(args: Args, ui: Ui): Promise<void> {
   }
   const target = join(loaded.dataDir, `${tenant}.sqlite`);
   // The data file, and what lies beside it, are what a restore moves aside: none of them is a backup of the data.
-  if ([target, ...BESIDE.map((suffix) => target + suffix)].some((file) => source === resolve(file) || samePlace(source, file))) {
-    throw new UsageError(`${source} is the data itself, not a backup of it.`, ["Give a file that vigile backup wrote."]);
+  if ([target, ...BESIDE.map((suffix) => target + suffix)].some((file) => samePlace(source, file))) {
+    throw new UsageError(`${source} is the data itself, not a backup of it.`, ["Give a file that vigile backup wrote, or one of the service's automatic backups."]);
   }
   // The copy of the backup is made under this name beside the data, and removed when the restore ends. A
   // backup that is that very file would be copied onto itself and then moved or removed.

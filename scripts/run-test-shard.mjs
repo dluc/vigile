@@ -7,7 +7,8 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const shard = process.argv[2];
 const { BROWSER_TEST_SHARDS } = await import(pathToFileURL(join(root, "packages/cli/dist/browser-shards.js")));
 const browserShards = new Set(Object.keys(BROWSER_TEST_SHARDS));
-if (shard !== "non-browser" && !browserShards.has(shard)) {
+const nonBrowserShards = new Set(["non-browser", "non-browser-backup", "non-browser-resilience"]);
+if (!nonBrowserShards.has(shard) && !browserShards.has(shard)) {
   console.error(`Unknown test shard: ${shard ?? "(none)"}`);
   process.exit(2);
 }
@@ -16,7 +17,7 @@ if (shard !== "non-browser" && !browserShards.has(shard)) {
 // adding a suite to a new shard without giving that shard a runner must fail every existing shard, not skip tests.
 const workflow = readFileSync(join(root, ".github/workflows/tests.yml"), "utf8");
 const inWorkflow = new Set([...workflow.matchAll(/^\s+shard:\s+(\S+)\s*$/gm)].map((match) => match[1]));
-const expected = new Set(["non-browser", ...browserShards]);
+const expected = new Set([...nonBrowserShards, ...browserShards]);
 if (inWorkflow.size !== expected.size || [...expected].some((name) => !inWorkflow.has(name))) {
   console.error(`Workflow shards ${JSON.stringify([...inWorkflow].sort())} do not match ${JSON.stringify([...expected].sort())}.`);
   process.exit(2);
@@ -38,7 +39,18 @@ if (browser.length !== 1) {
   console.error(`Expected one compiled browser test, found ${browser.length}.`);
   process.exit(2);
 }
-const files = shard === "non-browser" ? all.filter((path) => path !== browser[0]) : browser;
+const nonBrowser = all.filter((path) => path !== browser[0]);
+const relativeName = (path) => relative(root, path).split(sep).join("/");
+const dedicated = new Map([
+  ["non-browser-backup", "packages/cli/dist/backup.test.js"],
+  ["non-browser-resilience", "packages/core/dist/resilience.test.js"],
+]);
+const dedicatedFiles = new Set(dedicated.values());
+const files = browserShards.has(shard)
+  ? browser
+  : shard === "non-browser"
+    ? nonBrowser.filter((path) => !dedicatedFiles.has(relativeName(path)))
+    : nonBrowser.filter((path) => relativeName(path) === dedicated.get(shard));
 if (!files.length) {
   console.error(`Test shard ${shard} is empty.`);
   process.exit(2);
