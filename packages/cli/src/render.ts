@@ -203,6 +203,22 @@ const tasks =
     ui.out();
   };
 
+/** Quiet assigned work, with the timing evidence that makes each claim belong in this list. */
+const staleTasks: Printer = (ui, result) => {
+  ui.out();
+  table<any>(ui, result.claims, [
+    { title: "ID", value: (task) => task.id, style: () => "cyan" },
+    { title: "QUIET SINCE", value: (task) => task.quiet_since },
+    { title: "ATTENTION SINCE", value: (task) => task.attention_since },
+    { title: "ASSIGNED", value: (task) => task.assigned_to.join(",") },
+    { title: "TITLE", value: (task) => titled(task.title) },
+  ]);
+  ui.out(result.claims.length ? "" : `  ${dim(ui, "No assigned work has been quiet past the attention threshold.")}`);
+  ui.out(`  ${dim(ui, `Attention threshold: ${result.attention_after_hours} hours without a recorded task change`)}`);
+  more(ui, result);
+  ui.out();
+};
+
 const projects: Printer = (ui, result) => {
   ui.out();
   table<any>(ui, result.projects, [
@@ -298,6 +314,7 @@ const PRINTED: Record<string, Printer> = {
   set_task_status: item,
   list_tasks: tasks(false),
   list_next_tasks: tasks(true),
+  list_stale_tasks: staleTasks,
   get: read,
   delete: deleted,
   restore: item,

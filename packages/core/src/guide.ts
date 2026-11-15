@@ -12,6 +12,7 @@ export const AGENT_INSTRUCTIONS = `Vigile stores a shared plan. This guidance ex
 
 Work from the plan:
 - Call list_next_tasks, choose within the instructed scope, then call get on the task. Use its description, links and version.
+- Call list_stale_tasks when monitoring ongoing work. It brings assigned work with no recorded change for 24 hours to attention; it never authorizes or performs a takeover.
 - Set in_progress only when work actually starts. Keep the plan true as work changes: update the task, add discovered work, and record new dependencies or problems.
 - Set done only after the stated outcome is complete and verified. Use in_review when review remains, and paused when work stops unfinished.
 - Every item change uses the version last read. On a conflict, inspect the current item returned and decide again; never overwrite it automatically.
@@ -238,6 +239,7 @@ get_guide with topic "examples" shows complete sequences of calls for these shap
 6. set_task_status with done only when the work is finished and verified. Use in_review when review remains, and paused when you stop without finishing.
 
 ## Keep the plan true
+- Use list_stale_tasks to notice assigned work that has stayed in progress without a recorded task change for 24 hours. Investigate it; do not release or take it over without an explicit assignment change.
 - The status is read by others to decide what to do. Do not mark a task in progress to reserve it, or done before it is shown to work.
 - When you find something broken, create a task with type bug, issue or incident, inside the group it affects. Do not hide it in another task's description.
 - When work turns out to have several steps, create them inside the task with parent: the task becomes a group and reports its progress.

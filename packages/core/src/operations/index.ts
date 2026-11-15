@@ -9,6 +9,7 @@ import { get } from "./get.js";
 import { listLinkTypes } from "./list-link-types.js";
 import { listNextTasks } from "./list-next-tasks.js";
 import { listProjects } from "./list-projects.js";
+import { listStaleTasks } from "./list-stale-tasks.js";
 import { listTasks } from "./list-tasks.js";
 import { listUsers } from "./list-users.js";
 import { overrideTimestamp } from "./override-timestamp.js";
@@ -29,6 +30,7 @@ export const OPERATIONS: readonly Operation[] = [
   setTaskStatus,
   listTasks,
   listNextTasks,
+  listStaleTasks,
   get,
   deleteItem,
   restore,
