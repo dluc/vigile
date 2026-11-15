@@ -10,7 +10,7 @@ import { newLink, statusEntry, touch, version } from "./shared.js";
 export const setTaskStatus = defineWrite({
   name: "set_task_status",
   description:
-    "Change a task's status: draft, open, in_progress, paused, in_review, done or cancelled. Set in_progress only when work actually starts, done only after its outcome is complete and verified, in_review while review remains, and paused when work stops unfinished. Moves the rules do not allow are refused, and the error says what is in the way and what to do. A task cannot be started or marked done while something it depends on is unfinished. Starting an unassigned task assigns it to you; only an assignee may start assigned work, so taking it over requires changing its assigned-to link first. A task already in progress cannot be started again, so two agents cannot take the same task.",
+    "Change a task's status: draft, open, in_progress, paused, in_review, done or cancelled. Use in_progress only while implementation is actively under way. When implementation is complete, use in_review through review, merge, release and post-release verification, including after review ends. Use done only once the outcome is shipped and verified, and paused when work stops unfinished. Moves the rules do not allow are refused, and the error says what is in the way and what to do. A task cannot be started or marked done while something it depends on is unfinished. Starting an unassigned task assigns it to you; only an assignee may start assigned work, so taking it over requires changing its assigned-to link first. A task already in progress cannot be started again, so two agents cannot take the same task.",
   access: "all",
   input: z.strictObject({
     id: z.string().describe("The task's ID."),

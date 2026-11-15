@@ -158,8 +158,10 @@ An agent that connects is told the routine, and can read more with `get_guide`:
 3. `set_task_status` with `in_progress` when it really starts. This assigns an
    unassigned task to the agent. Work assigned to someone else is refused until
    its assignment is explicitly changed, so a takeover is recorded.
-4. `set_task_status` with `done` when the work is shown to work. `in_review` and
-   `paused` are there for when they apply.
+4. When implementation is complete, `set_task_status` with `in_review`. Keep it
+   there through review, merge, release and post-release verification, including
+   after the review itself ends. Use `done` only once the outcome is shipped and
+   verified. `paused` is for work that stops unfinished.
 
 `list_stale_tasks` brings assigned work to attention when it has stayed in
 progress for 24 hours without a recorded change to the task. It reports when
