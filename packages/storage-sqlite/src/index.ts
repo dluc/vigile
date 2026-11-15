@@ -1,5 +1,9 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { closeSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import type { DatabaseSync as Database } from "node:sqlite";
 import {
   FORMAT_VERSION,
@@ -54,7 +58,6 @@ function openDatabase(file: string, options?: { readOnly?: boolean }): Database 
   return options ? new DatabaseSync(file, options) : new DatabaseSync(file);
 }
 /** SQLite's code for "another connection has the lock". */
-const SQLITE_BUSY = 5;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS head (
@@ -333,24 +336,155 @@ export class SqliteStorage implements StorageAdapter {
 
 /** The file whose lock says that a service has the data folder. It holds nothing; only its lock matters. */
 const HOLD_FILE = "vigile.hold";
+/** The current lock, owned by its holder child and inspected only by a separate checker process. */
+const OWNER_FILE = "vigile.owner";
 /** Two starts at the same moment can refuse each other. Each tries again a few times, after a pause of its own. */
 const HOLD_TRIES = 4;
 
-const isBusy = (error: unknown): boolean => (error as { errcode?: number }).errcode === SQLITE_BUSY || /database is locked/.test((error as Error).message);
-
-function tryHold(directory: string): Database | null {
-  return tryHoldFile(join(directory, HOLD_FILE));
+/**
+ * Starts a holder child for each generation of the folder lock. Diagnostics inspect both through a separate
+ * checker process, so on POSIX this process never opens either record-locked file and cannot release a holder's
+ * lock by closing another descriptor. Holding both keeps older and current services and commands out.
+ */
+function tryHoldFolder(directory: string): (() => void) | null {
+  needSqlite();
+  const releaseOwner = holdFile(join(directory, OWNER_FILE));
+  if (!releaseOwner) return null;
+  try {
+    const releaseLegacy = holdFile(join(directory, HOLD_FILE));
+    if (!releaseLegacy) {
+      releaseOwner();
+      return null;
+    }
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      let first: unknown;
+      try {
+        releaseLegacy();
+      } catch (error) {
+        first = error;
+      }
+      try {
+        releaseOwner();
+      } catch (error) {
+        if (first) throw new AggregateError([first, error], "The data-folder locks could not both be confirmed released.");
+        throw error;
+      }
+      if (first) throw first;
+    };
+    type HeldRelease = (() => void) & { holderPid: number };
+    Object.defineProperty(release, "holderPids", { value: [(releaseOwner as HeldRelease).holderPid, (releaseLegacy as HeldRelease).holderPid] });
+    return release;
+  } catch (error) {
+    releaseOwner();
+    throw error;
+  }
 }
 
-function tryHoldFile(file: string): Database | null {
-  const db = openDatabase(file);
+interface HeldLock {
+  child: ChildProcess;
+  release(): void;
+}
+
+function tryHoldFile(file: string): HeldLock | null {
+  needSqlite();
+  const exchange = mkdtempSync(join(tmpdir(), "vigile-lock-"));
+  const answer = join(exchange, "answer.json");
+  const released = join(exchange, "released");
+  const accepted = join(exchange, "accepted");
+  const disarm = join(exchange, "disarm");
+  const disarmed = join(exchange, "disarmed");
+  const heartbeat = join(exchange, "heartbeat");
+  const child = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./lock-holder.js", import.meta.url)), file, answer, released, accepted, disarm, disarmed, heartbeat], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  let spawnError: Error | null = null;
+  child.on("error", (error) => {
+    spawnError = error;
+  });
+  if (child.pid === undefined) {
+    rmSync(exchange, { recursive: true, force: true });
+    throw new Error(`The system lock helper could not start for ${file}.`);
+  }
+  let keepExchange = false;
+  let expectedExit = false;
+  let acceptSent = false;
+  const forceStop = (): void => {
+    if (child.exitCode !== null) return;
+    if (!acceptSent) return child.kill("SIGKILL"), undefined;
+    writeFileSync(disarm, "", { mode: 0o600 });
+    const until = Date.now() + 10_000;
+    while (!existsSync(disarmed) && child.exitCode === null && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    if (!existsSync(disarmed)) {
+      process.stderr.write(`The system lock watchdog could not be disarmed for ${file}. Stopping rather than risking loss of exclusion.\n`);
+      process.exit(1);
+    }
+    if (child.exitCode === null) child.kill("SIGKILL");
+  };
   try {
-    db.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE");
-    return db;
+    const until = Date.now() + 10_000;
+    while (!existsSync(answer)) {
+      if (spawnError || child.exitCode !== null || Date.now() >= until) throw new Error(`The system lock helper did not answer for ${file}.`, spawnError ? { cause: spawnError } : undefined);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+    const result = JSON.parse(readFileSync(answer, "utf8")) as { held?: boolean; error?: string };
+    if (result.error) throw new Error(result.error);
+    if (!result.held) {
+      expectedExit = true;
+      child.kill("SIGKILL");
+      return null;
+    }
+    if (child.exitCode !== null || !child.connected) throw new Error(`The system lock helper stopped before ${file} was accepted.`);
+    acceptSent = true;
+    child.send("accept");
+    const acceptUntil = Date.now() + 10_000;
+    while (!existsSync(accepted)) {
+      if (spawnError || child.exitCode !== null || Date.now() >= acceptUntil) {
+        expectedExit = true;
+        if (child.exitCode === null && child.connected) child.send("cancel");
+        const cancelUntil = Date.now() + 10_000;
+        while (!existsSync(released) && child.exitCode === null && Date.now() < cancelUntil) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        if (!existsSync(released)) forceStop();
+        throw new Error(`The system lock helper did not confirm acceptance of ${file}.`, spawnError ? { cause: spawnError } : undefined);
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+    keepExchange = true;
+    let done = false;
+    child.on("exit", () => {
+      if (!expectedExit) {
+        rmSync(exchange, { recursive: true, force: true });
+        process.stderr.write(`The process holding the system lock on ${file} ended unexpectedly. Stopping rather than continuing without exclusion.\n`);
+        process.exit(1);
+      }
+    });
+    // The operating-system lock and the listeners remain; neither the child handle nor its IPC channel should
+    // keep an otherwise finished command alive merely because it holds a process-lifetime lock.
+    child.unref();
+    child.channel?.unref();
+    const release = () => {
+      if (done) return;
+      done = true;
+      expectedExit = true;
+      if (child.exitCode === null && child.connected) child.send("release");
+      const until = Date.now() + 10_000;
+      while (!existsSync(released) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      const confirmed = existsSync(released);
+      if (!confirmed) forceStop();
+      rmSync(exchange, { recursive: true, force: true });
+      if (!confirmed) throw new Error(`The system lock helper did not confirm release of ${file}.`);
+    };
+    Object.defineProperty(release, "holderPid", { value: child.pid });
+    return {
+      child,
+      release,
+    };
   } catch (error) {
-    db.close();
-    if (isBusy(error)) return null;
+    expectedExit = true;
+    if (!existsSync(released)) forceStop();
     throw error;
+  } finally {
+    if (!keepExchange) rmSync(exchange, { recursive: true, force: true });
   }
 }
 
@@ -391,9 +525,9 @@ const notFlushed = (folder: string, error: unknown): Error =>
  * died. The file itself stays; it holds nothing.
  */
 export function holdFile(file: string): (() => void) | null {
-  let db: Database | null;
+  let holder: HeldLock | null;
   try {
-    db = tryHoldFile(file);
+    holder = tryHoldFile(file);
   } catch (error) {
     // Something else stands under that name. It is not put out of the way here: two who did that at the same
     // moment could each end up holding a file of their own. Whoever runs this removes it, with nothing running.
@@ -402,37 +536,131 @@ export function holdFile(file: string): (() => void) | null {
     }
     throw error;
   }
-  if (!db) return null;
-  const held = db;
-  return () => {
-    try {
-      held.exec("ROLLBACK");
-      held.close();
-    } catch {
-      // Already let go.
+  if (!holder) return null;
+  return holder.release;
+}
+
+export type AsyncRelease = (deadline?: number) => Promise<void>;
+
+/**
+ * Takes a file lock without blocking this thread while the helper answers. `deadline` is an absolute time and
+ * is carried through every helper wait; null means that another process holds the lock. The returned release
+ * is asynchronous for the same reason.
+ */
+export async function holdFileAsync(file: string, deadline: number, startWorker: () => Worker = () => new Worker(new URL("./lock-async.js", import.meta.url), { workerData: { file, deadline } })): Promise<AsyncRelease | null> {
+  const worker = startWorker();
+  // Until the first answer, the worker may already have acquired the OS lock while this thread was busy. An
+  // unexplained exit in that interval is possible lock loss and must fail closed.
+  let ownsLock = true;
+  let expectedExit = false;
+  // A timed-out wait deliberately leaves the helper alive long enough to cancel or release its lock. Keep one
+  // listener for that whole lifetime: the temporary listener below rejects an active wait, while this one keeps
+  // a later failure from becoming an uncaught error after the caller has already handled the timeout.
+  worker.on("error", () => {});
+  // A release can succeed after its caller's deadline. This lifetime listener records that success even after
+  // the temporary wait listener is gone, so the worker's subsequent normal exit is not treated as lock loss.
+  worker.on("message", (message) => {
+    if (message?.released === true || message?.held === false || typeof message?.error === "string") {
+      ownsLock = false;
+      expectedExit = true;
+    } else if (message?.held === true) {
+      ownsLock = true;
     }
-  };
+  });
+  worker.on("exit", () => {
+    if (ownsLock && !expectedExit) process.exit(1);
+  });
+  const wait = <T>(read: (message: any) => T | undefined, until: number): Promise<T> =>
+    new Promise((resolve, reject) => {
+      let finished = false;
+      const done = (action: () => void): void => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        worker.off("message", message);
+        worker.off("error", failed);
+        worker.off("exit", exited);
+        action();
+      };
+      const message = (value: any): void => {
+        const answer = read(value);
+        if (answer !== undefined) done(() => resolve(answer));
+      };
+      const failed = (error: Error): void => done(() => reject(error));
+      const exited = (code: number): void => done(() => reject(new Error(`The asynchronous lock helper stopped before answering (${code}).`)));
+      const timer = setTimeout(() => done(() => reject(new Error(`The asynchronous lock helper did not answer before its deadline.`))), Math.max(0, until - Date.now()));
+      worker.on("message", message);
+      worker.once("error", failed);
+      worker.once("exit", exited);
+    });
+  try {
+    // Let synchronous work already following this asynchronous request finish its turn first. In particular,
+    // two back-to-back command-line config changes must not be split by a service worker that can acquire the
+    // lock off-thread while the main thread is between those calls; the main thread could then only block the
+    // continuation that would release it. Acquisition remains asynchronous and never holds up the service.
+    setImmediate(() => worker.postMessage("start"));
+    const answer = await wait<{ held: boolean; error?: string }>((message) => {
+      if (typeof message?.held === "boolean") {
+        ownsLock = message.held;
+        if (!message.held) expectedExit = true;
+        return message;
+      }
+      if (typeof message?.error === "string") {
+        expectedExit = true;
+        return message;
+      }
+      return undefined;
+    }, deadline);
+    if (answer.error) throw new Error(answer.error);
+    if (!answer.held) {
+      expectedExit = true;
+      await worker.terminate();
+      return null;
+    }
+    let released = false;
+    return async (releaseDeadline = Date.now() + 10_000): Promise<void> => {
+      if (released) return;
+      released = true;
+      worker.postMessage("release");
+      try {
+        const result = await wait<{ released?: boolean; releaseError?: string }>((message) => {
+          if (message?.released === true) {
+            ownsLock = false;
+            expectedExit = true;
+            return message;
+          }
+          return typeof message?.releaseError === "string" ? message : undefined;
+        }, releaseDeadline);
+        if (result.releaseError) throw new Error(result.releaseError);
+        await worker.terminate();
+      } catch (error) {
+        try {
+          worker.postMessage("release");
+        } catch {}
+        worker.unref();
+        throw error;
+      }
+    };
+  } catch (error) {
+    try {
+      worker.postMessage("cancel");
+    } catch {}
+    worker.unref();
+    throw error;
+  }
 }
 
 /**
- * Takes a data folder for this process, so that no second service works on the same data from a copy of its
- * own. The system holds the lock for as long as the process lives and lets go when it ends, however it ends:
- * a service that was killed leaves nothing behind that could keep the next one out.
+ * Takes a data folder for the lifetime of this process, so that no second service works on the same data from a
+ * copy of its own. Dedicated child processes own the current and legacy system locks for the protected lifetime,
+ * so closing any descriptor in this process cannot release either POSIX lock. When this process ends, however it
+ * ends, its IPC channels close and the lock holders release both locks.
  * Returns what lets go of the folder, or null when another process has it.
  */
 export function holdFolder(directory: string): (() => void) | null {
   for (let attempt = 0; attempt < HOLD_TRIES; attempt++) {
-    const db = tryHold(directory);
-    if (db) {
-      return () => {
-        try {
-          db.exec("ROLLBACK");
-          db.close();
-        } catch {
-          // Already let go.
-        }
-      };
-    }
+    const release = tryHoldFolder(directory);
+    if (release) return release;
     if (attempt < HOLD_TRIES - 1) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 + Math.floor(Math.random() * 80));
   }
   return null;
@@ -465,19 +693,12 @@ export const everHeld = (directory: string): boolean => existsSync(join(director
 
 /** Whether a process has the data folder right now. Only looks: it takes nothing and creates nothing. */
 export function folderIsHeld(directory: string): boolean {
-  const file = join(directory, HOLD_FILE);
-  if (!existsSync(file)) return false;
-  const db = openDatabase(file, { readOnly: true });
-  try {
-    db.exec("PRAGMA busy_timeout = 0");
-    db.prepare("SELECT count(*) FROM sqlite_master").get();
-    return false;
-  } catch (error) {
-    if (isBusy(error)) return true;
-    throw error;
-  } finally {
-    db.close();
-  }
+  needSqlite();
+  const checked = spawnSync(process.execPath, ["--no-warnings", fileURLToPath(new URL("./lock-checker.js", import.meta.url)), join(directory, OWNER_FILE), join(directory, HOLD_FILE)], { encoding: "utf8" });
+  if (checked.error) throw checked.error;
+  if (checked.status !== 0) throw new Error(checked.stderr.trim() || "The process that inspected the data-folder locks failed.");
+  const answer = JSON.parse(checked.stdout) as { held: boolean };
+  return answer.held;
 }
 
 export interface TenantFileReport {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { connect } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -639,8 +640,8 @@ describe("a service that is killed without warning", () => {
   let base: string;
   let child: ChildProcess | undefined;
 
-  const serve = async (): Promise<ChildProcess> => {
-    const started = spawn(process.execPath, [BIN, "serve", "--config", config], { stdio: "ignore", env: { PATH: process.env.PATH ?? "" } });
+  const serve = async (detached = false): Promise<ChildProcess> => {
+    const started = spawn(process.execPath, [BIN, "serve", "--config", config], { stdio: "ignore", env: { PATH: process.env.PATH ?? "" }, detached });
     for (let attempt = 0; attempt < 100; attempt++) {
       if (await fetch(`${base}/health`).then((r) => r.ok, () => false)) return started;
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -757,10 +758,22 @@ describe("a service that is killed without warning", () => {
     assert.equal((await post("list-tasks", { project: "DUR" })).tasks.length, 31);
   });
 
-  it("stops cleanly on SIGTERM and releases the data folder", async () => {
-    const stopped = exited(child!);
-    child!.kill("SIGTERM");
+  it("keeps the data folder through a group-directed SIGTERM until the service has stopped", { skip: process.platform === "win32" }, async () => {
+    if (child) {
+      const before = exited(child);
+      child.kill("SIGTERM");
+      await before;
+    }
+    child = await serve(true);
+    const idle = connect(Number(new URL(base).port), "127.0.0.1");
+    await new Promise<void>((resolve, reject) => idle.once("connect", resolve).once("error", reject));
+    const stopped = exited(child);
+    process.kill(-child.pid!, "SIGTERM");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(folderIsHeld(join(directory, "data")), true, "the group signal did not release the holder while shutdown was in progress");
+    idle.destroy();
     assert.equal(await stopped, 0);
+    assert.equal(folderIsHeld(join(directory, "data")), false);
     assert.equal(existsSync(join(directory, "data", "vigile.lock")), false);
     child = undefined;
   });
@@ -1658,7 +1671,7 @@ describe("what the command line writes in the service's place", () => {
         await there;
         assert.ok(readFileSync(config).equals(before), `${what}: nothing is written yet`);
         // The folder is made, as by a first start, and holds nothing but the file the lock is on and what the lock keeps beside it while it is held.
-        assert.deepEqual(readdirSync(data).filter((name) => name !== "vigile.hold-journal"), ["vigile.hold"], what);
+        assert.deepEqual(readdirSync(data).filter((name) => !name.endsWith("-journal")).sort(), ["vigile.hold", "vigile.owner"], what);
         assert.ok(folderIsHeld(data), `${what}: the folder is held`);
         // A real service, started now on the same config, does not get the folder, and says what has it: not
         // a service. Nor does a second command that would write in the service's place.
@@ -1676,7 +1689,7 @@ describe("what the command line writes in the service's place", () => {
         await command;
         assert.ok(written(config, before), `${what} is written`);
         assert.equal(folderIsHeld(data), false, `${what}: the folder is let go`);
-        assert.deepEqual(readdirSync(data), ["vigile.hold"], `${what}: what is left is what a first start of the service leaves`);
+        assert.deepEqual(readdirSync(data).sort(), ["vigile.hold", "vigile.owner"], `${what}: what is left is what a first start of the service leaves`);
         const after = readFileSync(config);
         // The service is started again and has what the command wrote.
         child = await serving(config, port);
@@ -1796,7 +1809,7 @@ describe("what the command line writes in the service's place", () => {
       const done = await run(["config", "set", "auth.keyless_user", "user", "--json", "--config", left.config]);
       assert.equal(done.code, 0, done.err);
       assert.equal(loadConfig(left.config, {}).config.auth.keyless_user, "user");
-      assert.deepEqual(readdirSync(left.data).sort(), ["vigile.hold", "vigile.lock"]);
+      assert.deepEqual(readdirSync(left.data).sort(), ["vigile.hold", "vigile.lock", "vigile.owner"]);
       assert.equal(readFileSync(join(left.data, "vigile.lock"), "utf8"), `${gone.pid}\n`);
       assert.equal(folderIsHeld(left.data), false);
     } finally {

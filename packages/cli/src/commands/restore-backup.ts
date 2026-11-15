@@ -135,8 +135,25 @@ export async function restoreBackup(args: Args, ui: Ui): Promise<void> {
     // The copy of the backup is what tells a restore that was undone from one that was finished. While a note
     // says that a restore, this one or an earlier one, is not in order yet, the copy stays for whoever puts it
     // in order.
-    if (!restoreInterrupted(loaded.dataDir)) for (const suffix of BESIDE_COPY) rmSync(incoming + suffix, { force: true });
-    letGo();
-    held();
+    let failure: unknown;
+    const failed = (error: unknown): void => {
+      failure = failure === undefined ? error : new AggregateError([failure, error], "Restore cleanup had more than one failure.");
+    };
+    try {
+      if (!restoreInterrupted(loaded.dataDir)) for (const suffix of BESIDE_COPY) rmSync(incoming + suffix, { force: true });
+    } catch (error) {
+      failed(error);
+    }
+    try {
+      letGo();
+    } catch (error) {
+      failed(error);
+    }
+    try {
+      held();
+    } catch (error) {
+      failed(error);
+    }
+    if (failure !== undefined) throw failure;
   }
 }

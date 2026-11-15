@@ -1,10 +1,207 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
 import { runStorageContractTests } from "@vigile/storage/contract-tests";
-import { SqliteStorage, flushFolder, needSqlite } from "./index.js";
+import { SqliteStorage, flushFolder, folderIsHeld, holdFile, holdFolder, needSqlite } from "./index.js";
+import { stopProcess } from "./stop-process.js";
+
+it("stops the lock owner if its holder dies unexpectedly", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-lost-holder-"));
+  const ready = join(directory, "ready");
+  const module = new URL("./index.js", import.meta.url).href;
+  const parent = spawn(
+    process.execPath,
+    ["--no-warnings", "--input-type=module", "--eval", `import { writeFileSync } from 'node:fs'; import { holdFile } from ${JSON.stringify(module)}; const release = holdFile(process.argv[1]); writeFileSync(process.argv[2], String(release.holderPid)); for (;;) {}`, join(directory, "lock"), ready],
+    { stdio: ["ignore", "ignore", "pipe"] },
+  );
+  let stderr = "";
+  parent.stderr!.setEncoding("utf8").on("data", (text) => (stderr += text));
+  try {
+    const until = Date.now() + 5_000;
+    while (!existsSync(ready) && parent.exitCode === null && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    const holderPid = existsSync(ready) ? Number(readFileSync(ready, "utf8")) : 0;
+    assert.ok(Number.isInteger(holderPid) && holderPid > 0, `holder pid was not published: ${stderr}`);
+    const ended = once(parent, "exit");
+    stopProcess(holderPid);
+    const [code, signal] = await Promise.race([ended, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("the watchdog did not stop the busy lock owner")), 10_000))]);
+    assert.ok(code === 1 || signal === "SIGKILL", `code ${code}, signal ${signal}: ${stderr}`);
+  } finally {
+    if (parent.exitCode === null) parent.kill("SIGKILL");
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("keeps an async worker's lock while its live owner is synchronously busy", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-lost-worker-"));
+  const ready = join(directory, "ready");
+  const lock = join(directory, "lock");
+  const module = new URL("./index.js", import.meta.url).href;
+  const workerCode = `const { parentPort } = require('node:worker_threads'); parentPort.once('message', async (message) => { if (message !== 'start') return; const { holdFile } = await import(${JSON.stringify(module)}); const release = holdFile(${JSON.stringify(lock)}); parentPort.postMessage({ held: Boolean(release) }); setTimeout(() => process.exit(0), 100); });`;
+  const script = `import { writeFileSync } from 'node:fs'; import { Worker } from 'node:worker_threads'; import { holdFileAsync } from ${JSON.stringify(module)}; const worker = new Worker(${JSON.stringify(workerCode)}, { eval: true, execArgv: [] }); const release = await holdFileAsync(process.argv[1], Date.now() + 5000, () => worker); if (!release) process.exit(2); writeFileSync(process.argv[2], ''); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);`;
+  const owner = spawn(process.execPath, ["--no-warnings", "--input-type=module", "--eval", script, lock, ready], { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  owner.stderr!.setEncoding("utf8").on("data", (text) => (stderr += text));
+  try {
+    const until = Date.now() + 5_000;
+    while (!existsSync(ready) && owner.exitCode === null && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(existsSync(ready), true, `the async lock was not acquired: ${stderr}`);
+    // The worker exits after 100 ms while its owner's main thread cannot process the exit event for 1.5 s.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const escaped = holdFile(lock);
+    escaped?.();
+    assert.equal(escaped, null, "the holder keeps the OS lock until the synchronously busy owner stops");
+    const [code, signal] = await Promise.race([once(owner, "exit"), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("the owner did not fail closed after its worker exited")), 5_000))]);
+    assert.deepEqual([code, signal], [1, null], stderr);
+    let release: (() => void) | null = null;
+    const freeBy = Date.now() + 5_000;
+    while (!release && Date.now() < freeBy) {
+      release = holdFile(lock);
+      if (!release) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(release, "the holder releases after the owner has stopped");
+    release();
+  } finally {
+    if (owner.exitCode === null) owner.kill("SIGKILL");
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("stops a stalled holder after its owner is gone, so the lock can be taken again", { skip: process.platform === "win32" }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-stalled-holder-"));
+  const ready = join(directory, "ready");
+  const lock = join(directory, "lock");
+  const module = new URL("./index.js", import.meta.url).href;
+  const owner = spawn(
+    process.execPath,
+    ["--no-warnings", "--input-type=module", "--eval", `import { writeFileSync } from 'node:fs'; import { holdFile } from ${JSON.stringify(module)}; const release = holdFile(process.argv[1]); writeFileSync(process.argv[2], String(release.holderPid)); for (;;) {}`, lock, ready],
+    { stdio: ["ignore", "ignore", "pipe"] },
+  );
+  let holderPid = 0;
+  try {
+    const until = Date.now() + 5_000;
+    while (!existsSync(ready) && owner.exitCode === null && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    holderPid = existsSync(ready) ? Number(readFileSync(ready, "utf8")) : 0;
+    assert.ok(Number.isInteger(holderPid) && holderPid > 0);
+    const ended = once(owner, "exit");
+    process.kill(holderPid, "SIGSTOP");
+    await Promise.race([ended, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("the watchdog did not stop the owner of the stalled holder")), 10_000))]);
+    let release: (() => void) | null = null;
+    const freeBy = Date.now() + 5_000;
+    while (!release && Date.now() < freeBy) {
+      release = holdFile(lock);
+      if (!release) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(release, "the stalled holder was stopped after its owner, releasing the SQLite lock");
+    release();
+  } finally {
+    if (owner.exitCode === null) owner.kill("SIGKILL");
+    if (holderPid > 0) {
+      try {
+        process.kill(holderPid, "SIGKILL");
+      } catch {}
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("keeps a folder excluded through one holder's death", { skip: process.platform === "win32" }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-dual-holder-"));
+  const ready = join(directory, "ready");
+  const module = new URL("./index.js", import.meta.url).href;
+  const owner = spawn(
+    process.execPath,
+    ["--no-warnings", "--input-type=module", "--eval", `import { writeFileSync } from 'node:fs'; import { holdFolder } from ${JSON.stringify(module)}; const release = holdFolder(process.argv[1]); writeFileSync(process.argv[2], JSON.stringify(release.holderPids)); for (;;) {}`, directory, ready],
+    { stdio: ["ignore", "ignore", "pipe"] },
+  );
+  let surviving = 0;
+  let freed: (() => void) | null = null;
+  try {
+    const until = Date.now() + 5_000;
+    while (!existsSync(ready) && owner.exitCode === null && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    const holders = existsSync(ready) ? JSON.parse(readFileSync(ready, "utf8")) as number[] : [];
+    assert.equal(holders.length, 2);
+    const [current, legacy] = holders;
+    assert.ok(current! > 0 && legacy! > 0 && current !== legacy);
+    surviving = legacy!;
+    // Keep the independent legacy holder from processing owner disconnect, then kill the current holder. Its
+    // watchdog may stop the owner, but the surviving process continues to hold the second exclusion lock.
+    process.kill(surviving, "SIGSTOP");
+    stopProcess(current!);
+    const currentFile = join(directory, "vigile.owner");
+    const legacyFile = join(directory, "vigile.hold");
+    const freeBy = Date.now() + 5_000;
+    while (!freed && Date.now() < freeBy) {
+      freed = holdFile(currentFile);
+      if (!freed) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(freed, "the killed holder's individual lock is free");
+    assert.equal(holdFile(legacyFile), null, "the independent surviving holder still excludes another folder owner");
+    assert.equal(holdFolder(directory), null, "a current service cannot acquire the folder with only one lock free");
+  } finally {
+    freed?.();
+    if (owner.exitCode === null) owner.kill("SIGKILL");
+    if (surviving > 0) {
+      try {
+        process.kill(surviving, "SIGKILL");
+      } catch {}
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("does not keep an otherwise finished lock owner alive", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-unref-holder-"));
+  const file = join(directory, "lock");
+  const module = new URL("./index.js", import.meta.url).href;
+  const owner = spawn(process.execPath, ["--no-warnings", "--input-type=module", "--eval", `import { holdFile } from ${JSON.stringify(module)}; holdFile(process.argv[1]);`, file], { stdio: "ignore" });
+  try {
+    const [code, signal] = await Promise.race([once(owner, "exit"), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("the lock holder kept its finished owner alive")), 5_000))]);
+    assert.deepEqual([code, signal], [0, null]);
+    let release: (() => void) | null = null;
+    const until = Date.now() + 5_000;
+    while (!release && Date.now() < until) {
+      release = holdFile(file);
+      if (!release) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(release, "the holder released the lock when its owner exited");
+    release();
+  } finally {
+    if (owner.exitCode === null) owner.kill("SIGKILL");
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("keeps a folder held when this process inspects the lock file", () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-hold-"));
+  const release = holdFolder(directory);
+  try {
+    assert.ok(release);
+    const module = new URL("./index.js", import.meta.url).href;
+    const probe = (what: string) => {
+      assert.equal(folderIsHeld(directory), true, `${what}: diagnostic inspection sees the holder`);
+      const current = spawnSync(process.execPath, ["--input-type=module", "--eval", `import { holdFolder } from ${JSON.stringify(module)}; process.exit(holdFolder(process.argv[1]) ? 1 : 0)`, directory]);
+      assert.equal(current.status, 0, `${what}: another current process took the folder: ${current.stderr}`);
+      for (const file of ["vigile.owner", "vigile.hold"]) {
+        const exact = spawnSync(process.execPath, ["--input-type=module", "--eval", `import { holdFile } from ${JSON.stringify(module)}; import { join } from 'node:path'; process.exit(holdFile(join(process.argv[1], process.argv[2])) ? 1 : 0)`, directory, file]);
+        assert.equal(exact.status, 0, `${what}: another process took ${file}: ${exact.stderr}`);
+      }
+    };
+    probe("before raw reads");
+    readFileSync(join(directory, "vigile.owner"));
+    probe("after reading the current lock");
+    readFileSync(join(directory, "vigile.hold"));
+    probe("after reading both locks");
+    readFileSync(join(directory, "vigile.owner"));
+    probe("after reading the current lock again");
+  } finally {
+    release?.();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 it("says so when a folder cannot be flushed although the system offers it, and says nothing where it does not", () => {
   const directory = mkdtempSync(join(tmpdir(), "vigile-flush-"));
