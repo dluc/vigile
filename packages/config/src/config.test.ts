@@ -463,8 +463,15 @@ describe("changes to the file from several places", () => {
     const release = holdFile(`${path}.hold`);
     assert.ok(release);
     const began = Date.now();
-    await assert.rejects(setKeyWhileServing(path, "agent2", OTHER), /another change to the config file is under way/);
+    let turns = 0;
+    const pulse = setInterval(() => turns++, 5);
+    try {
+      await assert.rejects(setKeyWhileServing(path, "agent2", OTHER), /another change to the config file is under way/);
+    } finally {
+      clearInterval(pulse);
+    }
     assert.ok(Date.now() - began >= 4500, "it waited for its turn first");
+    assert.ok(turns > 100, `the running service kept its event loop while waiting: ${turns} turns`);
     assert.equal(loadConfig(path, {}).config.auth.keys.agent2, undefined);
     // Not a config that is wrong: one that is busy, and as it was.
     assert.throws(() => setValue(path, "name", "meanwhile"), (error: unknown) => error instanceof ConfigBusy && !(error instanceof ConfigError) && /another change to the config file is under way/.test(error.message));

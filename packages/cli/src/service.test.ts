@@ -11,7 +11,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { initConfig, loadConfig, setKey, setValue } from "@vigile/config";
 import { Engine, VigileError, paging } from "@vigile/core";
 import type { StorageAdapter } from "@vigile/storage";
-import { SqliteStorage, backupTenantFile, historyOwners, inspectTenantFile } from "@vigile/storage-sqlite";
+import { SqliteStorage, backupTenantFile, folderIsHeld, historyOwners, inspectTenantFile } from "@vigile/storage-sqlite";
 import { webRoot } from "@vigile/web";
 import { openAsPlan } from "./restore.js";
 import { StartupError, isLoopback, namedFromOutside, startService, type Service, type ServiceOptions } from "./service.js";
@@ -1424,6 +1424,23 @@ describe("starting the service", () => {
       await again.stop();
     } finally {
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps its data folder after an in-process diagnostic opens the lock file", async () => {
+    const running = await start();
+    const data = join(running.directory, "data");
+    try {
+      assert.equal(folderIsHeld(data), true, "the diagnostic sees the service's holder");
+      readFileSync(join(data, "vigile.hold"));
+      assert.equal(folderIsHeld(data), true, "closing both diagnostic descriptors leaves the holder in place");
+      const loaded = loadConfig(running.config, { VIGILE_LISTEN_PORT: String(await freePort()) });
+      await assert.rejects(
+        startService({ loaded, log: () => {}, warn: () => {} }),
+        (error: unknown) => error instanceof StartupError && /Another Vigile service/.test(error.message),
+      );
+    } finally {
+      await running.stop();
     }
   });
 

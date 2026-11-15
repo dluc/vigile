@@ -284,8 +284,8 @@ export async function connect(loaded: LoadedConfig, as = "admin", answerWithinMs
  *
  * The lock is let go in every outcome: when the write fails, here; when the process is ended, by the system,
  * which holds the lock for the process and for no longer. What is left behind is what a first start of the
- * service leaves: the data folder, if it was not there, and the empty file the lock is on. A folder that only a
- * service from before the lock has worked in is thereby held the new way from now on, as after a start of the
+ * service leaves: the data folder, if it was not there, and the two empty files its lock and parent guard use. A folder that only a
+ * service from before the locks has worked in is thereby held the new way from now on, as after a start of the
  * service or a restore, both of which look for such a service first as this does.
  *
  * `taken` is for the tests: it is called with the lock held, before anything is written.

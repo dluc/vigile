@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
-import { flushFolder, holdFile } from "@vigile/storage-sqlite";
+import { flushFolder, holdFile, holdFileAsync, type AsyncRelease } from "@vigile/storage-sqlite";
 import { parse, stringify } from "smol-toml";
 import { ConfigError, KEY_PREFIX, SETTINGS, findSetting, validateConfig, type Config } from "./schema.js";
 
@@ -188,6 +188,18 @@ function tryLock(path: string): (() => void) | null {
   }
 }
 
+/** The nonblocking form for a running service; the absolute deadline follows the helper wait. */
+async function tryLockAsync(path: string, deadline: number): Promise<AsyncRelease | null> {
+  const lock = `${path}${LOCK_SUFFIX}`;
+  try {
+    return await holdFileAsync(lock, deadline);
+  } catch (error) {
+    if (Date.now() >= deadline || (error as Error).message === "The asynchronous lock helper did not answer before its deadline.") return null;
+    if (/is not a lock file of Vigile/.test((error as Error).message)) throw error;
+    throw new Error(`${path} cannot be changed: the lock file ${lock}, which is made beside it, cannot be made or opened (${(error as Error).message}). Give this account write access to the folder of the config.`, { cause: error });
+  }
+}
+
 /**
  * The file a config path leads to. A config may be a link to a file kept elsewhere, and two writers may reach
  * that file by different names: the lock and the change belong to the file itself, so that they meet.
@@ -220,13 +232,24 @@ function change(given: string, edit: (raw: Raw) => void): Config {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause());
     release = tryLock(path);
   }
+  let written: Config | undefined;
+  let failed: unknown;
   try {
     const raw = readRaw(path);
     edit(raw);
-    return writeRaw(path, raw);
-  } finally {
-    release();
+    written = writeRaw(path, raw);
+  } catch (error) {
+    failed = error;
   }
+  try {
+    release();
+  } catch (error) {
+    if (written) throw new UnconfirmedWrite(written, `The config was written, but its lock could not be confirmed released: ${(error as Error).message}`);
+    if (failed instanceof UnconfirmedWrite) throw new UnconfirmedWrite(failed.config, `${failed.message} Its lock also could not be confirmed released: ${(error as Error).message}`);
+    if (!failed) throw error;
+  }
+  if (failed) throw failed;
+  return written!;
 }
 
 /** The same for the running service, which must go on answering while it waits its turn. */
@@ -234,19 +257,30 @@ async function changeWhileServing(given: string, edit: (raw: Raw) => void): Prom
   const path = whereItIs(given);
   thereIsOne(path);
   const end = Date.now() + LOCK_WAIT_MS;
-  let release = tryLock(path);
+  let release = await tryLockAsync(path, end);
   while (!release) {
     if (Date.now() > end) throw lockTimeout(path);
     await new Promise((resolve) => setTimeout(resolve, pause()));
-    release = tryLock(path);
+    release = await tryLockAsync(path, end);
   }
+  let written: Config | undefined;
+  let failed: unknown;
   try {
     const raw = readRaw(path);
     edit(raw);
-    return writeRaw(path, raw);
-  } finally {
-    release();
+    written = writeRaw(path, raw);
+  } catch (error) {
+    failed = error;
   }
+  try {
+    await release(Date.now() + LOCK_WAIT_MS);
+  } catch (error) {
+    if (written) throw new UnconfirmedWrite(written, `The config was written, but its lock could not be confirmed released: ${(error as Error).message}`);
+    if (failed instanceof UnconfirmedWrite) throw new UnconfirmedWrite(failed.config, `${failed.message} Its lock also could not be confirmed released: ${(error as Error).message}`);
+    if (!failed) throw error;
+  }
+  if (failed) throw failed;
+  return written!;
 }
 
 function parseValue(key: string, value: string): string | number {
