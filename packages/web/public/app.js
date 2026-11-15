@@ -1541,6 +1541,31 @@ function priorityControl(item, credential) {
  *   not shown and offers to try again.
  * - The reading fails: the panel says so and offers to try again, and keeps what it shows.
  */
+const copyNotices = new WeakMap();
+
+/** Copies an item's exact ID and says what happened without closing or redrawing its panel. */
+async function copyText(control, text) {
+  const feedback = control.querySelector(".copy-feedback");
+  let message = "Copied";
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable");
+    await navigator.clipboard.writeText(text);
+    control.classList.remove("copy-failed");
+  } catch {
+    message = "Copy failed";
+    control.classList.add("copy-failed");
+  }
+  feedback.textContent = message;
+  clearTimeout(copyNotices.get(control));
+  copyNotices.set(
+    control,
+    setTimeout(() => {
+      if (feedback.isConnected) feedback.textContent = "";
+      control.classList.remove("copy-failed");
+    }, 2_000),
+  );
+}
+
 async function renderDetail(more) {
   // Locked out, the page asks the service for nothing: the item named in the address opens once it is let in.
   if (!state.open || locked) return false;
@@ -1705,7 +1730,13 @@ async function renderDetail(more) {
         el(
           "div",
           { class: "detail-head" },
-          el("span", { class: "id" }, item.id),
+          el(
+            "button",
+            { class: "id copy-id", type: "button", "aria-label": `Copy ID ${item.id}`, title: `Copy ${item.id} to the clipboard`, onclick: (event) => copyText(event.currentTarget, item.id) },
+            item.id,
+            el("span", { class: "copy-glyph", "aria-hidden": "true" }),
+            el("span", { class: "copy-feedback", role: "status", "aria-live": "polite" }),
+          ),
           item.type && item.type !== "task" && el("span", { class: "type" }, item.type),
           item.status && pill(item.status),
           // A deleted item is not work any more, whatever status it was left in.
@@ -1733,7 +1764,22 @@ async function renderDetail(more) {
           `Show only this group (${item.progress.total} ${item.progress.total === 1 ? "task" : "tasks"})`,
         ),
       ),
-      item.description !== undefined && block("Description", el("p", { class: `description${item.description ? "" : " none"}` }, item.description || "No description.")),
+      item.description !== undefined &&
+        block(
+          "Description",
+          el(
+            "div",
+            { class: "description-copy" },
+            el("p", { class: `description${item.description ? "" : " none"}` }, item.description || "No description."),
+            item.description &&
+              el(
+                "button",
+                { class: "copy-description", type: "button", "aria-label": "Copy description", title: "Copy description to the clipboard", onclick: (event) => copyText(event.currentTarget, item.description) },
+                el("span", { class: "copy-glyph", "aria-hidden": "true" }),
+                el("span", { class: "copy-feedback", role: "status", "aria-live": "polite" }),
+              ),
+          ),
+        ),
       item.why && el("section", { class: "block why" }, el("h3", {}, "Why"), el("p", { class: "description" }, item.why)),
       links.length ? block("Links", links) : null,
       block("Details", el("dl", { class: "facts" }, facts.flatMap(([name, value]) => [el("dt", {}, name), el("dd", {}, value)]))),
@@ -1785,7 +1831,7 @@ function placeInPanel() {
   // its label, a link shows the state of what it leads to, and both change while the control stays the same one.
   // A link is the one of its kind to its item: a task can both hold and wait for the same task.
   const name = (control) =>
-    control.matches("summary") ? "summary" : control.matches(".further") ? `further ${control.dataset.list}` : control.matches(".link") ? `link ${control.closest(".relation")?.dataset.relation} ${control.querySelector(".id")?.textContent}` : control.className || control.textContent;
+    control.matches(".copy-id") ? "copy-id" : control.matches(".copy-description") ? "copy-description" : control.matches("summary") ? "summary" : control.matches(".further") ? `further ${control.dataset.list}` : control.matches(".link") ? `link ${control.closest(".relation")?.dataset.relation} ${control.querySelector(".id")?.textContent}` : control.className || control.textContent;
   const wanted = name(at);
   return () => [...$("detail").querySelectorAll("button, summary, a[href]")].find((control) => control.tagName === at.tagName && name(control) === wanted);
 }

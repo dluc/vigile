@@ -244,6 +244,9 @@ follows the filter letter by letter; the graph is drawn again once the typing
 pauses. Clicking a task or a project opens a panel with its description,
 reason, links, details, status timeline and history. Following a link in the
 panel opens the linked item, with a button back to the one you came from. The
+item ID is a copy button. Moving over the description reveals a small copy
+button for its exact text; both controls also work from the keyboard and say
+whether the copy succeeded. The
 panel shows the first 100 links of each kind and the latest 100 entries of the
 timeline and of the history; where there are more it says how many, with a
 button that reads on. When the panel cannot read an item, or more of it, it
