@@ -232,7 +232,7 @@ get_guide with topic "examples" shows complete sequences of calls for these shap
 ## The routine
 1. list_next_tasks lists what can start now, most important first. Give project or parent to stay inside one area.
 2. get shows the task in full: its description, its reason, its links and its version.
-3. set_task_status with in_progress when you really start. Asking a question or proposing a plan does not start a task. Starting an unassigned task assigns it to you.
+3. set_task_status with in_progress when you really start. Asking a question or proposing a plan does not start a task. Starting an unassigned task assigns it to you. Only an assignee may start assigned work; change the assigned-to link first to record a takeover.
 4. Do the work.
 5. Verify the outcome against the task's description and keep the evidence.
 6. set_task_status with done only when the work is finished and verified. Use in_review when review remains, and paused when you stop without finishing.

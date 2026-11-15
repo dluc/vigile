@@ -10,7 +10,7 @@ import { newLink, statusEntry, touch, version } from "./shared.js";
 export const setTaskStatus = defineWrite({
   name: "set_task_status",
   description:
-    "Change a task's status: draft, open, in_progress, paused, in_review, done or cancelled. Set in_progress only when work actually starts, done only after its outcome is complete and verified, in_review while review remains, and paused when work stops unfinished. Moves the rules do not allow are refused, and the error says what is in the way and what to do. A task cannot be started or marked done while something it depends on is unfinished. Starting an unassigned task assigns it to you. A task already in progress cannot be started again, so two agents cannot take the same task.",
+    "Change a task's status: draft, open, in_progress, paused, in_review, done or cancelled. Set in_progress only when work actually starts, done only after its outcome is complete and verified, in_review while review remains, and paused when work stops unfinished. Moves the rules do not allow are refused, and the error says what is in the way and what to do. A task cannot be started or marked done while something it depends on is unfinished. Starting an unassigned task assigns it to you; only an assignee may start assigned work, so taking it over requires changing its assigned-to link first. A task already in progress cannot be started again, so two agents cannot take the same task.",
   access: "all",
   input: z.strictObject({
     id: z.string().describe("The task's ID."),
@@ -21,7 +21,7 @@ export const setTaskStatus = defineWrite({
     const task = resolveRef(ctx.graph, input.id, ["task"]);
     requireLive(task);
     requireVersion(task, input.version, () => taskSummary(ctx.graph, task));
-    checkTaskMove(ctx.graph, task, input.status);
+    checkTaskMove(ctx.graph, task, input.status, ctx.caller);
 
     ctx.plan.put(touch(task, ctx, { status: input.status, timeline: [...task.timeline, statusEntry(input.status, ctx)] }));
     const takes = input.status === "in_progress" && assignees(ctx.graph, task).length === 0;

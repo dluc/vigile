@@ -1,9 +1,9 @@
-import { containedTasks, isLive, unfinishedDependencies } from "./calc.js";
+import { assignees, containedTasks, isLive, unfinishedDependencies } from "./calc.js";
 import { VigileError, echo, invalidInput, notFound, refused, type ErrorDetails, type ErrorItem } from "./errors.js";
 import { sameRef, type GraphView } from "./graph.js";
 import { normalizeId, refText, splitRef } from "./ids.js";
-import { CONTAINS, DEPENDS_ON, type LinkType } from "./link-types.js";
-import { LIMITS, TASK_FINISHED, TASK_MOVES, type Kind, type Node, type NodeOf, type Ref, type TaskNode, type TaskStatus } from "./model.js";
+import { ASSIGNED_TO, CONTAINS, DEPENDS_ON, type LinkType } from "./link-types.js";
+import { LIMITS, TASK_FINISHED, TASK_MOVES, type Kind, type Node, type NodeOf, type Ref, type TaskNode, type TaskStatus, type UserNode } from "./model.js";
 import { shortened, type Summary } from "./views.js";
 
 export function errorItem(node: Node): ErrorItem {
@@ -112,7 +112,7 @@ export function checkContainerAcceptsWork(graph: GraphView, holder: Node): void 
 }
 
 /** Refuses a status change the rules do not allow, saying what is in the way and what can be done. */
-export function checkTaskMove(graph: GraphView, task: TaskNode, to: TaskStatus): void {
+export function checkTaskMove(graph: GraphView, task: TaskNode, to: TaskStatus, caller?: UserNode): void {
   if (task.status === to) {
     throw refused("same_status", `${describe(task)} is already ${to}.`, {
       actions: to === "in_progress" ? ["Someone is already working on it. Call list_next_tasks to pick other work."] : undefined,
@@ -140,6 +140,18 @@ export function checkTaskMove(graph: GraphView, task: TaskNode, to: TaskStatus):
           ],
         },
       );
+    }
+  }
+  if (to === "in_progress" && caller) {
+    const assigned = assignees(graph, task);
+    if (assigned.length && !assigned.some((user) => user.id === caller.id)) {
+      throw refused("assigned_to_other", `${describe(task)} cannot be started by ${describe(caller)}: it is assigned to ${assigned.length === 1 ? describe(assigned[0]!) : `${assigned.length} other users`}.`, {
+        ...blockedBy(assigned),
+        actions: [
+          `Take it over explicitly: call remove_link with from "${refText(task)}", type "${ASSIGNED_TO}" and each current assignee, then call add_link with from "${refText(task)}", type "${ASSIGNED_TO}" and to "${caller.username}" before starting it.`,
+          "Or call list_next_tasks to pick work assigned to you or to nobody.",
+        ],
+      });
     }
   }
   if (to === "done") {

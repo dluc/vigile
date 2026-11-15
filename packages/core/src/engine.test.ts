@@ -431,6 +431,26 @@ describe("tasks", () => {
     assert.deepEqual((await person("set_task_status", { id: theirs.id, version: 1, status: "in_progress" })).assigned_to, ["user"]);
   });
 
+  it("refuses to start work assigned to someone else until its assignment records the takeover", async () => {
+    const { agent, person } = await setup();
+    const task = await agent("create_task", { title: "Assigned work", description: "d", assigned_to: ["agent1"] });
+
+    const first = await refusal(person("set_task_status", { id: task.id, version: 1, status: "in_progress" }));
+    assert.deepEqual([first.rule, first.blocking?.map((item: any) => item.title)], ["assigned_to_other", ["agent1"]]);
+    assert.match(first.actions![0]!, /remove_link.*add_link.*user/);
+
+    const started = await agent("set_task_status", { id: task.id, version: 1, status: "in_progress" });
+    const paused = await agent("set_task_status", { id: task.id, version: started.version, status: "paused" });
+    assert.equal((await refusal(person("set_task_status", { id: task.id, version: paused.version, status: "in_progress" }))).rule, "assigned_to_other");
+
+    await agent("remove_link", { from: task.id, type: "assigned to", to: "agent1" });
+    const unassigned = await agent("get", { id: task.id });
+    await person("add_link", { from: task.id, type: "assigned to", to: "user" });
+    const taken = await person("get", { id: task.id });
+    const resumed = await person("set_task_status", { id: task.id, version: taken.version, status: "in_progress" });
+    assert.deepEqual([unassigned.assigned_to, resumed.assigned_to], [[], ["user"]]);
+  });
+
   it("records completion time and keeps earlier completions in the timeline", async () => {
     const { agent } = await setup();
     const t = await agent("create_task", task("T"));
