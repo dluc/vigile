@@ -517,6 +517,14 @@ body.graph-full main { padding: 10px 12px 12px; }
 .facts dt { color: var(--muted); padding-right: 16px; }
 .facts dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .facts dt:first-of-type, .facts dd:first-of-type { border-top: 0; padding-top: 0; }
+.priority-control { display: grid; grid-template-columns: 30px minmax(2ch, auto) 30px minmax(0, 1fr); align-items: center; gap: 6px; min-height: 30px; }
+.priority-control button { width: 30px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--raised); cursor: pointer; font-size: 18px; line-height: 1; }
+.priority-control button:hover { box-shadow: var(--shadow); }
+.priority-control button:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.priority-control button:disabled { opacity: 0.45; cursor: default; box-shadow: none; }
+.priority-control output { min-width: 2ch; text-align: center; font-weight: 700; }
+.priority-result { min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.25; }
+@media (max-width: 420px) { .priority-control { grid-template-columns: 30px minmax(2ch, auto) 30px; } .priority-result { grid-column: 1 / -1; } }
 .relation + .relation { margin-top: 12px; }
 .relation h4 { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 13px; font-weight: 650; }
 .relation .count, .fold-block .count { color: var(--muted); font-weight: 500; font-size: 12px; font-variant-numeric: tabular-nums; }

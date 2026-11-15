@@ -140,13 +140,13 @@ class ApiError extends Error {
     super(body?.message ?? `The service answered ${status}`);
     this.status = status;
     this.code = body?.code;
+    this.body = body;
     /** The key the request was sent with, or nothing: a refusal is of that key, not of whichever is stored by now. */
     this.key = key ?? "";
   }
 }
 
-async function api(path, input) {
-  const key = localStorage.getItem(KEY_NAME);
+async function api(path, input, key = localStorage.getItem(KEY_NAME) ?? "") {
   const response = await fetch(`/api/${path}`, {
     method: input === undefined ? "GET" : "POST",
     headers: { ...(input === undefined ? {} : { "content-type": "application/json" }), ...(key ? { authorization: `Bearer ${key}` } : {}) },
@@ -156,7 +156,7 @@ async function api(path, input) {
   });
   const body = await response.json().catch(() => null);
   if (!response.ok) throw new ApiError(response.status, body?.error, key);
-  keyInUse = key ?? "";
+  keyInUse = key;
   return body;
 }
 
@@ -226,6 +226,10 @@ const isOpenTrouble = (task) => isTrouble(task) && !FINISHED.includes(task.statu
 const boardColumn = (task) => (state.bugsApart && isOpenTrouble(task) ? "trouble" : columnOf(task));
 
 const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, filter: "", expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
+
+/** One worker per task. Leaving a panel cancels unsent clicks, but never creates a rival for a write in flight. */
+const priorityWorkers = new Map();
+let priorityWork = null;
 
 /** How a project appears in a task's `contained_in`: numbered projects carry their kind in front. */
 const projectRef = (project) => (/^\d+$/.test(project.id) ? `project:${project.id}` : project.id);
@@ -929,7 +933,14 @@ function routeOf(view, open, zoom = state.zoom, into = state.into) {
   const asks = [into.length > 0 && `in=${into.map(encodeURIComponent).join("/")}`, zoom !== null && `zoom=${zoom}`].filter(Boolean).join("&");
   return `#${view}${open ? `/${open.kind === "project" ? "project:" : ""}${encodeURIComponent(open.id)}` : ""}${asks ? `?${asks}` : ""}`;
 }
-const sameItem = (a, b) => Boolean(a && b && a.kind === b.kind && a.id === b.id);
+/** A task ID as the service stores it, for comparing supported bookmark spellings without losing large digits. */
+const taskIdentity = (id) => {
+  const found = /^(?:([A-Z]{2,8})-)?(\d+)$/.exec(String(id).trim().replace(/^task:/i, "").toUpperCase());
+  if (!found) return id;
+  const digits = found[2].replace(/^0+(?=\d)/, "").padStart(3, "0");
+  return found[1] ? `${found[1]}-${digits}` : digits;
+};
+const sameItem = (a, b) => Boolean(a && b && a.kind === b.kind && (a.kind === "task" ? taskIdentity(a.id) === taskIdentity(b.id) : a.id === b.id));
 const sameTrail = (a, b) => a.length === b.length && a.every((id, at) => id === b[at]);
 
 /**
@@ -1014,6 +1025,8 @@ function applyRoute() {
   if (zoomChanged && state.loadedAt && !locked) sayZoom();
   if (!route.open) return hidePanel();
   const reopen = !sameItem(route.open, state.open) || $("panel").hidden;
+  if (priorityWork && !sameItem(route.open, { kind: "task", id: priorityWork.id })) priorityWork.pending = 0;
+  priorityWork = route.open.kind === "task" ? (priorityWorkers.get(taskIdentity(route.open.id)) ?? null) : null;
   state.open = route.open;
   if (reopen && state.loadedAt) renderDetail();
 }
@@ -1099,6 +1112,8 @@ $("leave-group").addEventListener("click", () => zoomOut(Math.max(0, state.into.
 /** Opens an item in the panel. Opened from inside the panel, it remembers the item it came from. */
 /** Finds the control the panel was opened from, as it is now, so that the keyboard can go back to it. */
 let panelOpener = null;
+/** The credential that read the panel currently drawn. */
+let panelCredential = null;
 
 function openItem(kind, id) {
   const next = { kind, id };
@@ -1295,6 +1310,218 @@ function clearTrouble() {
   if (inside) $("panel").querySelector(".panel-card").focus({ preventScroll: true });
 }
 
+/** Says how a queued priority change is going, where its panel is still the one in sight. */
+function showPriorityWork(work) {
+  if (!priorityWork || priorityWork !== work || !sameItem(state.open, { kind: "task", id: work.id })) return;
+  const control = $("detail").querySelector(`.priority-control[data-id="${CSS.escape(work.id)}"]`);
+  if (!control) return;
+  control.setAttribute("aria-busy", String(work.running));
+  const moveFocus = Boolean((work.blocked || work.deleted) && control.querySelector("button:focus"));
+  for (const button of control.querySelectorAll("button")) button.disabled = Boolean(work.blocked || work.deleted);
+  if (moveFocus) $("panel").querySelector(".panel-card").focus({ preventScroll: true });
+  const shown = work.target + work.pending;
+  control.querySelector("output").value = String(shown);
+  control.querySelector("#priority-down").setAttribute("aria-label", `Lower priority from ${shown} to ${shown - 1}`);
+  control.querySelector("#priority-up").setAttribute("aria-label", `Raise priority from ${shown} to ${shown + 1}`);
+  control.querySelector(".priority-result").textContent = work.message || (work.pending ? `${Math.abs(work.pending)} ${Math.abs(work.pending) === 1 ? "step" : "steps"} waiting` : work.running ? "Changing priority…" : "");
+}
+
+/** Remembers the newest task a successful list or panel read confirmed, without rebasing a write already queued. */
+function observePriority(work, latest) {
+  if (!latest || typeof latest.version !== "number" || typeof latest.priority !== "number" || latest.version < work.observedVersion) return;
+  Object.assign(work, { observedVersion: latest.version, observedPriority: latest.priority });
+}
+
+/** Uses the newest confirmed reading only once no queued write still belongs to the earlier returned version. */
+function reconcilePriority(work) {
+  if (work.blocked) return;
+  if (work.pending || work.observedVersion < work.version) return;
+  Object.assign(work, { version: work.observedVersion, priority: work.observedPriority, target: work.observedPriority });
+}
+
+/** Refreshes the plan and then confirms this task itself, rather than treating a successful list read as enough. */
+async function rereadPriority(work) {
+  await load();
+  if (work.session !== sessions || locked || !sameItem(state.open, { kind: "task", id: work.id })) return false;
+  const read = await renderDetail();
+  if (!read || state.item?.id !== work.id) return false;
+  observePriority(work, state.item);
+  work.blocked = false;
+  return true;
+}
+
+/**
+ * Raises or lowers priority through update_task, with the version the panel read. Clicks made while one request
+ * is on its way are combined into the next request: none is lost and no two writes race one another. A conflict
+ * is shown and reread, never silently applied to the item someone else changed.
+ */
+function nudgePriority(item, amount, credential) {
+  if (item.deleted_at) return;
+  // The control belongs to the credential that read the panel. Replacing a valid key gives no 401, so detect it
+  // here as well as before every write and never reinterpret an old click as the new identity's choice.
+  if ((localStorage.getItem(KEY_NAME) ?? "") !== credential) {
+    if (priorityWork) priorityWork.pending = 0;
+    void load(true);
+    return;
+  }
+  let work = priorityWorkers.get(item.id);
+  if (work && work.credential !== credential) {
+    if (work.running) return;
+    priorityWorkers.delete(item.id);
+    work = null;
+  }
+  if (!work) {
+    work = {
+      id: item.id,
+      version: item.version,
+      priority: item.priority,
+      observedVersion: item.version,
+      observedPriority: item.priority,
+      target: item.priority,
+      pending: 0,
+      running: false,
+      message: null,
+      blocked: false,
+      deleted: Boolean(item.deleted_at),
+      session: sessions,
+      credential,
+    };
+    priorityWorkers.set(item.id, work);
+  }
+  priorityWork = work;
+  work.pending += amount;
+  work.message = null;
+  showPriorityWork(work);
+  if (!work.running) queueMicrotask(() => runPriorityWork(work));
+}
+
+async function runPriorityWork(work) {
+  if (work.running) return;
+  work.running = true;
+  try {
+    while (work.pending) {
+      // Another request may have locked the page while these clicks waited. Never send them with the key that is
+      // stored now (possibly no key, which could act as a different keyless user).
+      if (work.session !== sessions || locked || (localStorage.getItem(KEY_NAME) ?? "") !== work.credential) {
+        work.pending = 0;
+        return;
+      }
+      const amount = work.pending;
+      work.pending = 0;
+      if (!amount) continue;
+      work.target = work.priority + amount;
+      work.message = "Changing priority…";
+      showPriorityWork(work);
+      try {
+        const changed = await api("update-task", { id: work.id, version: work.version, priority: work.target }, work.credential);
+        // A key refused elsewhere while this answer was on its way emptied the page: the old request writes
+        // nothing back into it. The stored change is seen on the first successful load under the new session.
+        if (work.session !== sessions || locked) return;
+        work.version = changed.version;
+        work.priority = changed.priority;
+        observePriority(work, changed);
+        work.target = changed.priority;
+        work.message = `Priority is now ${changed.priority}.`;
+        work.blocked = false;
+        work.deleted = false;
+        await load();
+        if (work.session !== sessions || locked) return;
+        // A click already waiting belongs after this returned version. Do not silently adopt a later concurrent
+        // version: its next write must conflict. Once the queue is empty, the newest panel/list reading wins.
+        if (!work.pending) reconcilePriority(work);
+        work.message = `Priority is now ${work.priority}.`;
+      } catch (error) {
+        work.pending = 0;
+        if (error.status === 401) {
+          if (priorityWork === work) priorityWork = null;
+          return void load();
+        }
+        if (error.code === "version_conflict") {
+          work.blocked = true;
+          work.target = work.priority;
+          work.message = "Priority changed elsewhere. The latest value is shown; choose again if needed.";
+          const read = await rereadPriority(work);
+          // Clicks made while recovery was reading are choices against neither the old nor the new version.
+          work.pending = 0;
+          if (work.session !== sessions || locked) return;
+          if (read) {
+            reconcilePriority(work);
+            work.message = "Priority changed elsewhere. The latest value is shown; choose again if needed.";
+          } else {
+            work.target = work.priority;
+            work.message = "Priority changed elsewhere, but the latest value could not be read. Refresh before choosing again.";
+          }
+        } else if (error.status >= 400 && error.status < 500) {
+          work.blocked = false;
+          // A refusal is a confirmed non-change.
+          work.target = work.priority;
+          work.message = `Priority was not changed: ${error.message}`;
+          // Deletion after the panel was read is also a confirmed reason that no later click can work. Read the
+          // task itself, which lists no longer include, so the controls are redrawn disabled without auto-refresh.
+          if (error.code === "rule_violation" && error.body?.rule === "deleted") {
+            const refused = work.message;
+            work.deleted = true;
+            state.drawn = null;
+            await renderDetail();
+            work.pending = 0;
+            reconcilePriority(work);
+            work.message = refused;
+          }
+        } else {
+          work.blocked = true;
+          // No answer is an unknown outcome: ask for the plan again before saying what priority is in place.
+          work.target = work.priority;
+          work.message = "The priority change was not confirmed. Reading the task again…";
+          const read = await rereadPriority(work);
+          work.pending = 0;
+          if (work.session !== sessions || locked) return;
+          if (read) {
+            reconcilePriority(work);
+            work.message = `The change did not answer. The current priority is ${work.priority}; choose again if needed.`;
+          } else work.message = "The priority change was not confirmed. Refresh before choosing again.";
+        }
+        break;
+      }
+    }
+  } finally {
+    work.running = false;
+    const sameCredential = (localStorage.getItem(KEY_NAME) ?? "") === work.credential;
+    if (!work.pending && work.session === sessions && !locked && sameCredential) reconcilePriority(work);
+    showPriorityWork(work);
+    if (!work.pending && priorityWork !== work && priorityWorkers.get(work.id) === work) priorityWorkers.delete(work.id);
+    if (!sameCredential && sameItem(state.open, { kind: "task", id: work.id }) && !locked) {
+      // The replacement-key load may have drawn disabled controls while this old worker still existed, and an
+      // unchanged list snapshot does not normally redraw the panel. Force the panel's own authenticated read.
+      state.drawn = null;
+      void renderDetail();
+    }
+  }
+}
+
+/** The compact write control beside Priority in a task's facts. */
+function priorityControl(item, credential) {
+  const worker = priorityWorkers.get(item.id);
+  const work = priorityWork?.id === item.id && priorityWork.credential === credential ? priorityWork : null;
+  if (work) {
+    observePriority(work, item);
+    work.deleted = Boolean(item.deleted_at);
+    // A refresh from elsewhere supersedes a finished local change. A request still on its way keeps the version
+    // it was sent with and will be refused rather than moved silently onto the newer item.
+    if (!work.running && !work.pending) Object.assign(work, { version: item.version, priority: item.priority, target: item.priority, message: null, blocked: false });
+  }
+  const shown = work ? work.target + work.pending : item.priority;
+  const disabled = Boolean(item.deleted_at || work?.blocked || (worker?.running && worker.credential !== credential));
+  return el(
+    "span",
+    { class: "priority-control", "data-id": item.id, "aria-busy": String(Boolean(work?.running)) },
+    el("button", { id: "priority-down", type: "button", disabled, "aria-label": `Lower priority from ${shown} to ${shown - 1}`, title: "Lower priority", onclick: () => nudgePriority(item, -1, credential) }, "−"),
+    el("output", { for: "priority-down priority-up", "aria-label": "Priority" }, String(shown)),
+    el("button", { id: "priority-up", type: "button", disabled, "aria-label": `Raise priority from ${shown} to ${shown + 1}`, title: "Raise priority", onclick: () => nudgePriority(item, 1, credential) }, "+"),
+    el("span", { class: "priority-result", role: "status", "aria-live": "polite" }, work?.message ?? ""),
+  );
+}
+
+
 /**
  * Shows the open item in the panel: the item as it is now, with as many pages of each list as the person has
  * opened. Asked with one of its lists, by the button under a list that is not shown whole, it opens one page
@@ -1316,19 +1543,20 @@ function clearTrouble() {
  */
 async function renderDetail(more) {
   // Locked out, the page asks the service for nothing: the item named in the address opens once it is let in.
-  if (!state.open || locked) return;
+  if (!state.open || locked) return false;
   const asked = state.open;
   // How many pages beyond the first the person opened, by list: for this item only.
   if (!sameItem(asked, state.further?.of)) state.further = { of: asked, pages: new Map() };
   if (more) {
     // Only what the panel shows has a list to read on in.
-    if (!state.item || !sameItem(asked, state.shown) || $("panel").hidden) return;
+    if (!state.item || !sameItem(asked, state.shown) || $("panel").hidden) return false;
     state.further.pages.set(more, (state.further.pages.get(more) ?? 0) + 1);
     // A reading that is under way reads this page as well, before it draws.
-    if (detailReading) return;
+    if (detailReading) return false;
   }
   const turn = ++detailTurn;
   const session = sessions;
+  const credential = localStorage.getItem(KEY_NAME) ?? "";
   // Whether this reading is still the one to draw: no later one was begun, the page was not locked out, and the
   // panel is still open on the item.
   const live = () => turn === detailTurn && session === sessions && !locked && sameItem(asked, state.open);
@@ -1356,7 +1584,7 @@ async function renderDetail(more) {
     // was read after something changed sends the reading back to the start, with the pages that were opened
     // still wanted. After a few tries the item is read once more and shown by itself.
     for (let tries = 1; whole; tries++) {
-      item = await api("get", { kind: asked.kind, id: asked.id, history: true });
+      item = await api("get", { kind: asked.kind, id: asked.id, history: true }, credential);
       have = new Map();
       if (!live()) return;
       changing = tries > DETAIL_TRIES;
@@ -1379,7 +1607,7 @@ async function renderDetail(more) {
       return void load();
     }
     if (live()) showTrouble(asked, error);
-    return;
+    return false;
   } finally {
     if (detailReading === turn) detailReading = 0;
   }
@@ -1387,6 +1615,13 @@ async function renderDetail(more) {
   // could not be read is taken away by this reading, and that it is changing is said by it.
   const said = () => changing && sayInPanel("The item is being changed while it is read. This is the item as it was read last; the further pages of its lists are not shown.");
   if (!changing) clearTrouble();
+  if ((localStorage.getItem(KEY_NAME) ?? "") !== credential) return void load(true);
+  let worker = priorityWorkers.get(item.id);
+  if (worker && worker.credential !== credential && !worker.running) {
+    priorityWorkers.delete(item.id);
+    worker = null;
+  }
+  priorityWork = worker?.credential === credential ? worker : null;
   // The same item drawn again, after a refresh, keeps its place: how far it was scrolled and whether its history was unfolded.
   const again = sameItem(asked, state.shown) && !$("panel").hidden;
   // And when nothing the panel shows has changed, it is not drawn again at all: a change to some other task must
@@ -1395,11 +1630,16 @@ async function renderDetail(more) {
   // says another revision of an item that is as it was.
   const drawing = JSON.stringify([{ ...item, unchanged_since: null }, state.trail.at(-1) ?? null, watched.has(item.id)]);
   // What was read is what the next page is joined to, whether it is drawn again or looks the same.
-  const same = again && drawing === state.drawn;
+  const recoveringPriority = Boolean(worker?.blocked && !worker.running && !worker.pending);
+  const same = again && drawing === state.drawn && credential === panelCredential && !recoveringPriority;
   state.item = item;
   state.have = have;
-  if (same) return void said();
+  if (same) {
+    said();
+    return true;
+  }
   state.drawn = drawing;
+  panelCredential = credential;
   const place = again ? placeInPanel() : null;
   const historyOpen = again && Boolean($("detail").querySelector(".fold-block")?.open);
   state.shown = asked;
@@ -1439,7 +1679,7 @@ async function renderDetail(more) {
   const facts = [
     item.kind === "task" && ["Type", item.type],
     item.kind === "task" && item.progress && ["Progress", `${item.progress.finished} of ${item.progress.total} tasks inside finished`],
-    item.kind === "task" && ["Priority", String(item.priority)],
+    item.kind === "task" && ["Priority", priorityControl(item, credential)],
     item.kind === "task" && item.value !== null && ["Value", String(item.value)],
     item.kind === "task" && item.size !== null && ["Size", String(item.size)],
     item.kind === "task" && ["Assigned to", item.assigned_to.length ? `${item.assigned_to.join(", ")}${item.more?.assigned_to ? ` and ${item.more.assigned_to.total - item.assigned_to.length} more` : ""}` : "nobody"],
@@ -1533,6 +1773,7 @@ async function renderDetail(more) {
   // for the same item, the control that had the keyboard has it back.
   if (!again) focusVisible(card);
   else if (place) focusVisible(place, card);
+  return true;
 }
 
 /** Which control of the panel has the keyboard, told so that it can be found again after the panel is drawn anew. */
@@ -1567,6 +1808,9 @@ function describeChange(data) {
 /** Takes the panel off the screen. */
 function hidePanel() {
   const item = state.open;
+  if (priorityWork) priorityWork.pending = 0;
+  priorityWork = null;
+  panelCredential = null;
   state.open = null;
   // The keyboard goes back to what the panel was opened from, when it was in the panel or lost with it.
   const inside = !$("panel").hidden && ($("panel").contains(document.activeElement) || document.activeElement === document.body);
@@ -1982,6 +2226,10 @@ let sessions = 0;
 function lockOut(refused = "") {
   locked = true;
   sessions++;
+  for (const work of priorityWorkers.values()) work.pending = 0;
+  priorityWorkers.clear();
+  priorityWork = null;
+  panelCredential = null;
   // The key that was refused is forgotten. Another one, given in another tab while the answer was on its way,
   // was not refused and stays.
   if (refused) localStorage.removeItemIf(KEY_NAME, refused);
@@ -2098,7 +2346,11 @@ async function refresh() {
     announce(tasks, (id) => state.byId.get(id) ?? null, turn);
     // An item named in the address opens once there is data; an open one follows the changes, and one that
     // could not be read the last time is read again.
-    if (state.open && (changed || first || $("panel").hidden || state.troubled)) await renderDetail();
+    const panelKeyChanged = panelCredential !== null && panelCredential !== (localStorage.getItem(KEY_NAME) ?? "");
+    const priority = state.open?.kind === "task" ? priorityWorkers.get(taskIdentity(state.open.id)) : null;
+    const blockedPriority = Boolean(priority?.blocked && !priority.running && !priority.pending);
+    if (state.open && (changed || first || $("panel").hidden || state.troubled || panelKeyChanged || blockedPriority)) await renderDetail();
+    return true;
   } catch (error) {
     $("sync").textContent = "Not connected";
     $("sync").classList.remove("old");
@@ -2133,6 +2385,7 @@ async function refresh() {
     }
     state.failed = true;
     fitBoard();
+    return false;
   }
 }
 
@@ -2606,6 +2859,8 @@ let wanted = false;
 /** Whether the load that is wanted next was asked for by the person, with the key form. */
 let wantedByPerson = false;
 let busy = false;
+/** Calls that asked while a load was under way: resolved only after the later answer they asked for was handled. */
+let loadWaiters = [];
 
 /**
  * Says how old the data on screen is. With self-refresh off the page does not change by itself,
@@ -2667,22 +2922,27 @@ async function load(byPerson = false) {
   if (busy) {
     wanted = true;
     wantedByPerson ||= byPerson;
-    return;
+    return new Promise((resolve) => loadWaiters.push(resolve));
   }
   busy = true;
+  let succeeded = false;
   try {
     let more;
     do {
       wanted = false;
       wantedByPerson = false;
-      await refresh();
+      succeeded = await refresh();
       more = wanted && (!locked || wantedByPerson);
     } while (more);
   } finally {
     busy = false;
     wanted = false;
     wantedByPerson = false;
+    const finished = loadWaiters;
+    loadWaiters = [];
+    for (const resolve of finished) resolve(succeeded);
   }
+  return succeeded;
 }
 
 /** Loads the plan again because something changed, while the page is in sight. Out of sight it waits to be seen again. */

@@ -61,8 +61,9 @@ The pictures in this file show made-up data.
 - **A guide agents can read.** `get_guide` shows the ways to organise work, the
   routine for a task, and complete examples. The tests run every call the
   examples show.
-- **A read-only web page.** A board by state, a graph of what waits for what, a
-  panel for each item, and an address for every view and item.
+- **A web page for reading and steering.** A board by state, a graph of what
+  waits for what, a panel for each item, an address for every view and item,
+  and controls in a task's panel to raise or lower its priority.
 - **History.** Who changed what and when, for every item, and every status a
   task went through.
 - **Storage you can trust and move.** A confirmed write survives a power cut. An
@@ -201,7 +202,11 @@ of these. Over MCP the guide is also offered as resources
 
 ### The web page
 
-The page is read-only and has two views, linked from its header.
+The page has two views, linked from its header. It is for reading the plan, with
+one small steering control: in a task's panel, − and + lower or raise its
+priority by one. The change uses the version the panel read, so another change
+meanwhile is shown as a conflict and never overwritten. Priority affects where
+the task appears in `list_next_tasks`.
 
 - **Board.** Tasks in columns by state: in progress, in review, next, waiting
   for dependencies, paused, draft, done, cancelled.
