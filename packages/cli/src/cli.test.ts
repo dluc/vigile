@@ -219,6 +219,20 @@ describe("what is printed", () => {
     assert.match(printed(), /WEB-001 {2}v7\n {2}A page of the item as it is unchanged since revision 61\.[^\n]*\n\n {2}Nothing more\.\n/, "a page that holds nothing says so");
     renderResult(ui, "list_users", { users: [{ id: "USER-001", username: "admin", type: "admin", built_in: true }], you: "admin", continuation: tok.users }, "http://x");
     assert.match(printed(), new RegExp(`There are more\\. Next page: add --continuation ${tok.users}\n`));
+    renderResult(
+      ui,
+      "list_stale_tasks",
+      {
+        attention_after_hours: 24,
+        claims: [{ id: "WEB-004", title: "Quiet work", assigned_to: ["agent1"], quiet_since: "2026-01-01T00:00:00.000Z", attention_since: "2026-01-02T00:00:00.000Z" }],
+        continuation: tok.users,
+      },
+      "http://x",
+    );
+    const stale = printed();
+    assert.match(stale, /WEB-004\s+2026-01-01T00:00:00\.000Z\s+2026-01-02T00:00:00\.000Z\s+agent1\s+Quiet work/);
+    assert.match(stale, /Attention threshold: 24 hours without a recorded task change/);
+    assert.match(stale, new RegExp(`There are more\\. Next page: add --continuation ${tok.users}\n`));
 
     // What a command to read on is made with is a token, or nothing is printed: an answer is looked at before it
     // is printed, and what is no token is not put into a command whatever let it through.
@@ -2941,6 +2955,7 @@ describe("the answer of each operation", () => {
       ["add_link", { from: "ALP-007", type: "depends on", to: "ALP-008" }],
       ["list_tasks", {}],
       ["list_next_tasks", {}],
+      ["list_stale_tasks", {}],
       ["get", { id: "ALP-005", history: true }],
       ["delete", { id: "ALP-006", version: 1 }],
       ["restore", { id: "ALP-003" }],

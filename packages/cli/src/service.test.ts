@@ -137,8 +137,8 @@ describe("service over HTTP", () => {
   it("lists operations with their input schemas, by caller", async () => {
     const agent = await running.call("/api/operations");
     const admin = await running.call("/api/operations", undefined, running.adminKey);
-    assert.equal(agent.body.operations.length, 17);
-    assert.equal(admin.body.operations.length, 19);
+    assert.equal(agent.body.operations.length, 18);
+    assert.equal(admin.body.operations.length, 20);
     const setStatus = agent.body.operations.find((o: any) => o.name === "set_task_status");
     assert.equal(setStatus.path, "/api/set-task-status");
     assert.deepEqual(setStatus.input.required, ["id", "version", "status"]);
@@ -815,8 +815,8 @@ describe("service over MCP", () => {
     const admin = await connect(running, running.adminKey);
     const agentTools = (await agent.listTools()).tools.map((t) => t.name);
     const adminTools = (await admin.listTools()).tools.map((t) => t.name);
-    assert.equal(agentTools.length, 17);
-    assert.equal(adminTools.length, 19);
+    assert.equal(agentTools.length, 18);
+    assert.equal(adminTools.length, 20);
     assert.deepEqual(adminTools.filter((name) => !agentTools.includes(name)).sort(), ["create_user", "reset_user_key"]);
     assert.ok(agentTools.includes("set_task_status") && agentTools.includes("list_next_tasks"));
 

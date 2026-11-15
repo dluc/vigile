@@ -479,6 +479,7 @@ export const EXPECTED: Record<string, Judge> = {
   list_tasks: listed("list_tasks", "tasks", TASK, "tasks"),
   // Each of them can be started: that is what the list says of them.
   list_next_tasks: listed("list_next_tasks", "tasks", { ...TASK, is_next: exactly(true) }, "tasks that can be started"),
+  list_stale_tasks: listed("list_stale_tasks", "claims", { ...TASK, quiet_since: MOMENT, attention_since: MOMENT }, "quiet task claims", { attention_after_hours: exactly(24) }),
   // The item in full, or, to a call with a continuation, the next page of one of its lists.
   get: (answer, input) => (input.continuation === undefined ? inFull(answer, input) : aPage(answer, input)),
   delete: deleted,

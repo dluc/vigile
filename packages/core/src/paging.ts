@@ -243,6 +243,14 @@ const ORDERS = {
     keyOf: (entry: any): unknown => [entry?.priority, entry?.id],
     identityOf: idOf,
   } satisfies Order<[number, string]>,
+  /** Quiet assigned work, oldest recorded task change first, then by ID. */
+  list_stale_tasks: {
+    entries: "claims",
+    isKey: (key: unknown): key is [string, string] => Array.isArray(key) && key.length === 2 && typeof key[0] === "string" && Number.isFinite(Date.parse(key[0])) && isId(key[1]),
+    compare: (a: [string, string], b: [string, string]) => Date.parse(a[0]) - Date.parse(b[0]) || compareTaskIds(a[1], b[1]),
+    keyOf: (entry: any): unknown => [entry?.quiet_since, entry?.id],
+    identityOf: idOf,
+  } satisfies Order<[string, string]>,
   /**
    * The links of one name: in the order of the items at the other end, each by its kind and its ID as it is
    * stored. An answer shows the ID as a reference is written, which for a project with a number is with its
@@ -268,7 +276,7 @@ const ORDERS = {
 } as const;
 
 /** The operations that return a list in pages, each with the field its entries are in. */
-export const PAGED = { list_projects: "projects", list_tasks: "tasks", list_next_tasks: "tasks", list_users: "users" } as const;
+export const PAGED = { list_projects: "projects", list_tasks: "tasks", list_next_tasks: "tasks", list_stale_tasks: "claims", list_users: "users" } as const;
 export type PagedOperation = keyof typeof PAGED;
 export const isPaged = (operation: string): operation is PagedOperation => Object.hasOwn(PAGED, operation);
 /** The lists that are the asking user's own. */

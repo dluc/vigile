@@ -7,6 +7,7 @@ import { KINDS, compareNumerals, comparePlaces, compareProjectIds, compareTaskId
 import { AGENT_INSTRUCTIONS, Engine, GUIDE_EXAMPLES, GUIDE_TOPICS, LINK_TYPES, MemoryKeyStore, OPERATIONS, VigileError, isToken, itemListQuestion, paging, readAll, type OperationLog } from "./index.js";
 import { itemListCursors } from "./operations/get.js";
 import { nextTasksCursor } from "./operations/list-next-tasks.js";
+import { STALE_CLAIM_MS, staleTasksCursor } from "./operations/list-stale-tasks.js";
 import { projectsCursor } from "./operations/list-projects.js";
 import { tasksCursor } from "./operations/list-tasks.js";
 import { usersCursor } from "./operations/list-users.js";
@@ -831,6 +832,53 @@ describe("next", () => {
   });
 });
 
+describe("quiet claims", () => {
+  it("brings assigned work to attention after a day without a recorded task change, without releasing it", async () => {
+    let now = Date.parse("2026-01-01T00:00:00.000Z");
+    const engine = await Engine.open({ storage: new MemoryStorage(), clock: { now: () => new Date(now) } });
+    const call = (operation: string, input: Record<string, unknown> = {}) => engine.execute(operation, "agent1", input) as Promise<any>;
+    const made = await call("create_task", task("Long work"));
+    const started = await call("set_task_status", { id: made.id, version: made.version, status: "in_progress" });
+    const quietSince = (await call("get", { id: made.id })).updated_at;
+
+    now += STALE_CLAIM_MS - 1;
+    assert.deepEqual((await call("list_stale_tasks")).claims, []);
+    now += 1;
+    const stale = (await call("list_stale_tasks")).claims;
+    assert.deepEqual(
+      [stale.map((entry: any) => entry.id), stale[0].quiet_since, stale[0].attention_since, stale[0].assigned_to],
+      [[made.id], quietSince, new Date(Date.parse(quietSince) + STALE_CLAIM_MS).toISOString(), ["agent1"]],
+    );
+
+    const changed = await call("update_task", { id: made.id, version: started.version, priority: 1 });
+    assert.deepEqual((await call("list_stale_tasks")).claims, [], "a recorded task change proves recent activity");
+    assert.deepEqual([changed.status, changed.assigned_to], ["in_progress", ["agent1"]], "time and attention never release the claim");
+  });
+
+  it("pages quiet claims oldest first and keeps tokens with their filters", async () => {
+    let now = Date.parse("2026-01-01T00:00:00.000Z");
+    const engine = await Engine.open({ storage: new MemoryStorage(), clock: { now: () => new Date(now) } });
+    const call = (operation: string, input: Record<string, unknown> = {}) => engine.execute(operation, "agent1", input) as Promise<any>;
+    await call("create_project", { title: "Project", prefix: "OLD" });
+    for (let index = 0; index < 105; index++) {
+      const made = await call("create_task", task(`Quiet ${index}`, { project: "OLD" }));
+      await call("set_task_status", { id: made.id, version: made.version, status: "in_progress" });
+      now += 1;
+    }
+    now += STALE_CLAIM_MS;
+    const first = await call("list_stale_tasks", { project: "OLD" });
+    assert.equal(first.claims.length, 100);
+    assert.ok(first.continuation);
+    const last = await call("list_stale_tasks", { project: "OLD", continuation: first.continuation });
+    assert.equal(last.claims.length, 5);
+    assert.equal(last.continuation, undefined);
+    assert.equal((await refusal(call("list_stale_tasks", { continuation: first.continuation }))).code, "invalid_input");
+    assert.deepEqual([...first.claims, ...last.claims].map((entry: any) => entry.quiet_since), [...first.claims, ...last.claims].map((entry: any) => entry.quiet_since).sort());
+    const order = staleTasksCursor().list.compare;
+    assert.ok(order(["2026-01-01T00:30:00+02:00", "OLD-001"], ["2025-12-31T23:00:00.000Z", "OLD-002"]) < 0, "valid timestamps are ordered by their instants, not their text");
+  });
+});
+
 describe("delete and restore", () => {
   it("hides a deleted item, refuses changes to it, and brings it back", async () => {
     const { agent } = await setup();
@@ -1059,7 +1107,7 @@ describe("users", () => {
     assert.notEqual(reset.api_key, created.api_key);
     assert.equal(keys.keys.get("agent2"), reset.api_key);
     assert.deepEqual(engine.operationsFor("agent").map((o) => o.name).filter((n) => n.includes("user")), ["list_users"]);
-    assert.equal(engine.operationsFor("admin").length, 19);
+    assert.equal(engine.operationsFor("admin").length, 20);
   });
 
   it("deletes users only for admins, never built-in ones, and not while tasks are assigned", async () => {
@@ -2561,11 +2609,13 @@ describe("continuation tokens", () => {
   const B = { kind: "task" as const, id: "ABC-002" };
   const idKey = (random: () => number): unknown => anId(random);
   const nextKey = (random: () => number): unknown => [aNumber(random), anId(random)];
+  const staleKey = (random: () => number): unknown => [new Date(Math.floor(random() * 2_000_000_000_000)).toISOString(), anId(random)];
   const refKey = (random: () => number): unknown => `${pick(random, ["project", "task", "user"])}:${anId(random)}`;
   const place = (random: () => number): unknown => [aCount(random), aCount(random)];
   const KINDS_OF_TOKEN = (): Array<[what: string, list: Cursor<any>, key: (random: () => number) => unknown, notKeys: unknown[]]> => {
     const notAnId = [undefined, null, 5, ["ABC-001"], { id: "ABC-001" }, true];
     const notNext = [undefined, null, "ABC-001", [1], [1, 2], ["1", "ABC-001"], [Number.NaN, "ABC-001"], [Number.POSITIVE_INFINITY, "ABC-001"], [1, "ABC-001", 3]];
+    const notStale = [undefined, null, "ABC-001", ["2026-01-01T00:00:00.000Z"], [1, "ABC-001"], ["2026-01-01T00:00:00.000Z", 1], ["x", "ABC-001", 3]];
     const notARef = [undefined, null, 5, "", "ABC-001", "thing:ABC-001", ":ABC-001", ["task:ABC-001"]];
     const notACount = [undefined, null, "5", -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, [5]];
     const notAPlace = [undefined, null, 5, [5], [5, -1], [1.5, 0], ["1", "2"], [1, 2, 3]];
@@ -2581,6 +2631,8 @@ describe("continuation tokens", () => {
       ["list_next_tasks of one user", nextTasksCursor({}, "USER-001"), nextKey, notNext],
       ["list_next_tasks of another user", nextTasksCursor({}, "USER-9007199254740992"), nextKey, notNext],
       ["list_next_tasks in a project", nextTasksCursor({ project: "ABC" }, "USER-001"), nextKey, notNext],
+      ["list_stale_tasks", staleTasksCursor(), staleKey, notStale],
+      ["list_stale_tasks in a project", staleTasksCursor({ project: "ABC" }), staleKey, notStale],
       ["what a task contains", itemListCursors.links(A, "contains"), refKey, notARef],
       ["what a task depends on", itemListCursors.links(A, "depends on"), refKey, notARef],
       ["what another task contains", itemListCursors.links(B, "contains"), refKey, notARef],
