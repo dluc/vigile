@@ -523,7 +523,7 @@ function card(task, inside = null) {
     el(
       "button",
       { class: "zoom-into", type: "button", "data-id": task.id, "aria-label": `Zoom into ${task.id}: show only the ${counted(shown.progress.total, "task")} it holds`, title: "Show only what this group holds", onclick: () => zoomInto(task.id) },
-      el("span", {}, "Zoom in"),
+      el("span", { class: "zoom-into-label" }, el("span", { class: "zoom-into-icon", "aria-hidden": "true" }), "Zoom in"),
       el("span", { class: "holds" }, `holds ${counted(shown.progress.total, "task")}`),
     ),
   );
@@ -2221,7 +2221,9 @@ function linkViews() {
  */
 function showLevels(board) {
   const canStep = Boolean(board && board.deepest >= 2);
-  $("levels").hidden = !canStep && state.into.length === 0;
+  // Position is useful even where zoom cannot step. It also remains the keyboard's visible fallback after a
+  // group is left over the graph, now that the breadcrumb lives inside this unified surface.
+  $("levels").hidden = false;
   for (const id of ["level-out", "level-in", "level"]) $(id).hidden = !canStep;
   // Out of sight it says nothing: how many levels were open says how deep the plan is.
   $("level").textContent = canStep ? levelName(board.level) : "";
@@ -2298,6 +2300,7 @@ function lockOut(refused = "") {
   // drawing of the graph that waits for the typing to pause.
   state.filter = "";
   $("filter").value = "";
+  $("clear-filter").hidden = true;
   clearTimeout(typing);
   typing = null;
   // What was said of a zoom for a screen reader names a group or a project, and sits outside what is hidden
@@ -2437,9 +2440,16 @@ async function refresh() {
 
 $("filter").addEventListener("input", (event) => {
   state.filter = event.target.value;
+  $("clear-filter").hidden = !state.filter;
   clearTimeout(typing);
   typing = state.view === "graph" ? setTimeout(() => ((typing = null), render()), TYPING_PAUSE_MS) : null;
   render();
+});
+$("clear-filter").addEventListener("click", () => {
+  const filter = $("filter");
+  filter.value = "";
+  filter.dispatchEvent(new Event("input", { bubbles: true }));
+  filter.focus({ preventScroll: true });
 });
 $("bugs-apart").addEventListener("change", (event) => {
   state.bugsApart = event.target.checked;

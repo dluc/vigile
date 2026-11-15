@@ -83,21 +83,22 @@
   </section>
 
   <section aria-labelledby="board-heading">
-    <div class="board-head">
+    <div class="board-head visually-hidden">
       <h2 id="board-heading" class="section-title">Tasks</h2>
-      <span id="scope" class="scope"></span>
     </div>
-    <div class="filters">
-      <span id="levels" class="zoom levels" role="group" aria-label="Zoom of the board: how many levels of groups are open" hidden>
+    <div class="filters" aria-label="Board controls">
+      <span id="levels" class="board-tool zoom levels" role="group" aria-label="Board position and zoom" hidden>
         <button id="level-out" type="button" aria-label="Zoom out" aria-describedby="level">−</button>
         <span id="level" class="level"></span>
         <button id="level-in" type="button" aria-label="Zoom in" aria-describedby="level">+</button>
+        <span id="scope" class="scope"></span>
         <button id="leave-group" class="wide leave" type="button" hidden>↑ Leave group</button>
       </span>
-      <label class="search"><span class="visually-hidden">Filter tasks</span>
+      <div class="board-tool search"><label class="visually-hidden" for="filter">Filter tasks</label>
         <input id="filter" type="search" placeholder="Filter by ID, title or user" autocomplete="off">
-      </label>
-      <div id="summary" class="summary"></div>
+        <button id="clear-filter" class="clear-filter" type="button" aria-label="Clear search" title="Clear search" hidden><span aria-hidden="true"></span></button>
+      </div>
+      <div id="summary" class="board-tool summary" aria-label="Task counts"></div>
     </div>
     <div id="board" class="board"></div>
     <div id="graph-panel" hidden>

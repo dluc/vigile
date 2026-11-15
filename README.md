@@ -258,22 +258,25 @@ by itself, with a note that its further pages are not shown.
 ![A task open in the panel: its state, description, reason, links grouped by kind, and details](images/task.webp)
 
 The board can be zoomed out for a high-level view. It opens with every task
-shown. The control above it, a minus, the level in words and a plus, closes or
-opens one level of groups at a time, down to "Top level": the groups that are
+shown. One compact surface holds the minus, level, plus, current breadcrumb and
+“Leave group”; search and counts use the same height, spacing and shape beside
+it. A nonempty search has one clear button that removes the filter and keeps
+the keyboard in search. The minus and plus close or open one level of groups at a time, down to
+"Top level": the groups that are
 in no other group, and the tasks that are in none. A group at the last open
 level is closed. Its card stands for the tasks it holds: it says how many of
 them are done, in progress and waiting, whether any has a problem, and, under
 the filter, how many match. It stands in the column of the group's own state.
-The accented "Zoom in" action along the bottom of such a card, or "Show only
+The accented "Zoom in" action, marked by a magnifier and plus, along the bottom of such a card, or "Show only
 this group" in the panel of any group, shows that group alone. The accented
-zoom controls appear before search and add “Leave group” beside the level
-controls, while the trail above the board keeps each earlier step reachable. A
+zoom controls appear before search. Their breadcrumb keeps each earlier step
+reachable without adding another row of controls above the board. A
 task in two groups is on the board as soon as one of them is open, and is
 counted once. The counts above the board are those of the cards on it. With
 auto-refresh on, a change to anything a closed group's card shows, also among
 the tasks it holds, rings that card; your own typing in the filter and your
-own zooming ring nothing. Where nothing holds anything there is nothing to
-zoom, and the control is not shown. The keyboard stays with what it was on
+own zooming ring nothing. Where nothing holds anything, the position remains
+and the zoom buttons step aside. The keyboard stays with what it was on
 through every zoom: on the same task where it still shows, else on the closed
 group that now holds it or on the way out of the group. A zoom is said to a
 screen reader once, in a few words.
