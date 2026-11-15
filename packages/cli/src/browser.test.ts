@@ -460,7 +460,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       });
     });
 
-    it("copies an open item's ID and description by click or keyboard, and says when copying is refused", async () => {
+    it("copies an open item's ID and description by click or keyboard, falls back without Clipboard access, and says when both ways are refused", async () => {
       await page.size(1280, 900);
       await load();
       await page.run("Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => { window.copiedId = text; } } })");
@@ -489,9 +489,20 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.until("return window.copiedId === 'Description of Address form.' && document.querySelector('.copy-description .copy-feedback').textContent === 'Copied'", "the exact description to be copied and confirmed");
       assert.equal(await page.run<string>("return document.activeElement.className"), "copy-description", "copying the description keeps the keyboard on its control");
 
-      await page.run("navigator.clipboard.writeText = async () => { throw new Error('refused'); }");
+      await page.run("Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }); document.execCommand = (command) => (window.fallbackCopy = command === 'copy' ? document.activeElement.value : null, command === 'copy'); const node = document.querySelector('.description-copy .description').firstChild; getSelection().setBaseAndExtent(node, 20, node, 2)");
       await page.click(".copy-id");
-      await page.until("return document.querySelector('.copy-feedback').textContent === 'Copy failed'", "the refused copy to be reported");
+      await page.until(`return window.fallbackCopy === ${JSON.stringify(ids.address)} && document.querySelector('.copy-feedback').textContent === 'Copied'`, "the fallback copy to write the exact ID and confirm it");
+      assert.equal(await page.run<string>("return document.activeElement.className"), "id copy-id", "fallback copying restores focus to the control");
+      assert.deepEqual(await page.run("const selection = getSelection(); return [selection.anchorOffset, selection.focusOffset, selection.anchorNode === selection.focusNode]"), [20, 2, true], "fallback copying preserves a backward selection's direction");
+
+      await page.run("Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new Error('refused'); } } }); document.execCommand = (command) => (window.deniedFallbackCopy = command === 'copy' ? document.activeElement.value : null, command === 'copy')");
+      await page.click(".copy-id");
+      await page.until(`return window.deniedFallbackCopy === ${JSON.stringify(ids.address)} && document.querySelector('.copy-feedback').textContent === 'Copied'`, "a rejected Clipboard write to recover through the fallback");
+      assert.equal(await page.run<string>("return document.activeElement.className"), "id copy-id", "fallback after a rejected write restores focus to the control");
+
+      await page.run("document.execCommand = () => false");
+      await page.click(".copy-id");
+      await page.until("return document.querySelector('.copy-feedback').textContent === 'Copy failed'", "both refused copy paths to be reported");
       assert.equal(await panelOpen(), true, "a refused clipboard write leaves the item open");
       assert.deepEqual(page.errors, []);
       await page.key("Escape");

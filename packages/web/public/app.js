@@ -1543,13 +1543,55 @@ function priorityControl(item, credential) {
  */
 const copyNotices = new WeakMap();
 
+/** Copies during the button's activation where the async Clipboard API is unavailable or refused. */
+function copyTextFallback(control, text) {
+  const before = document.activeElement;
+  const selection = document.getSelection();
+  const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, at) => selection.getRangeAt(at).cloneRange()) : [];
+  const direction = selection?.anchorNode && selection.focusNode ? { anchorNode: selection.anchorNode, anchorOffset: selection.anchorOffset, focusNode: selection.focusNode, focusOffset: selection.focusOffset } : null;
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.readOnly = true;
+  area.setAttribute("aria-hidden", "true");
+  area.style.cssText = "position:fixed;left:-10000px;top:0;width:1px;height:1px;opacity:0";
+  document.body.append(area);
+  area.select();
+  area.setSelectionRange(0, text.length);
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } finally {
+    area.remove();
+    if (before instanceof HTMLElement) before.focus({ preventScroll: true });
+    if (selection) {
+      selection.removeAllRanges();
+      for (const range of ranges) selection.addRange(range);
+      // Adding a Range always makes it forward. Restore anchor and focus as well so a backward selection keeps
+      // the endpoint that Shift+Arrow will extend from after copying.
+      if (direction && ranges.length === 1 && selection.setBaseAndExtent) {
+        try {
+          selection.setBaseAndExtent(direction.anchorNode, direction.anchorOffset, direction.focusNode, direction.focusOffset);
+        } catch {
+          // The selected nodes left the page meanwhile; the cloned range restoration above is the best left.
+        }
+      }
+    }
+  }
+  return copied;
+}
+
 /** Copies an item's exact ID and says what happened without closing or redrawing its panel. */
 async function copyText(control, text) {
   const feedback = control.querySelector(".copy-feedback");
   let message = "Copied";
   try {
-    if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable");
-    await navigator.clipboard.writeText(text);
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (error) {
+        if (!copyTextFallback(control, text)) throw error;
+      }
+    } else if (!copyTextFallback(control, text)) throw new Error("Clipboard access is unavailable");
     control.classList.remove("copy-failed");
   } catch {
     message = "Copy failed";
