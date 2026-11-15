@@ -3986,6 +3986,49 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.equal(loads(), quiet + 1, "the refresh button loads once");
     });
 
+    it("does not empty a populated board for one empty task-list response, and recovers without a page reload", async () => {
+      await page.size(1280, 900);
+      await load();
+      await page.run(`
+        window.fetchBeforeEmptyPlan = window.fetch;
+        window.emptyPlanAnswers = 1;
+        window.emptyPlanConfirmationStarted = false;
+        window.fetch = async (...args) => {
+          const response = await window.fetchBeforeEmptyPlan(...args);
+          const url = typeof args[0] === 'string' ? args[0] : args[0].url;
+          if (url.endsWith('/api/list-tasks') && window.emptyPlanAnswers-- > 0) {
+            return new Response(JSON.stringify({ tasks: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          if (url.endsWith('/api/list-tasks') && !window.emptyPlanConfirmationStarted) {
+            window.emptyPlanConfirmationStarted = true;
+            await new Promise((resolve) => { window.releaseEmptyPlanConfirmation = resolve; });
+            const body = await response.json();
+            const changed = body.tasks.find((task) => task.id === ${JSON.stringify(ids.address)});
+            changed.title = 'Address form recovered without reload';
+            return new Response(JSON.stringify(body), { status: response.status, headers: { 'content-type': 'application/json' } });
+          }
+          return response;
+        };
+      `);
+      const before = await count(".card");
+      const asked = loads();
+      try {
+        await page.click("#refresh");
+        await page.until("return window.emptyPlanConfirmationStarted", "the confirmation reading to wait");
+        assert.deepEqual(
+          await page.run(`return [document.querySelectorAll('.card').length, document.querySelector('.card[data-id=${JSON.stringify(ids.address)}] .card-title').textContent]`),
+          [before, "Address form"],
+          "the populated board remains unchanged while confirmation is pending",
+        );
+        await page.run("window.releaseEmptyPlanConfirmation()");
+        await page.until(`return document.querySelector('.card[data-id=${JSON.stringify(ids.address)}] .card-title')?.textContent === 'Address form recovered without reload'`, "the confirmed newer task data to be drawn");
+        assert.equal(loads(), asked + 2, "the empty answer is confirmed with one fresh reading");
+        assert.equal(await count(".card"), before, "no task card was lost");
+      } finally {
+        await page.run("window.releaseEmptyPlanConfirmation?.(); window.fetch = window.fetchBeforeEmptyPlan; delete window.fetchBeforeEmptyPlan; delete window.emptyPlanAnswers; delete window.emptyPlanConfirmationStarted; delete window.releaseEmptyPlanConfirmation");
+      }
+    });
+
     it("with the switch on, listens for changes, shows one within a second, and moves the card to its new column", async () => {
       await page.size(1280, 900);
       await load();
