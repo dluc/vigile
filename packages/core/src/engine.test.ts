@@ -3,15 +3,18 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { MemoryStorage, type Change } from "@vigile/storage";
+import { comparePrioritySegments, executionBlockers, executionPriorityPath, executionPrioritySegments, executionRetained, executionRoute, priorityPathFrom, priorityPathNumbers, taskCalc, type BlockerRoute, type ExecutionKnown, type ExecutionStats, type PriorityPath } from "./calc.js";
+import { Graph } from "./graph.js";
 import { KINDS, compareNumerals, comparePlaces, compareProjectIds, compareTaskIds, compareUserIds, placeOf, refText } from "./ids.js";
 import { AGENT_INSTRUCTIONS, Engine, GUIDE_EXAMPLES, GUIDE_TOPICS, LINK_TYPES, MemoryKeyStore, OPERATIONS, VigileError, isToken, itemListQuestion, paging, readAll, type OperationLog } from "./index.js";
+import type { TaskNode } from "./model.js";
 import { itemListCursors } from "./operations/get.js";
 import { nextTasksCursor } from "./operations/list-next-tasks.js";
 import { STALE_CLAIM_MS, staleTasksCursor } from "./operations/list-stale-tasks.js";
 import { projectsCursor } from "./operations/list-projects.js";
 import { tasksCursor } from "./operations/list-tasks.js";
 import { usersCursor } from "./operations/list-users.js";
-import { cursor, type Cursor } from "./operations/shared.js";
+import { cursor, paginate, type Cursor } from "./operations/shared.js";
 
 /** Whether a token says that it continues a question, whatever else it says. */
 const isTokenFor = (token: unknown, question: unknown): boolean => paging.openToken(token)?.q === paging.questionMark(question);
@@ -665,7 +668,7 @@ describe("containers and projects", () => {
     assert.deepEqual([group.status, group.has_problems, group.progress], ["done", true, { finished: 0, total: 1 }]);
     assert.equal(group.problems[0].code, "done_with_unfinished_contents");
     assert.equal(group.problems[0].message, `Status is done, but 1 of the tasks it contains is not finished: ${reopened.inner}.`);
-    assert.deepEqual(await flagged(reopened), ["Group"]);
+    assert.deepEqual((await flagged(reopened)).sort(), ["Group", "Inner"]);
     // Finished again, the group is in order again.
     await reopened.agent("set_task_status", { id: reopened.inner, version: 3, status: "cancelled" });
     assert.deepEqual(await problems(reopened, reopened.group), []);
@@ -777,10 +780,1602 @@ describe("next", () => {
     const started = await agent("create_task", task("Started", { priority: 9 }));
     await agent("set_task_status", { id: started.id, version: 1, status: "in_progress" });
 
-    assert.deepEqual((await agent("list_next_tasks")).tasks.map((t: any) => t.id), [high.id, mine.id, low.id]);
-    assert.deepEqual((await person("list_next_tasks")).tasks.map((t: any) => t.id), [theirs.id, high.id, low.id]);
+    assert.deepEqual((await agent("list_next_tasks")).tasks.map((t: any) => [t.id, t.priority_path]), [[high.id, [5]], [mine.id, [5]], [low.id, [0]]]);
+    assert.deepEqual((await person("list_next_tasks")).tasks.map((t: any) => [t.id, t.priority_path]), [[theirs.id, [9]], [high.id, [5]], [low.id, [0]]]);
     assert.deepEqual((await agent("list_tasks", { assigned_to: "user" })).tasks.map((t: any) => t.id), [theirs.id]);
     assert.deepEqual((await agent("list_tasks", { status: "in_progress" })).tasks.map((t: any) => t.id), [started.id]);
+  });
+
+  it("takes its order from containment: outer area, nested groups, then the task's own priority", async () => {
+    const { agent } = await setup();
+    const core = await agent("create_task", task("Core area", { priority: 9 }));
+    const page = await agent("create_task", task("Page area", { priority: 8 }));
+    await agent("set_task_status", { id: core.id, version: 1, status: "in_progress" });
+    await agent("set_task_status", { id: page.id, version: 1, status: "in_progress" });
+    const nested = await agent("create_task", task("Nested core work", { parent: core.id, priority: 2 }));
+    await agent("set_task_status", { id: nested.id, version: 1, status: "in_progress" });
+    const coreLow = await agent("create_task", task("Core, low on its own", { parent: nested.id, priority: 1 }));
+    const pageHigh = await agent("create_task", task("Page, high on its own", { parent: page.id, priority: 99 }));
+    const loose = await agent("create_task", task("Ungrouped urgent work", { priority: 10 }));
+
+    assert.deepEqual(
+      (await agent("list_next_tasks")).tasks.map((t: any) => [t.id, t.priority_path]),
+      [[loose.id, [10]], [coreLow.id, [9, 2, 1]], [pageHigh.id, [8, 99]]],
+      "each entry exposes the complete path that places it in this paged list",
+    );
+    assert.deepEqual((await agent("list_next_tasks", { parent: core.id })).tasks.map((t: any) => t.id), [coreLow.id]);
+    assert.deepEqual((await agent("list_next_tasks", { parent: page.id })).tasks.map((t: any) => t.id), [pageHigh.id]);
+  });
+
+  it("puts an open container before the work inside it, however high the child's own priority", async () => {
+    const { agent } = await setup();
+    const group = await agent("create_task", task("The area", { priority: 4 }));
+    const child = await agent("create_task", task("Urgent inside it", { parent: group.id, priority: 99 }));
+    assert.deepEqual((await agent("list_next_tasks")).tasks.map((t: any) => t.id), [group.id, child.id]);
+    await agent("set_task_status", { id: group.id, version: 1, status: "in_progress" });
+    assert.deepEqual((await agent("list_next_tasks")).tasks.map((t: any) => t.id), [child.id]);
+  });
+
+  it("keeps a parent's prefix-related paths: appending the child's priority may make the longer one win", async () => {
+    const { agent } = await setup();
+    const root = await agent("create_task", task("Root", { priority: 9 }));
+    const middle = await agent("create_task", task("Middle", { parent: root.id, priority: 5 }));
+    const parent = await agent("create_task", task("Parent by two paths", { parent: root.id, priority: 5 }));
+    for (const item of [root, middle, parent]) await agent("set_task_status", { id: item.id, version: 1, status: "in_progress" });
+    // Parent has [9,5] directly, and [9,5,5] through Middle. For Parent itself the shorter path wins; after P1
+    // is appended for Child, the longer path wins over Rival's [9,5,4].
+    await agent("add_link", { from: middle.id, type: "contains", to: parent.id });
+    const child = await agent("create_task", task("Child", { parent: parent.id, priority: 1 }));
+    const rival = await agent("create_task", task("Rival", { parent: middle.id, priority: 4 }));
+    assert.deepEqual((await agent("list_next_tasks")).tasks.map((t: any) => t.id), [child.id, rival.id]);
+  });
+
+  it("shares the path of 6,000 nested groups instead of retaining every ancestor array at every level", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    let before: TaskNode | null = null;
+    for (let n = 1; n <= 6_000; n++) {
+      const current: TaskNode = {
+        kind: "task",
+        id: String(n).padStart(3, "0"),
+        version: 1,
+        created_at: now,
+        created_by: "USER-003",
+        updated_at: now,
+        deleted_at: null,
+        title: `Level ${n}`,
+        type: "task",
+        status: n === 6_000 ? "open" : "in_progress",
+        priority: 1,
+        value: null,
+        size: null,
+        why: null,
+        timeline: [{ status: n === 6_000 ? "open" : "in_progress", at: now, by: "USER-003" }],
+      };
+      graph.putNode(current);
+      if (before) graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+    }
+    const known: ExecutionKnown = new Map();
+    const route = executionRoute(graph, before!, known);
+    assert.equal(known.size, 6_000);
+    assert.equal(executionPriorityPath(route)?.length, 6_000);
+    const segments = new Set<PriorityPath>();
+    for (const remembered of known.values()) for (const path of executionPrioritySegments(remembered)) for (let at: PriorityPath | null = path; at; at = at.previous) segments.add(at);
+    assert.equal(segments.size, 6_000, "one shared segment per level, not 18,003,000 copied priority entries");
+  });
+
+  it("does not compare every pair of routes where one root contains a whole chain", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    let root: TaskNode | null = null;
+    let before: TaskNode | null = null;
+    for (let n = 1; n <= 300; n++) {
+      const current: TaskNode = {
+        kind: "task",
+        id: String(n).padStart(3, "0"),
+        version: 1,
+        created_at: now,
+        created_by: "USER-003",
+        updated_at: now,
+        deleted_at: null,
+        title: `Level ${n}`,
+        type: "task",
+        status: n === 300 ? "open" : "in_progress",
+        priority: 1,
+        value: null,
+        size: null,
+        why: null,
+        timeline: [{ status: n === 300 ? "open" : "in_progress", at: now, by: "USER-003" }],
+      };
+      graph.putNode(current);
+      root ??= current;
+      if (before) graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      if (root !== before && root !== current) graph.addLink({ from: root, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+    }
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    const known: ExecutionKnown = new Map();
+    const route = executionRoute(graph, before!, known, stats);
+    assert.equal(route.paths?.length, 299, "each prefix can still win for a descendant");
+    assert.ok(stats.pathComparisons < 500_000, `${stats.pathComparisons} comparisons, not the 4,455,100 pairwise comparisons`);
+    assert.ok((stats.peakCandidateProofEntries ?? 0) <= 6_000, `${stats.peakCandidateProofEntries} temporary proof entries at once, not quadratic accumulation across one traversal`);
+    const retained = executionRetained(known);
+    assert.ok(retained.segments <= 300 && retained.frontiers <= 6_000 && retained.references <= 300, `${retained.segments} durable segments, ${retained.frontiers} frontier nodes and ${retained.references} cached references`);
+    const coldSegments = executionPrioritySegments(route);
+    const cold = coldSegments.map(priorityPathNumbers);
+    const warm = executionPrioritySegments(executionRoute(graph, before!, known)).map(priorityPathNumbers);
+    assert.deepEqual(warm, cold, "cold and warm caches preserve every prefix and its order");
+    const listed = paging.describeList("list_next_tasks", {}, "USER-001");
+    for (let n = 1; n < coldSegments.length; n++) {
+      assert.equal(Math.sign(comparePrioritySegments(coldSegments[n - 1]!, coldSegments[n]!)), Math.sign(listed.compare([cold[n - 1]!, "001"], [cold[n]!, "001"])));
+    }
+  });
+
+  it("does not retain the quadratic candidates discarded across many leaves", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, title: string, priority: number, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title,
+      type: "task",
+      status,
+      priority,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const depth = 200;
+    const leaves = 200;
+    let root: TaskNode | null = null;
+    let before: TaskNode | null = null;
+    for (let n = 1; n <= depth; n++) {
+      const current = node(`G-${String(n).padStart(3, "0")}`, `Group ${n}`, 1, "in_progress");
+      graph.putNode(current);
+      root ??= current;
+      if (before) graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      if (root !== before && root !== current) graph.addLink({ from: root, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+    }
+    const open: TaskNode[] = [];
+    for (let n = 1; n <= leaves; n++) {
+      const leaf = node(`L-${String(n).padStart(3, "0")}`, `Leaf ${n}`, n + 1, "open");
+      graph.putNode(leaf);
+      graph.addLink({ from: before!, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      open.push(leaf);
+    }
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    const known: ExecutionKnown = new Map();
+    const leafBlockIds = open.map((leaf) => {
+      const route = executionRoute(graph, leaf, known, stats);
+      assert.equal(route.paths?.length, 1);
+      return route.paths!.longest.blocks[0];
+    });
+    assert.equal(new Set(leafBlockIds).size, leaves, "distinct leaf priorities retain unique proof identities across routes");
+    assert.ok((stats.candidateSegments ?? 0) > (depth * leaves) / 2, `${stats.candidateSegments} losing candidates exercised`);
+    const retained = executionRetained(known);
+    assert.ok(retained.segments <= depth + leaves + 10 && retained.frontiers <= (depth + leaves) * 20, `${retained.segments} segments and ${retained.frontiers} frontier nodes for ${depth + leaves} tasks`);
+    assert.ok(retained.references <= depth + leaves, `${retained.references} retained route references for ${depth + leaves} tasks`);
+    assert.ok(retained.periodProofEntries <= (depth + leaves) * 20, `${retained.periodProofEntries} retained proof blocks after losing candidates were discarded`);
+    for (const leaf of [open[0]!, open[Math.floor(leaves / 2)]!, open.at(-1)!]) {
+      const warm = executionPrioritySegments(executionRoute(graph, leaf, known)).map(priorityPathNumbers);
+      const cold = executionPrioritySegments(executionRoute(graph, leaf, new Map())).map(priorityPathNumbers);
+      assert.deepEqual(warm, cold, `warm and cold routes preserve the same priority path for ${leaf.id}`);
+    }
+  });
+
+  it("discards a divergent losing parent before shifting a shared deep frontier", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, priority: number, status: TaskNode["status"] = "in_progress"): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 300;
+    const root = node("ROOT-9", 9);
+    const losing = node("ROOT-0", 0);
+    graph.putNode(root);
+    graph.putNode(losing);
+    let previous: TaskNode | null = null;
+    for (let n = 1; n <= size; n++) {
+      const group = node(`GROUP-${String(n).padStart(3, "0")}`, 1);
+      graph.putNode(group);
+      graph.addLink({ from: root, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      if (previous) graph.addLink({ from: previous, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      previous = group;
+    }
+    const leaves: TaskNode[] = [];
+    for (let n = 1; n <= size; n++) {
+      const leaf = node(`LEAF-${String(n).padStart(3, "0")}`, 1, "open");
+      graph.putNode(leaf);
+      graph.addLink({ from: previous!, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: losing, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      leaves.push(leaf);
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    executionRoute(graph, previous!, known, stats);
+    executionRoute(graph, losing, known, stats);
+    stats.pathEntriesVisited = 0;
+    for (const leaf of leaves) assert.deepEqual(executionPriorityPath(executionRoute(graph, leaf, known, stats))?.slice(0, 2), [9, 1]);
+    assert.ok((stats.pathEntriesVisited ?? 0) <= size * 2, `${stats.pathEntriesVisited ?? 0} path entries visited for ${size} leaves below one shared deep frontier`);
+  });
+
+  it("prunes a deep lower-priority frontier before shallow higher-priority roots reach many leaves", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, priority: number, status: TaskNode["status"] = "in_progress"): TaskNode => ({
+      kind: "task", id, version: 1, created_at: now, created_by: "USER-003", updated_at: now, deleted_at: null,
+      title: id, type: "task", status, priority, value: null, size: null, why: null, timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 300;
+    const low = node("LOW-ROOT", 9);
+    graph.putNode(low);
+    let previous = low;
+    for (let n = 1; n <= size; n++) {
+      const group = node(`LOW-${String(n).padStart(3, "0")}`, 1);
+      graph.putNode(group);
+      graph.addLink({ from: low, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: previous, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      previous = group;
+    }
+    const leaves: TaskNode[] = [];
+    for (let n = 1; n <= size; n++) {
+      const high = node(`HIGH-${String(n).padStart(3, "0")}`, 10);
+      const leaf = node(`LEAF-${String(n).padStart(3, "0")}`, 1, "open");
+      graph.putNode(high);
+      graph.putNode(leaf);
+      graph.addLink({ from: previous, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: high, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      leaves.push(leaf);
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    executionRoute(graph, previous, known, stats);
+    stats.pathEntriesVisited = 0;
+    for (const leaf of leaves) assert.equal(executionPriorityPath(executionRoute(graph, leaf, known, stats))?.[0], 10);
+    assert.ok((stats.pathEntriesVisited ?? 0) <= size * 2, `${stats.pathEntriesVisited ?? 0} losing endpoint visits for ${size} higher-priority leaves`);
+  });
+
+  it("shares multi-blocker results instead of revisiting every path through a layered graph", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    let before = [node("ROOT-A", "paused"), node("ROOT-B", "paused")];
+    for (const root of before) graph.putNode(root);
+    const depth = 40;
+    for (let level = 1; level <= depth; level++) {
+      const current = [node(`A-${level}`, "in_progress"), node(`B-${level}`, "in_progress")];
+      for (const task of current) {
+        graph.putNode(task);
+        for (const parent of before) graph.addLink({ from: parent, type: "contains", to: task, created_at: now, created_by: "USER-003" });
+      }
+      before = current;
+    }
+    const leaf = node("LEAF", "open");
+    graph.putNode(leaf);
+    for (const parent of before) graph.addLink({ from: parent, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    const known: ExecutionKnown = new Map();
+    const route = executionRoute(graph, leaf, known, stats);
+    assert.deepEqual(executionBlockers(route).map((task) => task.id), ["ROOT-A", "ROOT-B"]);
+    assert.ok((stats.routeVisits ?? Infinity) <= depth * 4 + 4, `${stats.routeVisits} visits for ${depth} two-node layers`);
+    const retained = executionRetained(known);
+    assert.ok(retained.references <= (depth * 2 + 1) * 2 && retained.blockerSets <= depth * 2 + 2, `${retained.references} references in ${retained.blockerSets} lazy blocker unions`);
+  });
+
+  it("shares active multi-path frontiers instead of revisiting every path through a layered graph", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const root = node("ROOT", "in_progress");
+    const child = node("CHILD", "in_progress");
+    graph.putNode(root);
+    graph.putNode(child);
+    graph.addLink({ from: root, type: "contains", to: child, created_at: now, created_by: "USER-003" });
+    let before = [root, child];
+    const depth = 40;
+    for (let level = 1; level <= depth; level++) {
+      const current = [node(`A-${level}`, "in_progress"), node(`B-${level}`, "in_progress")];
+      for (const task of current) {
+        graph.putNode(task);
+        for (const parent of before) graph.addLink({ from: parent, type: "contains", to: task, created_at: now, created_by: "USER-003" });
+      }
+      before = current;
+    }
+    const leaf = node("LEAF", "open");
+    graph.putNode(leaf);
+    for (const parent of before) graph.addLink({ from: parent, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    const known: ExecutionKnown = new Map();
+    const route = executionRoute(graph, leaf, known, stats);
+    assert.ok(route.paths && route.paths.length >= 2, `${route.paths?.length} useful prefix paths`);
+    assert.ok((stats.routeVisits ?? Infinity) <= depth * 4 + 6, `${stats.routeVisits} visits for ${depth} active two-node layers`);
+    const retained = executionRetained(known);
+    const nodes = depth * 2 + 3;
+    assert.ok(retained.segments <= nodes * 2 && retained.frontiers <= nodes * 20 && retained.references <= nodes, `${retained.segments} segments, ${retained.frontiers} frontiers and ${retained.references} route references for ${nodes} tasks`);
+    assert.deepEqual(executionPrioritySegments(executionRoute(graph, leaf, known)).map(priorityPathNumbers), executionPrioritySegments(route).map(priorityPathNumbers), "the warm cache returns the same active frontier");
+  });
+
+  it("shares shifted active frontiers across a trailing chain", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"], priority = 1): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const depth = 200;
+    const root = node("ROOT", "in_progress", 9);
+    graph.putNode(root);
+    let before = root;
+    for (let n = 1; n <= depth; n++) {
+      const current = node(`SHORT-${String(n).padStart(3, "0")}`, "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: root, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+    }
+    for (let n = 1; n <= depth; n++) {
+      const current = node(`TAIL-${String(n).padStart(3, "0")}`, n === depth ? "open" : "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    const route = executionRoute(graph, before, known, stats);
+    assert.ok(route.paths && route.paths.length > 1, `${route.paths?.length} surviving alternatives exercise shifted fronts`);
+    const retained = executionRetained(known);
+    const nodes = depth * 2 + 1;
+    assert.ok(retained.frontiers <= nodes * 20, `${retained.frontiers} frontier nodes for ${nodes} graph nodes`);
+    assert.ok(retained.references <= nodes, `${retained.references} route references for ${nodes} graph nodes`);
+    assert.ok((stats.pathEntriesVisited ?? Infinity) <= nodes * 2, `${stats.pathEntriesVisited} endpoint visits for ${nodes} graph nodes`);
+  });
+
+  it("shifts periodic nonuniform frontiers without a fixed period limit or repeated endpoint expansion", () => {
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"], priority: number): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    for (const period of [2, 17]) {
+      const graph = new Graph();
+      const depth = period === 2 ? 200 : 80;
+      const root = node(`ROOT-${period}`, "in_progress", 9);
+      graph.putNode(root);
+      const chain = [root];
+      for (let n = 1; n <= depth * period; n++) {
+        const current = node(`CHAIN-${period}-${String(n).padStart(4, "0")}`, "in_progress", ((n - 1) % period) + 1);
+        graph.putNode(current);
+        graph.addLink({ from: chain.at(-1)!, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+        chain.push(current);
+      }
+      const hub = node(`HUB-${period}`, "in_progress", 1);
+      graph.putNode(hub);
+      for (const parent of [root, ...chain.slice(1).filter((_, at) => (at + 1) % period === 0)]) {
+        graph.addLink({ from: parent, type: "contains", to: hub, created_at: now, created_by: "USER-003" });
+      }
+      let before = hub;
+      for (let n = 1; n <= depth; n++) {
+        const current = node(`TAIL-${period}-${String(n).padStart(3, "0")}`, n === depth ? "open" : "in_progress", (n % period) + 1);
+        graph.putNode(current);
+        graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+        before = current;
+      }
+      const stats: ExecutionStats = { pathComparisons: 0 };
+      executionRoute(graph, before, new Map(), stats);
+      const nodes = depth * period + depth + 2;
+      assert.ok((stats.pathEntriesVisited ?? Infinity) <= nodes * 2, `${stats.pathEntriesVisited} endpoint visits for ${nodes} graph nodes at period ${period}`);
+    }
+  });
+
+  it("bounds exact periodicity proofs across linear many distinct depth gaps", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"] = "in_progress"): TaskNode => ({
+      kind: "task", id, version: 1, created_at: now, created_by: "USER-003", updated_at: now, deleted_at: null,
+      title: id, type: "task", status, priority: 1, value: null, size: null, why: null, timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 200;
+    const chain = [node("ROOT")];
+    graph.putNode(chain[0]!);
+    for (let n = 1; n <= size; n++) {
+      const current = node(`CHAIN-${String(n).padStart(3, "0")}`);
+      graph.putNode(current);
+      graph.addLink({ from: chain.at(-1)!, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      chain.push(current);
+    }
+    const leaves: TaskNode[] = [];
+    for (let gap = 1; gap <= size; gap++) {
+      const group = node(`GAP-${String(gap).padStart(3, "0")}`);
+      const leaf = node(`LEAF-${String(gap).padStart(3, "0")}`, "open");
+      graph.putNode(group);
+      graph.putNode(leaf);
+      graph.addLink({ from: chain.at(-1)!, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: chain[size - gap]!, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: group, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      leaves.push(leaf);
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    for (const leaf of leaves) executionRoute(graph, leaf, known, stats);
+    const nodes = size * 3 + 1;
+    assert.ok((stats.pathEntriesVisited ?? 0) <= nodes * 3, `${stats.pathEntriesVisited} endpoint visits for ${nodes} varying-gap nodes`);
+    assert.ok(executionRetained(known).periodProofEntries <= nodes * 20, `${executionRetained(known).periodProofEntries} canonical proof blocks for ${nodes} varying-gap nodes`);
+  });
+
+  it("shares shifted active frontiers when their path depths have gaps", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const depth = 200;
+    const root = node("ROOT", "in_progress");
+    graph.putNode(root);
+    const chain = [root];
+    for (let n = 1; n <= depth; n++) {
+      const current = node(`CHAIN-${String(n).padStart(3, "0")}`, "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: chain.at(-1)!, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      chain.push(current);
+    }
+    const shared = node("SHARED", "in_progress");
+    graph.putNode(shared);
+    for (const parent of [root, ...chain.slice(1, -2), chain.at(-1)!]) {
+      graph.addLink({ from: parent, type: "contains", to: shared, created_at: now, created_by: "USER-003" });
+    }
+    let before = shared;
+    for (let n = 1; n <= depth; n++) {
+      const current = node(`TAIL-${String(n).padStart(3, "0")}`, n === depth ? "open" : "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: root, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+    }
+    const known: ExecutionKnown = new Map();
+    const route = executionRoute(graph, before, known);
+    assert.ok(route.paths && route.paths.length > 1, `${route.paths?.length} gapped alternatives survive`);
+    const retained = executionRetained(known);
+    const nodes = depth * 2 + 2;
+    assert.ok(retained.frontiers <= nodes * 50, `${retained.frontiers} persistent-tree nodes for ${nodes} graph nodes`);
+    assert.ok(retained.references <= nodes, `${retained.references} route references for ${nodes} graph nodes`);
+  });
+
+  it("shares endpoint sets when alternating depth gaps shift together", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const depth = 200;
+    const root = node("ROOT", "in_progress");
+    graph.putNode(root);
+    const chain = [root];
+    for (let n = 1; n <= depth * 2; n++) {
+      const current = node(`CHAIN-${String(n).padStart(3, "0")}`, "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: chain.at(-1)!, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      chain.push(current);
+    }
+    const shared = node("SHARED", "in_progress");
+    graph.putNode(shared);
+    for (const parent of [root, ...chain.slice(1).filter((_, at) => (at + 1) % 2 === 0)]) {
+      graph.addLink({ from: parent, type: "contains", to: shared, created_at: now, created_by: "USER-003" });
+    }
+    let before = shared;
+    for (let n = 1; n <= depth; n++) {
+      const current = node(`TAIL-${String(n).padStart(3, "0")}`, n === depth ? "open" : "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: root, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+    }
+    const known: ExecutionKnown = new Map();
+    executionRoute(graph, before, known);
+    const retained = executionRetained(known);
+    const nodes = depth * 3 + 2;
+    assert.ok(retained.frontiers <= nodes * 50, `${retained.frontiers} frontier nodes for ${nodes} graph nodes with alternating gaps`);
+  });
+
+  it("does not materialize blocker lists to decide waiting eligibility", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const task: TaskNode = {
+      kind: "task",
+      id: "LEAF",
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: "Leaf",
+      type: "task",
+      status: "open",
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status: "open", at: now, by: "USER-003" }],
+    };
+    graph.putNode(task);
+    const blockers = {
+      get direct(): never {
+        throw new Error("blockers were materialized");
+      },
+      sources: [],
+    } as unknown as BlockerRoute;
+    const calculated = taskCalc(graph, task, new Map(), new Map([[task.id, { paths: null, blockers }]]));
+    assert.equal(calculated.is_waiting, true);
+    assert.equal(calculated.is_next, false);
+    assert.throws(() => calculated.waiting_for, /blockers were materialized/, "the list remains lazy until a returned task asks for it");
+    for (const [status, deleted_at] of [
+      ["done", null],
+      ["cancelled", null],
+      ["open", now],
+    ] as const) {
+      const stopped: TaskNode = { ...task, id: `STOPPED-${status}`, status, deleted_at, timeline: [{ status, at: now, by: "USER-003" }] };
+      graph.putNode(stopped);
+      const stoppedCalc = taskCalc(graph, stopped, new Map(), new Map([[stopped.id, { paths: null, blockers }]]));
+      assert.equal(stoppedCalc.is_waiting, false, status);
+      assert.deepEqual(stoppedCalc.waiting_for, [], `${status} has no blockers`);
+    }
+  });
+
+  it("keeps suspended traversal frames linear while a shared wide parent is visited first", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const depth = 300;
+    const root = node("ROOT", "in_progress");
+    graph.putNode(root);
+    let wide = root;
+    for (let n = 1; n <= depth; n++) {
+      const current = node(`A-${String(n).padStart(3, "0")}`, "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: wide, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      if (wide !== root) graph.addLink({ from: root, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      wide = current;
+    }
+    let before: TaskNode | null = null;
+    for (let n = 1; n <= depth; n++) {
+      const current = node(`B-${String(n).padStart(3, "0")}`, n === depth ? "open" : "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: wide, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      if (before) graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+    }
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    executionRoute(graph, before!, new Map(), stats);
+    assert.ok((stats.peakPendingPaths ?? Infinity) <= depth * 2, `${stats.peakPendingPaths} pending endpoints across suspended frames`);
+    assert.ok((stats.peakParentSources ?? Infinity) <= depth * 2, `${stats.peakParentSources} parent-frontier pointers across suspended frames`);
+  });
+
+  it("deduplicates high-fan-in parent endpoints as they enter the pending set", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const depth = 800;
+    const root = node("ROOT", "in_progress");
+    graph.putNode(root);
+    const groups: TaskNode[] = [root];
+    for (let n = 1; n < depth; n++) {
+      const current = node(`GROUP-${String(n).padStart(3, "0")}`, "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: groups.at(-1)!, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      if (groups.length > 1) graph.addLink({ from: root, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      groups.push(current);
+    }
+    const leaf = node("LEAF", "open");
+    graph.putNode(leaf);
+    for (const group of groups) graph.addLink({ from: group, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    executionRoute(graph, leaf, new Map(), stats);
+    assert.ok((stats.peakPendingPaths ?? Infinity) <= depth + 1, `${stats.peakPendingPaths} distinct pending endpoints from ${depth} parents`);
+    assert.ok((stats.peakParentSources ?? Infinity) <= depth + 1, `${stats.peakParentSources} parent-frontier pointers from ${depth} parents`);
+    assert.ok((stats.pathEntriesVisited ?? Infinity) <= depth * 2, `${stats.pathEntriesVisited} endpoint visits from ${depth} overlapping parents`);
+  });
+
+  it("canonicalizes equivalent frontier wrappers before layered fan-in", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const depth = 200;
+    const root = node("ROOT", "in_progress");
+    graph.putNode(root);
+    let before = root;
+    for (let n = 1; n < depth; n++) {
+      const current = node(`CHAIN-${String(n).padStart(3, "0")}`, "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: root, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+    }
+    let previous = [before, before];
+    for (let n = 1; n <= depth; n++) {
+      const pair = [node(`LEFT-${String(n).padStart(3, "0")}`, "in_progress"), node(`RIGHT-${String(n).padStart(3, "0")}`, n === depth ? "open" : "in_progress")];
+      for (const current of pair) {
+        graph.putNode(current);
+        for (const parent of previous) graph.addLink({ from: parent, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      }
+      previous = pair;
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    executionRoute(graph, previous[1]!, known, stats);
+    for (let n = 1; n < depth; n++) {
+      const left = known.get(`LEFT-${String(n).padStart(3, "0")}`)?.paths;
+      const right = known.get(`RIGHT-${String(n).padStart(3, "0")}`)?.paths;
+      assert.ok(left === right, `layer ${n} shares one wrapper: roots ${left?.root === right?.root}, offsets ${left?.offset}/${right?.offset}, longest ${left?.longest === right?.longest}, lengths ${left?.length}/${right?.length}`);
+    }
+    const nodes = depth * 3 + 1;
+    assert.ok((stats.pathEntriesVisited ?? Infinity) <= nodes * 2, `${stats.pathEntriesVisited} endpoint visits for ${nodes} layered graph nodes`);
+  });
+
+  it("keeps shared blockers as frontier pointers across suspended frames", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const depth = 300;
+    const hub = node("HUB", "in_progress");
+    graph.putNode(hub);
+    for (let n = 1; n <= depth; n++) {
+      const blocker = node(`BLOCK-${String(n).padStart(3, "0")}`, "paused");
+      graph.putNode(blocker);
+      graph.addLink({ from: blocker, type: "contains", to: hub, created_at: now, created_by: "USER-003" });
+    }
+    let before: TaskNode | null = null;
+    for (let n = 1; n <= depth; n++) {
+      const current = node(`CHAIN-${String(n).padStart(3, "0")}`, n === depth ? "open" : "in_progress");
+      graph.putNode(current);
+      graph.addLink({ from: hub, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      if (before) graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+    }
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    const route = executionRoute(graph, before!, new Map(), stats);
+    assert.equal(executionBlockers(route).length, depth);
+    assert.ok((stats.peakPendingBlockers ?? Infinity) <= depth * 2, `${stats.peakPendingBlockers} pending blockers across suspended frames`);
+    assert.ok((stats.peakBlockerSources ?? Infinity) <= depth * 2, `${stats.peakBlockerSources} blocker-frontier pointers across suspended frames`);
+  });
+
+  it("reuses one inherited blocker frontier without rescanning it for every leaf", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 300;
+    const hub = node("HUB-A", "in_progress");
+    const alternate = node("HUB-B", "in_progress");
+    graph.putNode(hub);
+    graph.putNode(alternate);
+    const blockers: TaskNode[] = [];
+    for (let n = 1; n <= size; n++) {
+      const blocker = node(`BLOCK-${String(n).padStart(3, "0")}`, "paused");
+      graph.putNode(blocker);
+      graph.addLink({ from: blocker, type: "contains", to: hub, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: blocker, type: "contains", to: alternate, created_at: now, created_by: "USER-003" });
+      blockers.push(blocker);
+    }
+    const leaves: TaskNode[] = [];
+    for (let n = 1; n <= size; n++) {
+      const leaf = node(`LEAF-${String(n).padStart(3, "0")}`, "open");
+      graph.putNode(leaf);
+      graph.addLink({ from: hub, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: alternate, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      leaves.push(leaf);
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    executionRoute(graph, alternate, known, stats);
+    stats.blockerEntriesVisited = 0;
+    for (const leaf of leaves) assert.equal(executionRoute(graph, leaf, known, stats).paths, null);
+    assert.equal(stats.blockerEntriesVisited ?? 0, 0, "the inherited blocker tree is passed through without enumeration");
+  });
+
+  it("shares growing blocker sets across a chain", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const depth = 300;
+    let before: TaskNode | null = null;
+    let last: TaskNode | null = null;
+    for (let n = 1; n <= depth; n++) {
+      const suffix = String(n).padStart(3, "0");
+      const blocker = node(`BLOCK-${String(depth - n + 1).padStart(3, "0")}`, "paused");
+      const current = node(`GROUP-${suffix}`, "in_progress");
+      graph.putNode(blocker);
+      graph.putNode(current);
+      graph.addLink({ from: blocker, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      if (before) graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      before = current;
+      last = current;
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    const route = executionRoute(graph, last!, known, stats);
+    assert.equal(executionBlockers(route).length, depth);
+    const retained = executionRetained(known);
+    assert.ok(retained.blockerSets <= depth * 20, `${retained.blockerSets} blocker nodes for ${depth} overlapping sets`);
+    assert.ok(retained.references <= depth, `${retained.references} route references for ${depth} active groups`);
+    assert.ok(retained.blockerIndexEntries <= depth && retained.blockerIndexKeyUnits <= depth * 16, `${retained.blockerIndexEntries} fixed-size blocker index entries using ${retained.blockerIndexKeyUnits} key units`);
+    assert.equal(stats.blockerEntriesVisited ?? 0, 0, "local blocker additions never enumerate the inherited blocker tree");
+  });
+
+  it("reuses predecessor-plus-blocker updates across parallel chains", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const depth = 300;
+    let previous: [TaskNode | null, TaskNode | null] = [null, null];
+    for (let n = 1; n <= depth; n++) {
+      const suffix = String(n).padStart(3, "0");
+      const blocker = node(`BLOCK-${suffix}`, "paused");
+      const pair: [TaskNode, TaskNode] = [node(`LEFT-${suffix}`, "in_progress"), node(`RIGHT-${suffix}`, "in_progress")];
+      graph.putNode(blocker);
+      for (let side = 0; side < pair.length; side++) {
+        const current = pair[side]!;
+        graph.putNode(current);
+        graph.addLink({ from: blocker, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+        if (previous[side]) graph.addLink({ from: previous[side]!, type: "contains", to: current, created_at: now, created_by: "USER-003" });
+      }
+      previous = pair;
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    const left = executionRoute(graph, previous[0]!, known, stats);
+    const right = executionRoute(graph, previous[1]!, known, stats);
+    assert.deepEqual(executionBlockers(left).map((blocker) => blocker.id), executionBlockers(right).map((blocker) => blocker.id), "both chains finish with the same blockers");
+    assert.equal(stats.blockerEntriesVisited ?? 0, 0, "matching incremental updates do not rescan growing sets");
+  });
+
+  it("reuses unequal blocker-frontier unions across many shared leaves", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 100;
+    const hubs = Array.from({ length: 6 }, (_, at) => node(`HUB-${at}`, "in_progress"));
+    for (const hub of hubs) graph.putNode(hub);
+    for (let n = 1; n <= size; n++) {
+      for (let side = 0; side < hubs.length; side++) {
+        const blocker = node(`BLOCK-${side}-${String(n).padStart(3, "0")}`, "paused");
+        graph.putNode(blocker);
+        graph.addLink({ from: blocker, type: "contains", to: hubs[side]!, created_at: now, created_by: "USER-003" });
+      }
+    }
+    const permutations = (items: TaskNode[]): TaskNode[][] => (items.length < 2 ? [items] : items.flatMap((item, at) => permutations([...items.slice(0, at), ...items.slice(at + 1)]).map((rest) => [item, ...rest])));
+    const leaves: TaskNode[] = [];
+    for (const [at, parents] of permutations(hubs).entries()) {
+      const leaf = node(`LEAF-${String(at).padStart(3, "0")}`, "open");
+      graph.putNode(leaf);
+      for (const hub of parents) graph.addLink({ from: hub, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      leaves.push(leaf);
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    for (const leaf of leaves) assert.equal(executionBlockers(executionRoute(graph, leaf, known, stats)).length, size * hubs.length);
+    assert.ok((stats.blockerEntriesVisited ?? 0) <= size * (hubs.length - 1), `${stats.blockerEntriesVisited ?? 0} entries visited while sharing lazy unions across ${leaves.length} parent permutations`);
+  });
+
+  it("proves growing blocker subsets without rescanning each one", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 300;
+    const hub = node("HUB", "in_progress");
+    graph.putNode(hub);
+    const groups: TaskNode[] = [];
+    let before: TaskNode | null = null;
+    for (let n = 1; n <= size; n++) {
+      const suffix = String(n).padStart(3, "0");
+      const blocker = node(`BLOCK-${suffix}`, "paused");
+      const group = node(`GROUP-${suffix}`, "in_progress");
+      graph.putNode(blocker);
+      graph.putNode(group);
+      graph.addLink({ from: blocker, type: "contains", to: hub, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: blocker, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      if (before) graph.addLink({ from: before, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      groups.push(group);
+      before = group;
+    }
+    const leaves = groups.map((group, at) => {
+      const leaf = node(`LEAF-${String(at + 1).padStart(3, "0")}`, "open");
+      graph.putNode(leaf);
+      graph.addLink({ from: hub, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: group, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      return leaf;
+    });
+    for (const order of [leaves, [...leaves].reverse()]) {
+      const known: ExecutionKnown = new Map();
+      const stats: ExecutionStats = { pathComparisons: 0 };
+      const full = executionBlockers(executionRoute(graph, hub, known, stats));
+      assert.equal(full.length, size);
+      stats.blockerEntriesVisited = 0;
+      for (const leaf of order) assert.deepEqual(executionBlockers(executionRoute(graph, leaf, known, stats)), full);
+      assert.ok((stats.blockerEntriesVisited ?? Infinity) <= size + 1, `${stats.blockerEntriesVisited} entries visited across ${size} ${order === leaves ? "growing" : "shrinking"} subsets`);
+    }
+  });
+
+  it("uses indexed ancestry for warmed group subsets of one final group", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 300;
+    const groups: TaskNode[] = [];
+    let before: TaskNode | null = null;
+    for (let n = 1; n <= size; n++) {
+      const suffix = String(n).padStart(3, "0");
+      const blocker = node(`BLOCK-${suffix}`, "paused");
+      const group = node(`GROUP-${suffix}`, "in_progress");
+      graph.putNode(blocker);
+      graph.putNode(group);
+      graph.addLink({ from: blocker, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      if (before) graph.addLink({ from: before, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      groups.push(group);
+      before = group;
+    }
+    const leaves = groups.map((group, at) => {
+      const leaf = node(`LEAF-${String(at + 1).padStart(3, "0")}`, "open");
+      graph.putNode(leaf);
+      graph.addLink({ from: groups.at(-1)!, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: group, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      return leaf;
+    });
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    for (const group of groups) executionRoute(graph, group, known, stats);
+    const full = executionBlockers(known.get(groups.at(-1)!.id)!);
+    stats.blockerEntriesVisited = 0;
+    stats.blockerPredecessorsVisited = 0;
+    stats.blockerProofLookups = 0;
+    for (const leaf of leaves) assert.deepEqual(executionBlockers(executionRoute(graph, leaf, known, stats)), full);
+    assert.equal(stats.blockerEntriesVisited ?? 0, 0);
+    assert.ok((stats.blockerPredecessorsVisited ?? Infinity) <= size * 10, `${stats.blockerPredecessorsVisited} indexed predecessor visits across ${size} warmed subsets`);
+    assert.ok((stats.blockerProofLookups ?? Infinity) <= size * 3, `${stats.blockerProofLookups} proof lookups across ${size} warmed subsets`);
+  });
+
+  it("reuses subset proofs through distinct one-blocker supersets", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 300;
+    const hub = node("HUB", "in_progress");
+    graph.putNode(hub);
+    const groups: TaskNode[] = [];
+    let before: TaskNode | null = null;
+    for (let n = 1; n <= size; n++) {
+      const suffix = String(n).padStart(3, "0");
+      const blocker = node(`BLOCK-${suffix}`, "paused");
+      const group = node(`GROUP-${suffix}`, "in_progress");
+      graph.putNode(blocker);
+      graph.putNode(group);
+      graph.addLink({ from: blocker, type: "contains", to: hub, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: blocker, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      if (before) graph.addLink({ from: before, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      groups.push(group);
+      before = group;
+    }
+    const leaves = groups.map((group, at) => {
+      const suffix = String(at + 1).padStart(3, "0");
+      const extra = node(`EXTRA-${suffix}`, "paused");
+      const extended = node(`EXTENDED-${suffix}`, "in_progress");
+      const leaf = node(`LEAF-${suffix}`, "open");
+      graph.putNode(extra);
+      graph.putNode(extended);
+      graph.putNode(leaf);
+      graph.addLink({ from: hub, type: "contains", to: extended, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: extra, type: "contains", to: extended, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: extended, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: group, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      return leaf;
+    });
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    assert.equal(executionBlockers(executionRoute(graph, hub, known, stats)).length, size);
+    stats.blockerEntriesVisited = 0;
+    stats.blockerPredecessorsVisited = 0;
+    stats.blockerProofLookups = 0;
+    for (const leaf of leaves) assert.equal(executionBlockers(executionRoute(graph, leaf, known, stats)).length, size + 1);
+    assert.ok((stats.blockerEntriesVisited ?? Infinity) <= size + 1, `${stats.blockerEntriesVisited} entries visited through ${size} distinct extended supersets`);
+    assert.ok((stats.blockerPredecessorsVisited ?? Infinity) <= size * 4, `${stats.blockerPredecessorsVisited} predecessor visits through ${size} distinct extended supersets`);
+    assert.ok((stats.blockerProofLookups ?? Infinity) <= size * 6, `${stats.blockerProofLookups} proof lookups through ${size} distinct extended supersets`);
+    assert.ok(executionRetained(known).blockerProofEntries <= size * 3 + 5, `${executionRetained(known).blockerProofEntries} retained proof references for ${size} distinct extended supersets`);
+  });
+
+  it("merges shared blocker predecessors before distinct leaf extensions", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 300;
+    const left = node("HUB-A", "in_progress");
+    const right = node("HUB-B", "in_progress");
+    graph.putNode(left);
+    graph.putNode(right);
+    for (let n = 1; n <= size; n++) {
+      for (const [side, hub] of [["A", left], ["B", right]] as const) {
+        const blocker = node(`BLOCK-${side}-${String(n).padStart(3, "0")}`, "paused");
+        graph.putNode(blocker);
+        graph.addLink({ from: blocker, type: "contains", to: hub, created_at: now, created_by: "USER-003" });
+      }
+    }
+    const leaves: TaskNode[] = [];
+    for (let n = 1; n <= size; n++) {
+      const suffix = String(n).padStart(3, "0");
+      const extra = node(`EXTRA-${suffix}`, "paused");
+      const group = node(`GROUP-${suffix}`, "in_progress");
+      const leaf = node(`LEAF-${suffix}`, "open");
+      for (const item of [extra, group, leaf]) graph.putNode(item);
+      graph.addLink({ from: left, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: extra, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: group, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: right, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      leaves.push(leaf);
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    for (const leaf of leaves) assert.equal(executionBlockers(executionRoute(graph, leaf, known, stats)).length, size * 2 + 1);
+    const retained = executionRetained(known);
+    assert.ok((stats.blockerEntriesVisited ?? 0) <= size * 3, `${stats.blockerEntriesVisited ?? 0} blocker visits for ${size} distinct extensions`);
+    assert.ok(retained.blockerIndexEntries <= size * 4 + 10, `${retained.blockerIndexEntries} canonical blocker frontiers for ${size} distinct extensions`);
+    assert.ok(retained.blockerSets <= size * 60, `${retained.blockerSets} retained blocker-tree nodes for ${size} distinct extensions`);
+  });
+
+  it("rejects disjoint blocker lineages before walking their predecessors", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 300;
+    const ends: TaskNode[] = [];
+    for (const side of ["A", "B"]) {
+      let previous: TaskNode | null = null;
+      for (let n = 1; n <= size; n++) {
+        const suffix = String(n).padStart(3, "0");
+        const blocker = node(`BLOCK-${side}-${suffix}`, "paused");
+        const group = node(`GROUP-${side}-${suffix}`, "in_progress");
+        graph.putNode(blocker);
+        graph.putNode(group);
+        graph.addLink({ from: blocker, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+        if (previous) graph.addLink({ from: previous, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+        previous = group;
+      }
+      ends.push(previous!);
+    }
+    const leaf = node("LEAF", "open");
+    graph.putNode(leaf);
+    for (const end of ends) graph.addLink({ from: end, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+    const stats: ExecutionStats = { pathComparisons: 0, blockerProofLookups: 0, blockerPredecessorsVisited: 0 };
+    const route = executionRoute(graph, leaf, new Map(), stats);
+    assert.equal(executionBlockers(route).length, size * 2);
+    assert.ok((stats.blockerProofLookups ?? Infinity) <= size * 10, `${stats.blockerProofLookups} proof lookups for two disjoint ${size}-group chains`);
+    assert.ok((stats.blockerPredecessorsVisited ?? Infinity) <= size * 10, `${stats.blockerPredecessorsVisited} predecessor visits for two disjoint ${size}-group chains`);
+  });
+
+  it("peels shared blocker additions from two distinct roots in lockstep", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 300;
+    const roots = [node("ROOT-A", "paused"), node("ROOT-B", "paused")] as const;
+    for (const root of roots) graph.putNode(root);
+    let previous: [TaskNode | null, TaskNode | null] = [null, null];
+    for (let n = 1; n <= size; n++) {
+      const suffix = String(n).padStart(3, "0");
+      const shared = node(`SHARED-${suffix}`, "paused");
+      graph.putNode(shared);
+      const pair = [node(`GROUP-A-${suffix}`, "in_progress"), node(`GROUP-B-${suffix}`, "in_progress")] as const;
+      for (let side = 0; side < pair.length; side++) {
+        const group = pair[side]!;
+        graph.putNode(group);
+        graph.addLink({ from: shared, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+        if (previous[side]) graph.addLink({ from: previous[side]!, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+        else graph.addLink({ from: roots[side]!, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+      }
+      previous = [...pair];
+    }
+    const leaf = node("LEAF", "open");
+    graph.putNode(leaf);
+    for (const end of previous) graph.addLink({ from: end!, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+    const stats: ExecutionStats = { pathComparisons: 0, blockerProofLookups: 0, blockerPredecessorsVisited: 0 };
+    const route = executionRoute(graph, leaf, new Map(), stats);
+    assert.equal(executionBlockers(route).length, size + roots.length);
+    assert.ok((stats.blockerProofLookups ?? Infinity) <= size * 10, `${stats.blockerProofLookups} proof lookups for ${size} shared additions`);
+    assert.ok((stats.blockerPredecessorsVisited ?? Infinity) <= size * 10, `${stats.blockerPredecessorsVisited} predecessor visits for ${size} shared additions`);
+  });
+
+  it("retains complementary chain-prefix blockers as a linear lazy graph", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const size = 300;
+    const blockers = Array.from({ length: size }, (_, at) => node(`BLOCK-${String(at + 1).padStart(3, "0")}`, "paused"));
+    for (const blocker of blockers) graph.putNode(blocker);
+    const chains: TaskNode[][] = [[], []];
+    for (let side = 0; side < chains.length; side++) {
+      let previous: TaskNode | null = null;
+      for (let n = 1; n <= size; n++) {
+        const group = node(`GROUP-${side}-${String(n).padStart(3, "0")}`, "in_progress");
+        graph.putNode(group);
+        graph.addLink({ from: blockers[side === 0 ? n - 1 : size - n]!, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+        if (previous) graph.addLink({ from: previous, type: "contains", to: group, created_at: now, created_by: "USER-003" });
+        chains[side]!.push(group);
+        previous = group;
+      }
+    }
+    const leaves: TaskNode[] = [];
+    for (let split = 1; split < size; split++) {
+      const leaf = node(`LEAF-${String(split).padStart(3, "0")}`, "open");
+      graph.putNode(leaf);
+      graph.addLink({ from: chains[0]![split - 1]!, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      graph.addLink({ from: chains[1]![size - split - 1]!, type: "contains", to: leaf, created_at: now, created_by: "USER-003" });
+      leaves.push(leaf);
+    }
+    const known: ExecutionKnown = new Map();
+    const stats: ExecutionStats = { pathComparisons: 0 };
+    for (const leaf of leaves) assert.equal(executionRoute(graph, leaf, known, stats).paths, null);
+    assert.equal(executionBlockers(executionRoute(graph, leaves[0]!, known)).length, size);
+    assert.equal(executionBlockers(executionRoute(graph, leaves.at(-1)!, known)).length, size);
+    const retained = executionRetained(known);
+    const nodes = blockers.length + chains.flat().length + leaves.length;
+    assert.ok(retained.blockerSets <= nodes * 2, `${retained.blockerSets} lazy blocker unions for ${nodes} graph nodes`);
+    assert.equal(retained.blockerIndexEntries, 0, "no pair-specific union index is retained");
+    assert.equal(stats.blockerEntriesVisited ?? 0, 0, "route calculation does not traverse blocker sets");
+  });
+
+  it("does not transfer a subset proof past the blocker added by an extension", () => {
+    const graph = new Graph();
+    const now = "2026-01-01T00:00:00.000Z";
+    const node = (id: string, status: TaskNode["status"]): TaskNode => ({
+      kind: "task",
+      id,
+      version: 1,
+      created_at: now,
+      created_by: "USER-003",
+      updated_at: now,
+      deleted_at: null,
+      title: id,
+      type: "task",
+      status,
+      priority: 1,
+      value: null,
+      size: null,
+      why: null,
+      timeline: [{ status, at: now, by: "USER-003" }],
+    });
+    const [a, b, c, d] = ["A", "B", "C", "D"].map((id) => node(id, "paused")) as [TaskNode, TaskNode, TaskNode, TaskNode];
+    const predecessor = node("PREDECESSOR", "in_progress");
+    const extended = node("EXTENDED", "in_progress");
+    const subsetPrefix = node("SUBSET-PREFIX", "in_progress");
+    const subset = node("SUBSET", "in_progress");
+    const warm = node("WARM", "open");
+    const extensionFirst = node("EXTENSION-FIRST", "open");
+    const predecessorAfter = node("PREDECESSOR-AFTER", "open");
+    for (const item of [a, b, c, d, predecessor, extended, subsetPrefix, subset, warm, extensionFirst, predecessorAfter]) graph.putNode(item);
+    for (const blocker of [a, b, c]) graph.addLink({ from: blocker, type: "contains", to: predecessor, created_at: now, created_by: "USER-003" });
+    graph.addLink({ from: predecessor, type: "contains", to: extended, created_at: now, created_by: "USER-003" });
+    graph.addLink({ from: d, type: "contains", to: extended, created_at: now, created_by: "USER-003" });
+    graph.addLink({ from: a, type: "contains", to: subsetPrefix, created_at: now, created_by: "USER-003" });
+    graph.addLink({ from: subsetPrefix, type: "contains", to: subset, created_at: now, created_by: "USER-003" });
+    graph.addLink({ from: d, type: "contains", to: subset, created_at: now, created_by: "USER-003" });
+    for (const parent of [predecessor, subsetPrefix]) graph.addLink({ from: parent, type: "contains", to: warm, created_at: now, created_by: "USER-003" });
+    for (const parent of [extended, subset]) graph.addLink({ from: parent, type: "contains", to: extensionFirst, created_at: now, created_by: "USER-003" });
+    for (const parent of [predecessor, subset]) graph.addLink({ from: parent, type: "contains", to: predecessorAfter, created_at: now, created_by: "USER-003" });
+    const known: ExecutionKnown = new Map();
+    const ids = (task: TaskNode) => executionBlockers(executionRoute(graph, task, known)).map((blocker) => blocker.id);
+    assert.deepEqual(ids(warm), ["A", "B", "C"]);
+    assert.deepEqual(ids(extensionFirst), ["A", "B", "C", "D"]);
+    assert.deepEqual(ids(predecessorAfter), ["A", "B", "C", "D"], "D is not dropped by a proof cached against the predecessor");
+  });
+
+  it("finds one equal-depth sibling by the identity beside its marked deep path", () => {
+    const routes: ExecutionKnown = new Map();
+    const depth = 700;
+    const shared = priorityPathFrom(Array(depth).fill(1), routes);
+    const ranked = Array.from({ length: 300 }, (_, at) => {
+      const id = String(at + 1).padStart(3, "0");
+      return { path: shared, id };
+    });
+    const tokens = nextTasksCursor({}, "USER-001");
+    const markedAt = 150;
+    const continuation = tokens.after([Array(depth).fill(1), String(markedAt).padStart(3, "0")]);
+    assert.ok(continuation && paging.openToken(continuation)?.x, "the deep place uses a marked token");
+    assert.equal(paging.openToken(continuation)?.x?.[2], String(markedAt).padStart(3, "0"), "the bounded task identity travels beside the digest");
+    let entriesExpanded = 0;
+    const page = paginate(ranked, ({ path, id }) => [path, id] as const, continuation, tokens, {
+      compare: (a, b) => comparePrioritySegments(a[0], b[0]) || compareTaskIds(a[1], b[1]),
+      fromToken: ([path, id]) => [priorityPathFrom(path, routes), id] as const,
+      toToken: ([path, id]) => {
+        entriesExpanded += path.depth;
+        return [priorityPathNumbers(path), id] as [number[], string];
+      },
+      tokenLength: ([path, id]) => path.jsonLength + JSON.stringify(id).length + 3,
+      identity: ({ id }) => id,
+    });
+    assert.equal(page.items.length, 100);
+    assert.ok(entriesExpanded <= depth * 2, `${entriesExpanded} priority entries expanded for the marked sibling and next token only`);
+
+    const opened = paging.openToken(continuation)!;
+    const mismatched = paging.sealToken({ q: opened.q, w: opened.w, x: [opened.x![0], opened.x![1], "999"] });
+    assert.throws(
+      () => paginate(ranked, ({ path, id }) => [path, id] as const, mismatched, tokens, {
+        compare: (a, b) => comparePrioritySegments(a[0], b[0]) || compareTaskIds(a[1], b[1]),
+        fromToken: ([path, id]) => [priorityPathFrom(path, routes), id] as const,
+        toToken: ([path, id]) => [priorityPathNumbers(path), id] as [number[], string],
+        tokenLength: ([path, id]) => path.jsonLength + JSON.stringify(id).length + 3,
+        identity: ({ id }) => id,
+      }),
+      /no longer in the list/,
+      "a valid digest cannot carry another task's identity",
+    );
+
+    const empty = tokens.after([Array(depth).fill(1), ""]);
+    assert.ok(empty, "an empty damaged ID still has a continuation");
+    assert.equal(paging.openToken(empty)?.x?.length, 2, "an empty identity is omitted from the mark");
+  });
+
+  it("orders shared live paths exactly as the arrays exposed in pages and continuation tokens", () => {
+    let state = 157;
+    const random = () => {
+      state = (state + 0x6d2b79f5) | 0;
+      let next = Math.imul(state ^ (state >>> 15), 1 | state);
+      next = (next + Math.imul(next ^ (next >>> 7), 61 | next)) ^ next;
+      return ((next ^ (next >>> 14)) >>> 0) / 4294967296;
+    };
+    const routes: ExecutionKnown = new Map();
+    const listed = paging.describeList("list_next_tasks", {}, "USER-001");
+    const paths: number[][] = [[9], [9, 5], [9, 5, 1], [9, 4], [8, 99], [0]];
+    for (let n = 0; n < 500; n++) paths.push(Array.from({ length: 1 + Math.floor(random() * 12) }, () => Math.floor(random() * 21) - 10));
+    for (let n = 0; n < 5_000; n++) {
+      const a = paths[Math.floor(random() * paths.length)]!;
+      const b = paths[Math.floor(random() * paths.length)]!;
+      const live = comparePrioritySegments(priorityPathFrom(a, routes), priorityPathFrom(b, routes));
+      const shown = listed.compare([a, "001"], [b, "001"]);
+      assert.equal(Math.sign(live), Math.sign(shown), `${JSON.stringify(a)} beside ${JSON.stringify(b)}`);
+    }
+  });
+
+  it("uses the highest active path where a task is in several groups, and none where every path is inactive", async () => {
+    const { agent } = await setup();
+    const low = await agent("create_task", task("Low active area", { priority: 2 }));
+    const high = await agent("create_task", task("High active area", { priority: 9 }));
+    await agent("set_task_status", { id: low.id, version: 1, status: "in_progress" });
+    await agent("set_task_status", { id: high.id, version: 1, status: "in_progress" });
+    const shared = await agent("create_task", task("Shared", { parent: low.id, priority: 1 }));
+    await agent("add_link", { from: high.id, type: "contains", to: shared.id });
+    const other = await agent("create_task", task("Other low work", { parent: low.id, priority: 0 }));
+    const loose = await agent("create_task", task("Ungrouped middle work", { priority: 5 }));
+
+    assert.deepEqual(
+      (await agent("list_next_tasks")).tasks.map((t: any) => t.id),
+      [shared.id, loose.id, other.id],
+      "the shared task takes its P9 path while its divergent P2 path is active too",
+    );
+    await agent("set_task_status", { id: high.id, version: 2, status: "paused" });
+    assert.deepEqual(
+      (await agent("list_next_tasks")).tasks.map((t: any) => t.id),
+      [loose.id, shared.id, other.id],
+      "without the P9 path, ungrouped P5 work comes before the shared task's P2 path",
+    );
+
+    await agent("set_task_status", { id: low.id, version: 2, status: "paused" });
+    const read = await agent("get", { id: shared.id });
+    assert.equal(read.is_next, false);
+    assert.equal(read.is_waiting, true);
+    assert.deepEqual(read.waiting_for.sort(), [high.id, low.id].sort());
+    assert.equal(read.problems.some((p: any) => p.code === "inside_inactive_container"), true);
+    assert.equal((await agent("list_next_tasks")).tasks.some((t: any) => t.id === shared.id), false);
+  });
+
+  it("orders inactive containers by ID before showing them, and keeps that answer across a reload", async () => {
+    const { agent, engine } = await setup();
+    const first = await agent("create_task", task("First inactive group"));
+    const second = await agent("create_task", task("Second inactive group"));
+    for (const group of [first, second]) {
+      await agent("set_task_status", { id: group.id, version: 1, status: "in_progress" });
+      await agent("set_task_status", { id: group.id, version: 2, status: "paused" });
+    }
+    const leaf = await agent("create_task", task("Blocked through both groups"));
+    await agent("add_link", { from: second.id, type: "contains", to: leaf.id });
+    await agent("add_link", { from: first.id, type: "contains", to: leaf.id });
+    const before = await agent("get", { id: leaf.id });
+    assert.equal(before.problems.find((problem: any) => problem.code === "inside_inactive_container").message, `Every way into the plan is closed by a container that is not active: ${first.id}, ${second.id}.`);
+    await engine.reload();
+    const after = await agent("get", { id: leaf.id });
+    assert.deepEqual([after.problems, after.unchanged_since], [before.problems, before.unchanged_since]);
+  });
+
+  it("offers work only through groups and projects that are active", async () => {
+    const { agent } = await setup();
+    const children: string[] = [];
+    for (const status of ["draft", "paused", "in_review", "done", "cancelled"] as const) {
+      const group = await agent("create_task", task(`A ${status} group`, { draft: status === "draft" }));
+      const child = await agent("create_task", task(`Inside ${status}`, { parent: group.id }));
+      let version = 1;
+      if (status === "paused" || status === "in_review") {
+        await agent("set_task_status", { id: group.id, version: version++, status: "in_progress" });
+      }
+      if (status === "done") await agent("set_task_status", { id: child.id, version: 1, status: "done" });
+      if (status !== "draft") await agent("set_task_status", { id: group.id, version, status });
+      if (status === "done") await agent("set_task_status", { id: child.id, version: 2, status: "open" });
+      children.push(child.id);
+      const read = await agent("get", { id: child.id });
+      assert.equal(read.is_next, false, status);
+      assert.equal(read.problems.some((p: any) => p.code === "inside_inactive_container"), true, status);
+    }
+    const active = await agent("create_task", task("An active group"));
+    const activeChild = await agent("create_task", task("Inside active", { parent: active.id }));
+    assert.equal((await agent("get", { id: activeChild.id })).is_next, true);
+
+    for (const status of ["ready", "cancelled"] as const) {
+      const project = await agent("create_project", { title: `A ${status} project`, prefix: status === "ready" ? "RDY" : "CAN" });
+      const child = await agent("create_task", task(`Inside project ${status}`, { project: project.id }));
+      await agent("set_project_status", { id: project.id, version: 1, status });
+      children.push(child.id);
+      assert.equal((await agent("get", { id: child.id })).is_next, false, status);
+    }
+    assert.equal((await agent("list_next_tasks")).tasks.some((t: any) => children.includes(t.id)), false);
+  });
+
+  it("does not offer a restored task whose only group or project was deleted", async () => {
+    const { agent } = await setup();
+    const group = await agent("create_task", task("A group"));
+    const inGroup = await agent("create_task", task("In group", { parent: group.id }));
+    await agent("delete", { id: inGroup.id, version: 1 });
+    await agent("delete", { id: group.id, version: 1 });
+    await agent("restore", { id: inGroup.id });
+    assert.equal((await agent("get", { id: inGroup.id })).is_next, false);
+
+    await agent("create_project", { title: "A project", prefix: "DEL" });
+    const inProject = await agent("create_task", task("In project", { project: "DEL" }));
+    await agent("delete", { id: inProject.id, version: 1 });
+    await agent("delete", { id: "DEL", version: 1 });
+    await agent("restore", { id: inProject.id });
+    assert.equal((await agent("get", { id: inProject.id })).is_next, false);
+    assert.deepEqual((await agent("list_next_tasks")).tasks.map((t: any) => t.id), []);
   });
 
   it("returns at most 100 results with a continuation token", async () => {
@@ -800,6 +2395,29 @@ describe("next", () => {
     await agent("delete", { id: next.tasks[99].id, version: 1 });
     const rest = await agent("list_next_tasks", { continuation: next.continuation });
     assert.equal(rest.tasks.length, 50);
+  });
+
+  it("pages nested priority paths in their full order, including a prefix-related path at the boundary", async () => {
+    const { agent } = await setup();
+    const root = await agent("create_task", task("Root", { priority: 9 }));
+    const middle = await agent("create_task", task("Middle", { parent: root.id, priority: 5 }));
+    await agent("set_task_status", { id: root.id, version: 1, status: "in_progress" });
+    await agent("set_task_status", { id: middle.id, version: 1, status: "in_progress" });
+    const groups: string[] = [];
+    for (let n = 0; n < 99; n++) groups.push((await agent("create_task", task(`Group ${n}`, { parent: root.id, priority: 5 }))).id);
+    const parent = await agent("create_task", task("Parent by a short and a long path", { parent: root.id, priority: 5 }));
+    groups.push(parent.id);
+    await agent("add_link", { from: middle.id, type: "contains", to: parent.id });
+    const child = await agent("create_task", task("Child of the prefix-related parent", { parent: parent.id, priority: 1 }));
+    const rival = await agent("create_task", task("Rival after the boundary", { parent: middle.id, priority: 4 }));
+
+    const first = await agent("list_next_tasks");
+    assert.deepEqual(first.tasks.map((t: any) => t.id), groups, "the 100 short [9,5] paths fill the first page");
+    assert.ok(first.tasks.every((t: any) => JSON.stringify(t.priority_path) === "[9,5]"));
+    const second = await agent("list_next_tasks", { continuation: first.continuation });
+    assert.deepEqual(second.tasks.map((t: any) => [t.id, t.priority_path]), [[child.id, [9, 5, 5, 1]], [rival.id, [9, 5, 4]]], "[9,5,5,1] resumes before [9,5,4]");
+    assert.equal(second.continuation, undefined);
+    assert.equal(new Set([...first.tasks, ...second.tasks].map((t: any) => t.id)).size, 102, "nothing repeated or omitted");
   });
 
   it("takes a continuation token only for the list it came from", async () => {
@@ -1650,30 +3268,30 @@ describe("at most a page of anything", () => {
     };
     const version = async (id: string) => (await agent("get", { id })).version as number;
     const status = async (id: string, to: string) => agent("set_task_status", { id, version: await version(id), status: to });
-    // The two that contain something say another revision after any change to any task, project or link that
-    // shapes work: their progress and problems are worked out from tasks any number of links away.
-    const holding: Name[] = ["project", "group"];
+    // Items at either end of containment say another revision after any change to any task, project or link
+    // that shapes work: containers show descendants, and contained tasks show the active route above them.
+    const shaped: Name[] = ["project", "inProject", "group", "first", "second"];
 
     // 1. The item's own fields, of a task with no link: itself.
-    assert.deepEqual(await moved(async () => agent("update_task", { id: alone, version: await version(alone), title: "Alone, renamed" })), [...holding, "alone"]);
+    assert.deepEqual(await moved(async () => agent("update_task", { id: alone, version: await version(alone), title: "Alone, renamed" })), [...shaped, "alone"]);
     // 2. Its timeline and history: a status of a task in the group. The other task of the group shows none of it.
-    assert.deepEqual(await moved(() => status(second, "draft")), [...holding, "second"]);
+    assert.deepEqual(await moved(() => status(second, "draft")), shaped);
     // 4. What a list shows of the item at the other end: the title of a task, in the list of the group that
     //    holds it, of the task it waits for, and of the user who has it.
-    assert.deepEqual(await moved(async () => agent("update_task", { id: first, version: await version(first), title: "First, renamed" })), [...holding, "first", "needed", "user"]);
+    assert.deepEqual(await moved(async () => agent("update_task", { id: first, version: await version(first), title: "First, renamed" })), [...shaped, "needed", "user"]);
     //    And what is worked out from one link away: the task that was waited for is done, and the one that
     //    waited can start.
-    assert.deepEqual(await moved(() => status(needed, "done")), [...holding, "first", "needed"]);
+    assert.deepEqual(await moved(() => status(needed, "done")), [...shaped, "needed"]);
     assert.deepEqual([(await agent("get", { id: first })).is_next, (await agent("get", { id: first })).waiting_for], [true, []]);
     // 5. What is worked out from any number of links away: the progress of the project.
-    assert.deepEqual(await moved(() => status(inProject, "done")), ["project", "inProject", "group"]);
+    assert.deepEqual(await moved(() => status(inProject, "done")), shaped);
     assert.deepEqual((await agent("get", { id: "PPP" })).progress, { finished: 1, total: 1 });
     // 3. Which links an item has: one of each kind, coming and going, at both ends.
-    assert.deepEqual(await moved(() => agent("add_link", { from: group, type: "contains", to: alone })), [...holding, "alone"]);
-    assert.deepEqual(await moved(() => agent("remove_link", { from: group, type: "contains", to: alone })), [...holding, "alone"]);
-    assert.deepEqual(await moved(() => agent("add_link", { from: second, type: "depends on", to: alone })), [...holding, "second", "alone"]);
+    assert.deepEqual(await moved(() => agent("add_link", { from: group, type: "contains", to: alone })), [...shaped, "alone"]);
+    assert.deepEqual(await moved(() => agent("remove_link", { from: group, type: "contains", to: alone })), [...shaped, "alone"]);
+    assert.deepEqual(await moved(() => agent("add_link", { from: second, type: "depends on", to: alone })), [...shaped, "alone"]);
     //    Given to a user: the task, the user, and what shows the task, which is a version further.
-    assert.deepEqual(await moved(() => agent("add_link", { from: second, type: "assigned to", to: "carol" })), [...holding, "second", "alone", "carol"]);
+    assert.deepEqual(await moved(() => agent("add_link", { from: second, type: "assigned to", to: "carol" })), [...shaped, "alone", "carol"]);
     // A user is stored, with a new key: the user and the task that shows it as its assignee. Nothing else,
     // also not what contains something: no work has changed.
     assert.deepEqual(await moved(() => admin("reset_user_key", { user: "carol" })), ["second", "carol"]);
@@ -1682,7 +3300,7 @@ describe("at most a page of anything", () => {
     const bob = await admin("get", { id: "bob" });
     assert.deepEqual(await moved(() => admin("delete", { kind: "user", id: "bob", version: bob.version })), []);
     // A task that has nothing to do with any of them: only what contains something.
-    assert.deepEqual(await moved(() => agent("create_task", task("Elsewhere"))), holding);
+    assert.deepEqual(await moved(() => agent("create_task", task("Elsewhere"))), shaped);
     // 6. The names of users: the one who made the lone task is removed for good, and is shown by its ID from
     //    then on. Every item says another revision: which answers showed the name is not followed.
     assert.equal((await agent("get", { id: alone })).created_by, "bob");
@@ -1696,6 +3314,27 @@ describe("at most a page of anything", () => {
     const restarted = await setup(storage);
     const revision = restarted.engine.currentRevision;
     for (const id of Object.values(items)) assert.equal((await restarted.agent("get", { id })).unchanged_since, revision, id);
+  });
+
+  it("moves a nested leaf's revision when an ancestor changes its calculated state", async () => {
+    const { agent } = await setup();
+    const outer = await agent("create_task", task("Outer active group"));
+    const inner = await agent("create_task", task("Inner active group", { parent: outer.id }));
+    const leaf = await agent("create_task", task("Nested leaf", { parent: inner.id }));
+    await agent("set_task_status", { id: outer.id, version: 1, status: "in_progress" });
+    await agent("set_task_status", { id: inner.id, version: 1, status: "in_progress" });
+    const active = await agent("get", { id: leaf.id });
+    assert.equal(active.is_next, true);
+
+    await agent("set_task_status", { id: outer.id, version: 2, status: "paused" });
+    const paused = await agent("get", { id: leaf.id });
+    assert.equal(paused.is_next, false);
+    assert.ok(paused.unchanged_since > active.unchanged_since, "the ancestor status changed what the leaf shows");
+
+    await agent("remove_link", { from: outer.id, type: "contains", to: inner.id });
+    const detached = await agent("get", { id: leaf.id });
+    assert.equal(detached.is_next, true);
+    assert.ok(detached.unchanged_since > paused.unchanged_since, "the ancestor containment changed what the leaf shows again");
   });
 
   it("keeps a number only for items that are there: a thousand tasks that come and go for good leave nothing behind, and what was linked to one that went says so", async () => {
@@ -1717,7 +3356,7 @@ describe("at most a page of anything", () => {
     const before = [kept(), items()];
     for (let n = 0; n < 1000; n++) await comeAndGo(n % 100 === 0);
     assert.deepEqual([kept(), items()], before, "nothing is kept for the thousand that are gone");
-    assert.ok(kept() <= 2 * items(), `${kept()} numbers for ${items()} items`);
+    assert.ok(kept() <= 3 * items(), `${kept()} numbers and containment counts for ${items()} items`);
 
     // What was linked to a task that goes for good says another revision: its lists and what is worked out from
     // them have changed. A task that has no link with it says what it said.
@@ -2610,13 +4249,13 @@ describe("continuation tokens", () => {
   const A = { kind: "task" as const, id: "ABC-001" };
   const B = { kind: "task" as const, id: "ABC-002" };
   const idKey = (random: () => number): unknown => anId(random);
-  const nextKey = (random: () => number): unknown => [aNumber(random), anId(random)];
+  const nextKey = (random: () => number): unknown => [Array.from({ length: 1 + Math.floor(random() * 4) }, () => aNumber(random)), anId(random)];
   const staleKey = (random: () => number): unknown => [new Date(Math.floor(random() * 2_000_000_000_000)).toISOString(), anId(random)];
   const refKey = (random: () => number): unknown => `${pick(random, ["project", "task", "user"])}:${anId(random)}`;
   const place = (random: () => number): unknown => [aCount(random), aCount(random)];
   const KINDS_OF_TOKEN = (): Array<[what: string, list: Cursor<any>, key: (random: () => number) => unknown, notKeys: unknown[]]> => {
     const notAnId = [undefined, null, 5, ["ABC-001"], { id: "ABC-001" }, true];
-    const notNext = [undefined, null, "ABC-001", [1], [1, 2], ["1", "ABC-001"], [Number.NaN, "ABC-001"], [Number.POSITIVE_INFINITY, "ABC-001"], [1, "ABC-001", 3]];
+    const notNext = [undefined, null, "ABC-001", [1], [[1]], [[1], "ABC-001", 3], [["1"], "ABC-001"], [[Number.NaN], "ABC-001"], [[Number.POSITIVE_INFINITY], "ABC-001"], [[], "ABC-001"]];
     const notStale = [undefined, null, "ABC-001", ["2026-01-01T00:00:00.000Z"], [1, "ABC-001"], ["2026-01-01T00:00:00.000Z", 1], ["x", "ABC-001", 3]];
     const notARef = [undefined, null, 5, "", "ABC-001", "thing:ABC-001", ":ABC-001", ["task:ABC-001"]];
     const notACount = [undefined, null, "5", -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, [5]];
@@ -2792,7 +4431,7 @@ describe("continuation tokens", () => {
       await through("list_tasks", agent, "list_tasks", {}, listed("tasks"), tasksCursor({}), (item) => item.id, compareTaskIds, taskIds.length + 1),
       await through("list_tasks of a project", agent, "list_tasks", { project: "HUB" }, listed("tasks"), tasksCursor({ project: "HUB" }), (item) => item.id, compareTaskIds, taskIds.length + 1),
       await through("list_projects", agent, "list_projects", {}, listed("projects"), projectsCursor({}), (item) => item.id, compareProjectIds, projectIds.length + 1),
-      await through("list_next_tasks", admin, "list_next_tasks", {}, listed("tasks"), nextTasksCursor({}, "USER-001"), (item) => [item.priority, item.id], (a, b) => b[0] - a[0] || compareTaskIds(a[1], b[1]), taskIds.length + 1),
+      await through("list_next_tasks", admin, "list_next_tasks", {}, listed("tasks"), nextTasksCursor({}, "USER-001"), (item) => [item.priority_path, item.id], (a, b) => paging.describeList("list_next_tasks", {}, "USER-001").compare(a, b), taskIds.length + 1),
       await through("the tasks in a project", agent, "get", { id: "HUB" }, (answer) => ({ items: answer.links.contains, next: answer.more?.links?.contains?.continuation }), itemListCursors.links(hub, "contains"), (item) => `task:${item.id}`, (a, b) => comparePlaces(placeOf({ kind: "task", id: a.slice(5) }), placeOf({ kind: "task", id: b.slice(5) })) || text(a, b), taskIds.length + 1),
     ];
     // The IDs that are too long for a token, and are named by their mark: two tasks and a project, and a third task where the key holds its priority too.
@@ -2846,7 +4485,11 @@ describe("continuation tokens", () => {
     type Sort = { key: () => unknown; entry: (key: any) => unknown; none: unknown[] };
     const sorts: Record<string, Sort> = {
       ids: { key: () => anId(random), entry: (id) => ({ id, title: textOf(random, 20) }), none: [undefined, null, 5, {}, ["ABC-001"], [0, "ABC-001"], { id: "ABC-001" }, true] },
-      next: { key: () => [aNumber(random), anId(random)], entry: ([priority, id]) => ({ id, priority }), none: [undefined, null, 5, {}, "ABC-001", [0], [0, "ABC-001", 1], ["0", "ABC-001"], [null, "ABC-001"], [Number.NaN, "ABC-001"], [0, 5], { priority: 0, id: "ABC-001" }] },
+      next: {
+        key: () => [Array.from({ length: 1 + Math.floor(random() * 4) }, () => aNumber(random)), anId(random)],
+        entry: ([priority_path, id]) => ({ id, priority_path }),
+        none: [undefined, null, 5, {}, "ABC-001", [0], [[0]], [[0], "ABC-001", 1], [["0"], "ABC-001"], [[], "ABC-001"], [null, "ABC-001"], [[Number.NaN], "ABC-001"], [[0], 5], { priority_path: [0], id: "ABC-001" }],
+      },
       links: { key: aRef, entry: shown, none: [undefined, null, 5, {}, "", "ABC-001", "thing:ABC-001", ":ABC-001", ["task:ABC-001"], [0, "ABC-001"], { kind: "task", id: "ABC-001" }] },
       timeline: { key: () => aCount(random), entry: (place) => ({ status: "open", place }), none: [undefined, null, {}, "5", -1, 1.5, 2 ** 53, Number.NaN, [5], [5, 0], "task:ABC-001", { place: 5 }] },
       history: { key: () => [aCount(random), aCount(random)], entry: (place) => ({ action: "updated", place }), none: [undefined, null, {}, 5, "5", [5], [5, -1], [1.5, 0], ["1", "2"], [1, 2, 3], [2 ** 53, 0], "task:ABC-001", { revision: 1, seq: 0 }] },

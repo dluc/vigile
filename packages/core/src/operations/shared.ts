@@ -87,16 +87,18 @@ export interface Cursor<K> {
    * The sort key of the place a token names. A token of another list, of another user's list or one that was
    * made up is refused. `keys` gives the sort keys the list has now: a token that names its place by a mark
    * names the key among them that has it, and is refused, as something to start again from, when the entry is
-   * no longer there. The keys are gone through only for such a token.
+   * no longer there. The keys are gone through only for such a token; their producer receives the marked key's
+   * serialized length and, where one was safely carried, its identity, so it can reject candidates without
+   * materializing them.
    */
-  place(token: string, keys: () => Iterable<K>): K;
+  place(token: string, keys: (markedLength?: number, markedIdentity?: string) => Iterable<K>): K;
   /** Whether a token says that it continues this list. */
   owns(token: string): boolean;
 }
 
 export function cursor<K>(list: ListDescriptor<K>): Cursor<K> {
   const q = questionMark(list.question);
-  const place = (token: string, keys: () => Iterable<K>): K => {
+  const place = (token: string, keys: (markedLength?: number, markedIdentity?: string) => Iterable<K>): K => {
     let says: OpenToken;
     try {
       says = tokenOf(list, token);
@@ -104,7 +106,7 @@ export function cursor<K>(list: ListDescriptor<K>): Cursor<K> {
       throw error instanceof NotAList && /another list/.test(error.why) ? tokenOfAnotherList() : refuseToken("is not valid");
     }
     if (says.x === undefined) return says.k as K;
-    for (const key of keys()) if (namesPlace(says, key)) return key;
+    for (const key of keys(says.x?.[0], says.x?.[2])) if (namesPlace(says, key, list.markIdentity?.(key))) return key;
     throw refuseToken("names an entry that is no longer in the list");
   };
   return {
@@ -144,18 +146,34 @@ export function listOf<L extends { cursor: Cursor<any> }>(token: string, lists: 
  * after the key. There is a token after every item: one whose key is too long to be written into a token, an
  * ID that damage left, is named by the mark of its key, and the next page finds it by that.
  */
-export function paginate<T, K>(sorted: T[], sortKey: (item: T) => K, token: string | undefined, list: Cursor<K>): Page<T> {
+export function paginate<T, K, S = K>(
+  sorted: T[],
+  sortKey: (item: T) => K,
+  token: string | undefined,
+  list: Cursor<S>,
+  adapted?: { compare(a: K, b: K): number; fromToken(key: S): K; toToken(key: K): S; tokenLength?(key: K): number; identity?(item: T): string },
+): Page<T> {
+  const compare = adapted?.compare ?? (list.list.compare as unknown as (a: K, b: K) => number);
+  const fromToken = adapted?.fromToken ?? ((key: S) => key as unknown as K);
+  const toToken = adapted?.toToken ?? ((key: K) => key as unknown as S);
   let start = 0;
   if (token !== undefined) {
-    const last = list.place(token, function* () {
-      for (const item of sorted) yield sortKey(item);
-    });
-    start = sorted.findIndex((item) => list.list.compare(sortKey(item), last) > 0);
+    const last = fromToken(
+      list.place(token, function* (markedLength, markedIdentity) {
+        for (const item of sorted) {
+          if (markedIdentity !== undefined && adapted?.identity?.(item) !== markedIdentity) continue;
+          const key = sortKey(item);
+          if (markedLength !== undefined && adapted?.tokenLength && adapted.tokenLength(key) !== markedLength) continue;
+          yield toToken(key);
+        }
+      }),
+    );
+    start = sorted.findIndex((item) => compare(sortKey(item), last) > 0);
     if (start < 0) start = sorted.length;
   }
   const items = sorted.slice(start, start + LIMITS.page);
   if (items.length === 0 || start + items.length >= sorted.length) return { items };
-  const next = list.after(sortKey(items.at(-1)!));
+  const next = list.after(toToken(sortKey(items.at(-1)!)));
   // Every item of a list has a key of the list: one that has none is no item of it, and the list is not cut short without a word.
   if (next === undefined) throw new Error(`No continuation token names the place of ${JSON.stringify(sortKey(items.at(-1)!))?.slice(0, 200)}.`);
   return { items, continuation: next };

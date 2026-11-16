@@ -8479,7 +8479,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         // With everything shown the two have their cards, and say they are in Alpha: the deleted group is not named.
         await open();
         assert.deepEqual(await cards(), these(...ALL, "under", "leaf"));
-        assert.deepEqual([(await says("under")).tags, (await says("leaf")).tags], [["0/1 done", `in ${z.alpha}`, "ZOO"], [`in ${z.under}`, "ZOO"]]);
+        assert.deepEqual([(await says("under")).tags, (await says("leaf")).tags], [["0/1 done", `waits for ${z.mid}`, "⚠ problem", `in ${z.alpha}`, "ZOO"], [`waits for ${z.mid}`, "⚠ problem", `in ${z.under}`, "ZOO"]]);
         assert.match(await text("#summary"), /^20 tasks/);
         // At the top level they are inside Alpha, whose card holds what the service says it holds.
         await page.click("#level-out");

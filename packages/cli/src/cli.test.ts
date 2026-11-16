@@ -2713,7 +2713,7 @@ describe("a service that answers in another shape than a Vigile service does", (
       assert.equal(goesOn.code, 0, `${command}: ${goesOn.err}`);
       assert.match(goesOn.out, new RegExp(`Next page: add --continuation ${given}\n`), command);
       // The token of its own list for another place than that is not: it would pass entries over, or lead back.
-      for (const [what, key] of [["a place beyond the last entry", list.keyOf({ id: "ZZZZZZZZ-999999", priority: -1e300 })], ["a place before it", list.keyOf({ id: "", priority: 1e300 })], ["no place of the list", {}]] as const) {
+      for (const [what, key] of [["a place beyond the last entry", list.keyOf({ id: "ZZZZZZZZ-999999", priority: -1e300, priority_path: [-1e300] })], ["a place before it", list.keyOf({ id: "", priority: 1e300, priority_path: [1e300] })], ["no place of the list", {}]] as const) {
         answering(asked, { change: (answer) => ({ ...answer, continuation: paging.sealToken({ ...owned, k: key }) }) });
         const result = await cli(command);
         reported(result, new RegExp(`but not as ${command} does: ${what === "no place of the list" ? `"continuation" of a list is not a token of the list that was asked for` : `"${field}" of a list is not a page of that list: it goes on from another place than the furthest of its entries`}`), `${command} that goes on from ${what}`);
@@ -2805,7 +2805,7 @@ describe("a list that is none of the service's", () => {
           remembers: true,
           first: 0,
           held: 0,
-          foreign: { "the list of all tasks": real.tasks, "another user's list of tasks to start": mark(paging.questionOfList("list_next_tasks"), [-1e300, "ZZZ-1"], "USER-002"), "the list of tasks to start in a project": mark(paging.questionOfList("list_next_tasks", { project: "ALP" }), [-1e300, "ZZZ-1"], "USER-001") },
+          foreign: { "the list of all tasks": real.tasks, "another user's list of tasks to start": mark(paging.questionOfList("list_next_tasks"), [[-1e300], "ZZZ-1"], "USER-002"), "the list of tasks to start in a project": mark(paging.questionOfList("list_next_tasks", { project: "ALP" }), [[-1e300], "ZZZ-1"], "USER-001") },
         },
       ],
     ];
