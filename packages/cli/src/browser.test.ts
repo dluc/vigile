@@ -471,6 +471,30 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       }
     });
 
+    it("keeps count separators out of the colored summary filter pills", async () => {
+      await page.size(1209, 180);
+      const empty = await run("get", { id: "EMPTY", kind: "project" });
+      await run("set_project_status", { id: "EMPTY", status: "broken", version: empty.version });
+      try {
+        await load();
+        const offsets = await page.run<number[]>(`return [...document.querySelectorAll('#summary > button.summary-filter')].map((button) => {
+          const range = document.createRange();
+          range.selectNodeContents(button);
+          const text = range.getBoundingClientRect();
+          const box = button.getBoundingClientRect();
+          const style = getComputedStyle(button);
+          return Math.round(text.left - box.left - parseFloat(style.borderLeftWidth) - parseFloat(style.paddingLeft));
+        })`);
+        assert.equal(offsets.length, 2, "both colored summary filters are present");
+        assert.ok(offsets.every((offset) => offset <= 3), `filter text starts beside its intended padding, not a count separator: ${offsets}`);
+        await layout("colored summary filters without an internal separator");
+      } finally {
+        const latest = await run("get", { id: "EMPTY", kind: "project" });
+        if (latest.status === "broken") await run("set_project_status", { id: "EMPTY", status: "open", version: latest.version });
+        await load();
+      }
+    });
+
     it("gives bugs, issues and incidents a column of their own on request, and says there which state each is in", async () => {
       await load();
       await setting("bugs-apart");
