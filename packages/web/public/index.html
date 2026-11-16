@@ -27,6 +27,7 @@
   <nav class="views" aria-label="Views">
     <a id="view-board" href="#board">Board</a>
     <a id="view-graph" href="#graph">Graph</a>
+    <a id="view-history" href="#history">History</a>
   </nav>
   <div class="meta">
     <div class="status">
@@ -86,7 +87,7 @@
     <div class="board-head visually-hidden">
       <h2 id="board-heading" class="section-title">Tasks</h2>
     </div>
-    <div class="filters" aria-label="Board controls">
+    <div id="board-filters" class="filters" aria-label="Board controls">
       <span id="levels" class="board-tool zoom levels" role="group" aria-label="Board position and zoom" hidden>
         <button id="level-out" type="button" aria-label="Zoom out" aria-describedby="level">−</button>
         <span id="level" class="level"></span>
@@ -125,6 +126,37 @@
       </div>
       <p id="graph-note" class="empty" hidden></p>
     </div>
+    <section id="history-panel" class="history-panel" aria-labelledby="history-heading" hidden>
+      <div class="history-head">
+        <div>
+          <h2 id="history-heading" tabindex="-1">History</h2>
+          <p>Recorded changes across the plan, newest first.</p>
+        </div>
+      </div>
+      <form id="history-filters" class="history-filters" aria-label="Filter history">
+        <label><span>Item kind</span><select id="history-kind"><option value="">All kinds</option><option value="project">Projects</option><option value="task">Tasks</option><option value="user">Users</option></select></label>
+        <label><span>Event</span><select id="history-action">
+          <option value="">All events</option>
+          <option value="created">Created</option>
+          <option value="status_changed">Status changed</option>
+          <option value="updated">Updated</option>
+          <option value="link_added">Link added</option>
+          <option value="link_removed">Link removed</option>
+          <option value="deleted">Deleted</option>
+          <option value="restored">Restored</option>
+          <option value="key_reset">Key reset</option>
+          <option value="timestamp_overridden">Timestamp overridden</option>
+        </select></label>
+        <label><span>Actor</span><input id="history-actor" type="search" maxlength="128" placeholder="Username or USER ID" autocomplete="off"></label>
+        <label><span>From</span><input id="history-from" type="date"></label>
+        <label><span>Through</span><input id="history-to" type="date"></label>
+        <div class="history-filter-actions"><button class="history-apply" type="submit">Apply filters</button><button id="history-clear" class="history-clear" type="button">Clear</button></div>
+      </form>
+      <p id="history-status" class="history-status" role="status" aria-live="polite"></p>
+      <ol id="history-list" class="history-list"></ol>
+      <p id="history-empty" class="empty" hidden></p>
+      <button id="history-more" class="more history-more" type="button" hidden>Load earlier changes</button>
+    </section>
     <p id="empty" class="empty" hidden></p>
   </section>
 </main>

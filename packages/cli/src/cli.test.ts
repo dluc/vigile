@@ -330,6 +330,15 @@ describe("command line", () => {
     assert.equal(user.includes("undefined"), false, user);
   });
 
+  it("lists tenant history from the CLI with the same project and event filters", async () => {
+    await cli("create-project", "--title", "History CLI project", "--prefix", "HISCLI", "--as", "agent1");
+    const made = JSON.parse((await cli("create-task", "--title", "History CLI", "--description", "inspect changes", "--project", "HISCLI", "--as", "agent1", "--json")).out);
+    await cli("set-task-status", made.id, "--version", "1", "--status", "in_progress", "--as", "agent1");
+    const listed = await cli("list-history", "--project", "HISCLI", "--kind", "task", "--actor", "agent1", "--action", "status_changed", "--as", "agent1", "--json");
+    assert.equal(listed.code, 0, listed.err);
+    assert.deepEqual(JSON.parse(listed.out).changes.map((event: any) => [event.id, event.action, event.by]), [[made.id, "status_changed", "agent1"]]);
+  });
+
   it("shows a refusal with what is in the way, and exits with an error", async () => {
     const refused = await cli("set-task-status", "ABC-002", "--version", "1", "--status", "done", "--as", "agent1");
     assert.equal(refused.code, 1);
@@ -3116,6 +3125,7 @@ describe("the answer of each operation", () => {
       ["set_task_status", { id: "ALP-002", version: 1, status: "in_progress" }],
       ["add_link", { from: "ALP-007", type: "depends on", to: "ALP-008" }],
       ["list_tasks", {}],
+      ["list_history", { kind: "task" }],
       ["list_next_tasks", {}],
       ["list_stale_tasks", {}],
       ["get", { id: "ALP-005", history: true }],
@@ -3315,7 +3325,7 @@ describe("the answer of each operation", () => {
       // A name under which nothing is linked is not sent; of a linked item, its status and that it is deleted.
       return links >= 0 && (path.length === links + 2 || (path.length === links + 4 && (last === "status" || last === "deleted")));
     };
-    const free = (path: string[]): boolean => path.includes("data") && path[path.indexOf("data") - 2] === "history";
+    const free = (path: string[]): boolean => path.includes("data") && ["history", "changes"].includes(path[path.indexOf("data") - 2]!);
     // A value of another kind than the one that is there. A text is never put where nothing may be: text may be.
     const wrongFor = (value: unknown): unknown[] => {
       if (typeof value === "string") return [5, {}];
@@ -3756,6 +3766,7 @@ describe("what the service can answer", () => {
       readText: async (tenant, kind, id) => (kind === "task" && Number(id) % 2 ? "" : storage.readText(tenant, kind, id)),
       readHistory: (tenant, kind, id) => storage.readHistory(tenant, kind, id),
       readHistoryPage: (tenant, kind, id, page) => storage.readHistoryPage(tenant, kind, id, page),
+      readHistoryFeedPage: (tenant, page) => storage.readHistoryFeedPage(tenant, page),
       readTimeline: async (_tenant, kind, id, page = {}) => {
         const entries = timelines.get(`${kind}:${id}`) ?? [];
         const before = Math.min(page.before ?? entries.length, entries.length);

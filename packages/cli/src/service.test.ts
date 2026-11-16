@@ -153,8 +153,8 @@ describe("service over HTTP", () => {
   it("lists operations with their input schemas, by caller", async () => {
     const agent = await running.call("/api/operations");
     const admin = await running.call("/api/operations", undefined, running.adminKey);
-    assert.equal(agent.body.operations.length, 18);
-    assert.equal(admin.body.operations.length, 20);
+    assert.equal(agent.body.operations.length, 19);
+    assert.equal(admin.body.operations.length, 21);
     const setStatus = agent.body.operations.find((o: any) => o.name === "set_task_status");
     assert.equal(setStatus.path, "/api/set-task-status");
     assert.deepEqual(setStatus.input.required, ["id", "version", "status"]);
@@ -867,8 +867,8 @@ describe("service over MCP", () => {
     const admin = await connect(running, running.adminKey);
     const agentTools = (await agent.listTools()).tools.map((t) => t.name);
     const adminTools = (await admin.listTools()).tools.map((t) => t.name);
-    assert.equal(agentTools.length, 18);
-    assert.equal(adminTools.length, 20);
+    assert.equal(agentTools.length, 19);
+    assert.equal(adminTools.length, 21);
     assert.deepEqual(adminTools.filter((name) => !agentTools.includes(name)).sort(), ["create_user", "reset_user_key"]);
     assert.ok(agentTools.includes("set_task_status") && agentTools.includes("list_next_tasks"));
 
@@ -1178,6 +1178,7 @@ describe("two engines on one data file", () => {
       readText: async (tenant, kind, id) => (await once("text"), file.readText(tenant, kind, id)),
       readHistory: (tenant, kind, id) => file.readHistory(tenant, kind, id),
       readHistoryPage: async (tenant, kind, id, page) => (during.histories++, await during.history.shift()?.(), file.readHistoryPage(tenant, kind, id, page)),
+      readHistoryFeedPage: (tenant, page) => file.readHistoryFeedPage(tenant, page),
       readTimeline: (tenant, kind, id, page) => file.readTimeline(tenant, kind, id, page),
       close: async () => {},
     };
@@ -1259,6 +1260,7 @@ describe("links across an SQLite reload", () => {
         readText: (tenant, kind, id) => backing.readText(tenant, kind, id),
         readHistory: (tenant, kind, id) => backing.readHistory(tenant, kind, id),
         readHistoryPage: (tenant, kind, id, page) => backing.readHistoryPage(tenant, kind, id, page),
+        readHistoryFeedPage: (tenant, page) => backing.readHistoryFeedPage(tenant, page),
         readTimeline: (tenant, kind, id, page) => backing.readTimeline(tenant, kind, id, page),
         close: () => backing.close(),
       };

@@ -3120,7 +3120,7 @@ describe("users", () => {
     assert.notEqual(reset.api_key, created.api_key);
     assert.equal(keys.keys.get("agent2"), reset.api_key);
     assert.deepEqual(engine.operationsFor("agent").map((o) => o.name).filter((n) => n.includes("user")), ["list_users"]);
-    assert.equal(engine.operationsFor("admin").length, 20);
+    assert.equal(engine.operationsFor("admin").length, 21);
   });
 
   it("deletes users only for admins, never built-in ones, and not while tasks are assigned", async () => {
@@ -3320,6 +3320,75 @@ describe("reading an item in full", () => {
     const taken = await agent("create_task", task("Taken", { assigned_to: ["user"] }));
     assert.deepEqual([free.is_assigned, free.assigned_to], [false, []]);
     assert.deepEqual([taken.is_assigned, taken.assigned_to], [true, ["user"]]);
+  });
+});
+
+describe("tenant-wide History", () => {
+  it("lists recorded events newest first with item names and actors", async () => {
+    const { agent } = await setup();
+    await agent("create_project", { title: "History project", prefix: "HIS" });
+    const made = await agent("create_task", task("Review history", { project: "HIS" }));
+    await agent("set_task_status", { id: made.id, version: made.version, status: "in_progress" });
+
+    const detail = await agent("get", { id: made.id, history: true });
+    const feed = await agent("list_history");
+    assert.equal(feed.changes[0].action, "status_changed");
+    assert.deepEqual(
+      [feed.changes[0].kind, feed.changes[0].id, feed.changes[0].title, feed.changes[0].by, feed.changes[0].data],
+      ["task", made.id, "Review history", "agent1", detail.history.at(-1).data],
+    );
+  });
+
+  it("does not show events from before a project ID's latest creation", async () => {
+    const { agent, second } = await earlierOfTheName();
+    const feed = await agent("list_history", { kind: "project" });
+    assert.deepEqual(feed.changes.filter((event: any) => event.id === "ABC").map((event: any) => [event.action, event.at]), [["created", second]]);
+  });
+
+  it("filters by project, item kind, actor, action and time, then pages without gaps", async () => {
+    const { agent, person } = await setup();
+    await agent("create_project", { title: "History project", prefix: "HIS" });
+    await agent("create_project", { title: "Other project", prefix: "OTH" });
+    const inside = await agent("create_task", task("Inside", { project: "HIS" }));
+    const outside = await agent("create_task", task("Outside", { project: "OTH" }));
+    await agent("set_task_status", { id: inside.id, version: inside.version, status: "in_progress" });
+    await agent("set_task_status", { id: outside.id, version: outside.version, status: "in_progress" });
+
+    const detail = await agent("get", { id: inside.id, history: true });
+    const statusChange = detail.history.find((entry: any) => entry.action === "status_changed");
+    const filtered = await agent("list_history", {
+      project: "HIS",
+      kind: "task",
+      actor: "agent1",
+      action: "status_changed",
+      from: statusChange.at,
+      to: statusChange.at,
+    });
+    assert.deepEqual(filtered.changes.map((entry: any) => [entry.id, entry.title, entry.action, entry.by]), [[inside.id, "Inside", "status_changed", "agent1"]]);
+
+    let version = inside.version + 1;
+    for (let priority = 1; priority <= 101; priority++) {
+      const updated = await agent("update_task", { id: inside.id, version, priority });
+      version = updated.version;
+    }
+    const query = { project: " HIS ", kind: "task", action: " updated " };
+    const first = await agent("list_history", query);
+    assert.equal(first.changes.length, 100);
+    assert.equal(typeof first.continuation, "string");
+    assert.equal(paging.isTokenOf(paging.describeList("list_history", query), first.continuation), true);
+    const second = await agent("list_history", { ...query, continuation: first.continuation });
+    assert.equal(second.changes.length, 1);
+    const pages = [...first.changes, ...second.changes];
+    assert.equal(new Set(pages.map((entry: any) => entry.place.join("."))).size, 101);
+    assert.ok(pages.every((entry: any) => entry.id === inside.id));
+    assert.ok(pages.slice(1).every((entry: any, at: number) => {
+      const previous = pages[at]!.place;
+      return entry.place[0] < previous[0] || (entry.place[0] === previous[0] && entry.place[1] < previous[1]);
+    }));
+    assert.deepEqual((await person("list_history", { project: "HIS", actor: "user", action: "status_changed" })).changes, []);
+    assert.equal((await refusal(agent("list_history", { from: "2026-02-02", to: "2026-02-01" }))).code, "invalid_input");
+    assert.equal((await refusal(agent("list_history", { from: "not-a-date", to: "2026-01-01" }))).code, "invalid_input");
+    assert.equal((await refusal(agent("list_history", { ...query, action: "status_changed", continuation: first.continuation }))).code, "invalid_input");
   });
 });
 
@@ -4511,6 +4580,7 @@ describe("guide", () => {
     assert.match(text, /Do not invent work, rearrange priorities or broaden the task/);
     assert.match(text, /Verify the outcome[\s\S]*done only when[\s\S]*verified/);
     assert.match(text, /in_review[\s\S]*review, merge, release and post-release verification[\s\S]*after review ends[\s\S]*shipped and verified/);
+    assert.match(text, /list_history shows retained changes across the plan, newest first/);
   });
 
   it("answers with the overview by default and lists every topic", async () => {

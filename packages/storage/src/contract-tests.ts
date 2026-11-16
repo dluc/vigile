@@ -198,6 +198,108 @@ export function runStorageContractTests(name: string, factory: () => AdapterFact
         assert.deepEqual(await store.readHistoryPage("default", "task", "003", { limit: 5 }), { records: [], total: 0 });
       }));
 
+    it("reads the tenant's history as one newest-first, cursor-paged feed", () =>
+      withStore(async (store) => {
+        const project: Change = { op: "put_object", record: { kind: "project", id: "ABC", version: 1, data: { title: "Alpha" } } };
+        const contained = (id: string): Change => ({
+          op: "put_link",
+          record: { fromKind: "project", fromId: "ABC", type: "contains", toKind: "task", toId: id, data: { at: "2026-01-01T00:00:00.000Z", by: "1" } },
+        });
+        const change = (kind: string, id: string, action: string, at: string): Change => ({
+          op: "add_history",
+          record: { kind, id, action, at, actor: "1", data: {} },
+        });
+        await store.commit("default", {
+          expectedRevision: null,
+          counters: {},
+          changes: [
+            project,
+            task("ABC-001"),
+            task("ABC-002"),
+            task("OUT-001"),
+            task("ABC-003"),
+            contained("ABC-001"),
+            contained("ABC-002"),
+            { op: "put_link", record: { fromKind: "task", fromId: "ABC-001", type: "contains", toKind: "task", toId: "ABC-003", data: { at: "2026-01-01T00:00:04.000Z", by: "1" } } },
+            change("project", "ABC", "created", "2026-01-01T00:00:00.000Z"),
+            change("task", "ABC-001", "created", "2026-01-01T00:00:01.000Z"),
+            change("task", "ABC-002", "created", "2026-01-01T00:00:02.000Z"),
+            change("task", "OUT-001", "created", "2026-01-01T00:00:03.000Z"),
+            change("task", "ABC-003", "created", "2026-01-01T00:00:04.000Z"),
+          ],
+        });
+        await store.commit("default", {
+          expectedRevision: 1,
+          counters: {},
+          changes: [
+            change("task", "ABC-001", "status_changed", "2026-01-02T00:00:00.000Z"),
+            change("task", "ABC-002", "updated", "2026-01-02T00:00:01.000Z"),
+            change("task", "OUT-001", "updated", "2026-01-02T00:00:02.000Z"),
+          ],
+        });
+        await store.commit("default", {
+          expectedRevision: 2,
+          counters: {},
+          changes: [change("task", "ABC-001", "updated", "2026-01-03T00:00:00.000Z")],
+        });
+
+        const read = (store as any).readHistoryFeedPage as (tenant: string, page: { before?: { revision: number; seq: number }; project?: string; kind?: string; actor?: string; action?: string; from?: string; to?: string; limit: number }) => Promise<{ records: Array<{ kind: string; id: string; action: string; revision: number; seq: number }>; hasMore: boolean }>;
+        const latest = await read.call(store, "default", { limit: 2 });
+        assert.deepEqual(latest.records.map(({ kind, id, action, revision, seq }) => [kind, id, action, revision, seq]), [
+          ["task", "ABC-001", "updated", 3, 0],
+          ["task", "OUT-001", "updated", 2, 2],
+        ]);
+        assert.equal(latest.hasMore, true);
+
+        const earlier = await read.call(store, "default", { before: { revision: 2, seq: 2 }, limit: 2 });
+        assert.deepEqual(earlier.records.map(({ id, action, revision, seq }) => [id, action, revision, seq]), [
+          ["ABC-002", "updated", 2, 1],
+          ["ABC-001", "status_changed", 2, 0],
+        ]);
+        assert.equal(earlier.hasMore, true);
+
+        const scoped = await read.call(store, "default", {
+          project: "ABC",
+          kind: "task",
+          actor: "1",
+          action: "status_changed",
+          from: "2026-01-02T00:00:00.000Z",
+          to: "2026-01-02T00:00:00.000Z",
+          limit: 10,
+        });
+        assert.deepEqual(scoped.records.map(({ kind, id, action }) => [kind, id, action]), [["task", "ABC-001", "status_changed"]]);
+        assert.equal(scoped.hasMore, false);
+
+        const projectFeed = await read.call(store, "default", { project: "ABC", limit: 10 });
+        assert.deepEqual(projectFeed.records.map(({ kind, id, action }) => [kind, id, action]), [
+          ["task", "ABC-001", "updated"],
+          ["task", "ABC-002", "updated"],
+          ["task", "ABC-001", "status_changed"],
+          ["task", "ABC-003", "created"],
+          ["task", "ABC-002", "created"],
+          ["task", "ABC-001", "created"],
+          ["project", "ABC", "created"],
+        ]);
+        assert.equal(projectFeed.hasMore, false);
+      }));
+
+    it("starts each feed entry at the item's latest creation", () =>
+      withStore(async (store) => {
+        const event = (action: string, at: string): Change => ({
+          op: "add_history",
+          record: { kind: "task", id: "REUSED-001", action, at, actor: "1", data: {} },
+        });
+        await store.commit("default", { expectedRevision: null, counters: {}, changes: [event("created", "2026-01-01T00:00:00.000Z"), event("status_changed", "2026-01-01T00:00:01.000Z")] });
+        await store.commit("default", { expectedRevision: 1, counters: {}, changes: [event("created", "2026-01-02T00:00:00.000Z"), event("updated", "2026-01-02T00:00:01.000Z")] });
+        const read = (store as any).readHistoryFeedPage as (tenant: string, page: { kind: string; limit: number }) => Promise<{ records: Array<{ action: string; at: string }>; hasMore: boolean }>;
+        const page = await read.call(store, "default", { kind: "task", limit: 10 });
+        assert.deepEqual(page.records.map(({ action, at }) => [action, at]), [
+          ["updated", "2026-01-02T00:00:01.000Z"],
+          ["created", "2026-01-02T00:00:00.000Z"],
+        ]);
+        assert.equal(page.hasMore, false);
+      }));
+
     it("returns and counts only what follows the last entry of an action, when asked: where an item's history begins", () =>
       withStore(async (store) => {
         const entry = (action: string, id = "001") => ({ op: "add_history" as const, record: { kind: "task", id, at: "t", actor: "1", action, data: {} } });

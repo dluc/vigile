@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { initConfig, loadConfig, setValue } from "@vigile/config";
-import { paging } from "@vigile/core";
+import { paging, readAll } from "@vigile/core";
 import { adversary, type Target } from "./adversary.js";
 import { Page, findBrowser } from "./browser-driver.js";
 import { BROWSER_TEST_SHARDS, type BrowserTestShard, type BrowserTestSuite } from "./browser-shards.js";
@@ -50,9 +50,12 @@ for (const el of document.querySelectorAll("[hidden]")) {
   if (r.width > 0 && r.height > 0) issues.add("HIDDEN but displayed: " + describe(el).slice(0, 50));
 }
 {
-  const shown = ["board", "graph-panel"].filter((id) => { const r = document.getElementById(id).getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-  const wanted = location.hash.split("?")[0].split("/")[0] === "#graph" ? "graph-panel" : "board";
-  if ([...document.querySelectorAll(".card, #graph-box canvas")].some((el) => el.getBoundingClientRect().width > 0) && !document.getElementById("main").hidden && (shown.length !== 1 || shown[0] !== wanted)) issues.add("VIEWS on screen: " + (shown.join(" and ") || "none") + "; expected only " + wanted);
+  const views = ["board", "graph-panel", "history-panel"];
+  const shown = views.filter((id) => { const r = document.getElementById(id).getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+  const route = location.hash.split("?")[0].split("/")[0];
+  const wanted = route === "#graph" ? "graph-panel" : route === "#history" ? "history-panel" : "board";
+  const content = [...document.querySelectorAll(".card, #graph-box canvas, .history-event")].some((el) => el.getBoundingClientRect().width > 0);
+  if (content && !document.getElementById("main").hidden && (shown.length !== 1 || shown[0] !== wanted)) issues.add("VIEWS on screen: " + (shown.join(" and ") || "none") + "; expected only " + wanted);
 }
 if (innerWidth > 640) {
   const tops = new Set([...document.querySelectorAll(".board > .column")].map((c) => Math.round(c.getBoundingClientRect().top)));
@@ -70,7 +73,7 @@ if (innerWidth <= 640) {
   }
   if (document.querySelector(".top").getBoundingClientRect().height > 130) issues.add("HEADER is too tall");
 }
-for (const row of scope.querySelectorAll(".card-top, .project-head, .project-foot, .column-head, .detail-head, .board-head, .filters, .lane, .graph-tools, .link, .timeline li, .tags, .back, .relation h4, .fold-block summary, .detail-head")) {
+for (const row of scope.querySelectorAll(".card-top, .project-head, .project-foot, .column-head, .detail-head, .board-head, .filters, .history-event-top, .lane, .graph-tools, .link, .timeline li, .tags, .back, .relation h4, .fold-block summary, .detail-head")) {
   if (row.closest("[hidden]")) continue;
   const kids = [...row.children].filter((k) => k.getBoundingClientRect().width > 0);
   for (let i = 0; i < kids.length; i++) for (let j = i + 1; j < kids.length; j++) {
@@ -263,9 +266,9 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
 
   const selectedShard = process.env.VIGILE_TEST_BROWSER_SHARD;
   if (selectedShard !== undefined && !Object.hasOwn(BROWSER_TEST_SHARDS, selectedShard)) throw new Error(`Unknown browser test shard: ${selectedShard}`);
-  const browserSuite = (name: BrowserTestSuite, run: () => void) => {
+  const browserSuite = (name: BrowserTestSuite, run: () => void, options: { concurrency?: boolean } = {}) => {
     const selected = selectedShard === undefined || (BROWSER_TEST_SHARDS[selectedShard as BrowserTestShard] as readonly string[]).includes(name);
-    describe(name, { skip: selected ? false : `not in ${selectedShard}` }, run);
+    describe(name, { skip: selected ? false : `not in ${selectedShard}`, ...options }, run);
   };
 
   browserSuite("board", () => {
@@ -6640,7 +6643,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         ["refresh", "focus", "settings"],
         "the header holds three buttons: refresh, room for the board, and settings",
       );
-      assert.equal(await page.run<number>("return [...document.querySelectorAll('.switch, .theme, select')].filter((el) => !el.closest('#settings-menu, #graph-panel')).length"), 0, "no switch or theme button is left outside the menu");
+      assert.equal(await page.run<number>("return [...document.querySelectorAll('.switch, .theme, select')].filter((el) => !el.closest('#settings-menu, #graph-panel, #history-panel')).length"), 0, "no switch or theme button is left outside the menu or hidden view");
       await page.click("#settings");
       assert.deepEqual([await settingsOpen(), await pressed()], [true, "true"]);
       assert.deepEqual(
@@ -9929,4 +9932,181 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       }
     });
   });
+
+  browserSuite("history", () => {
+    it("adds a third, project-filtered view with bookmarked event filters and item links", async () => {
+      await load("/#board?project=WEB");
+      await page.click("#view-history");
+      await page.until("return document.querySelectorAll('#history-list .history-event').length > 0", "the History feed");
+      assert.deepEqual(await page.run("return [document.querySelector('#view-history').getAttribute('aria-current'), document.getElementById('history-panel').hidden, document.getElementById('board').hidden, document.getElementById('graph-panel').hidden, location.hash]"), ["page", false, true, true, "#history?project=WEB"]);
+      await layout("history view");
+      const viewport = await page.run<{ width: number; height: number }>("return { width: innerWidth, height: innerHeight }");
+      await page.size(390, 844, true);
+      await layout("History view on phone");
+      await page.size(viewport.width, viewport.height);
+      await layout("History view after resizing back");
+
+      const recentStatus = await page.run<{ id: string; date: string }>("const e = document.querySelector('.history-event[data-kind=\"task\"][data-action=\"status_changed\"]'); const d = e && new Date(e.querySelector('time').dateTime); return e ? { id: e.dataset.id, date: [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-') } : null");
+      assert.ok(recentStatus, "the seeded project has recorded task state changes");
+      await page.run(`document.getElementById('history-kind').value = 'task'; document.getElementById('history-actor').value = 'agent1'; document.getElementById('history-action').value = 'status_changed'; document.getElementById('history-from').value = ${JSON.stringify(recentStatus.date)}; document.getElementById('history-to').value = ${JSON.stringify(recentStatus.date)}; document.getElementById('history-filters').requestSubmit()`);
+      await page.until("return location.hash.includes('action=status_changed') && document.querySelectorAll('#history-list .history-event').length > 0", "the applied event filters");
+      const filtered = await page.run<{ hash: string; ids: string[]; actions: string[]; actors: string[]; kinds: string[]; from: string; to: string }>("return { hash: location.hash, ids: [...document.querySelectorAll('.history-event')].map(e => e.dataset.id), actions: [...document.querySelectorAll('.history-event')].map(e => e.dataset.action), actors: [...document.querySelectorAll('.history-event-actor')].map(e => e.textContent.trim()), kinds: [...document.querySelectorAll('.history-event-kind')].map(e => e.textContent.trim()), from: document.getElementById('history-from').value, to: document.getElementById('history-to').value }");
+      assert.deepEqual([filtered.actions.every((action) => action === "status_changed"), filtered.actors.every((actor) => actor === "by agent1"), filtered.kinds.every((kind) => kind === "task"), filtered.ids.includes(recentStatus.id), filtered.from, filtered.to], [true, true, true, true, recentStatus.date, recentStatus.date]);
+      await layout("filtered History view");
+
+      const item = await page.run<{ kind: string; id: string }>("const e = document.querySelector('.history-event-item'); return { kind: e.dataset.kind, id: e.dataset.id }");
+      await page.run("document.querySelector('.history-event-item').focus()");
+      await page.key("Enter");
+      await page.until("return !document.getElementById('panel').hidden", "the affected item panel");
+      assert.ok((await page.run<string>("return location.hash")).startsWith(`#history/${item.id}?`));
+      await page.key("Escape");
+      await page.until("return document.getElementById('panel').hidden && location.hash.startsWith('#history?')", "return to the filtered History view");
+
+      await load(`/#history?project=WEB&kind=task&actor=agent1&action=status_changed&from=${recentStatus.date}&to=${recentStatus.date}`);
+      await page.until("return document.querySelectorAll('#history-list .history-event').length > 0", "the bookmarked History filters after reload");
+      assert.deepEqual(await page.run("return [location.hash, document.getElementById('history-kind').value, document.getElementById('history-actor').value, document.getElementById('history-action').value]"), [`#history?project=WEB&kind=task&actor=agent1&action=status_changed&from=${recentStatus.date}&to=${recentStatus.date}`, "task", "agent1", "status_changed"]);
+
+      await page.click("#history-clear");
+      await page.until("return location.hash === '#history?project=WEB' && !document.getElementById('history-actor').value", "cleared History filters");
+      await page.run("history.back()");
+      await page.until("return location.hash.includes('action=status_changed') && document.getElementById('history-actor').value === 'agent1'", "History filters restored by Back");
+      await page.run("history.forward()");
+      await page.until("return location.hash === '#history?project=WEB' && !document.getElementById('history-actor').value", "History filters cleared by Forward");
+
+      await load("/#history?project=WEB&from=2026-02-31&to=2026-03-01");
+      await page.until("return document.getElementById('history-panel').hidden === false", "History with an invalid bookmarked date");
+      assert.deepEqual(await page.run("return [location.hash, document.getElementById('history-from').value, document.getElementById('history-to').value]"), ["#history?project=WEB&to=2026-03-01", "", "2026-03-01"]);
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("keeps a healthy selected project visible when the Board problem filter is active", async () => {
+      const healthy = await run("create_project", { title: "Healthy History scope", prefix: "HSTHLT" });
+      const empty = await run("get", { id: "EMPTY", kind: "project" });
+      await run("set_project_status", { id: "EMPTY", version: empty.version, status: "broken" });
+      await run("add_link", { from: ids.address!, type: "depends on", to: ids.receipts! });
+      try {
+        await load();
+        await page.run("document.querySelector('#summary [data-summary-filter=\"problems\"]').click()");
+        await page.run(`history.pushState(history.state, '', '#board?project=${healthy.id}'); window.dispatchEvent(new PopStateEvent('popstate'))`);
+        await page.until(`return location.hash === '#board?project=${healthy.id}'`, "the healthy project selected under the Board filter");
+        await page.click("#view-history");
+        await page.until(`return [...document.querySelectorAll('#projects .project-id')].some((node) => node.textContent === '${healthy.id}')`, "the selected healthy project in History");
+        assert.ok(await page.run<boolean>(`return [...document.querySelectorAll('#projects .project-id')].some((node) => node.textContent === '${healthy.id}')`));
+      } finally {
+        await load("/#board");
+        await run("remove_link", { from: ids.address!, type: "depends on", to: ids.receipts! });
+        const current = await run("get", { id: "EMPTY", kind: "project" });
+        await run("set_project_status", { id: "EMPTY", version: current.version, status: empty.status });
+      }
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("ends Through at the local day's last instant when midnight is skipped", async () => {
+      await load("/#history");
+      const originalZone = await page.run<string>("return Intl.DateTimeFormat().resolvedOptions().timeZone");
+      await page.send("Emulation.setTimezoneOverride", { timezoneId: "America/Santiago" });
+      try {
+        await page.run("window.historyRealFetch = window.fetch; window.historyRequest = null; window.fetch = async (...args) => { if (String(args[0]).endsWith('/api/list-history')) window.historyRequest = JSON.parse(args[1].body); return window.historyRealFetch(...args); }");
+        await page.run("document.getElementById('history-to').value = '2026-09-06'; document.getElementById('history-filters').requestSubmit()");
+        await page.until("return Boolean(window.historyRequest)", "the History request with the local end-of-day bound");
+        const [actual, expected] = await page.run<[string, string]>("const expected = new Date(2026, 8, 7); expected.setMilliseconds(-1); return [window.historyRequest.to, expected.toISOString()]");
+        assert.equal(expected, "2026-09-07T02:59:59.999Z");
+        assert.equal(actual, expected);
+      } finally {
+        await page.send("Emulation.setTimezoneOverride", { timezoneId: originalZone });
+      }
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("does not offer board-only group zoom from a History item panel", async () => {
+      const group = await run("create_task", { title: "History group", description: "Contains a child.", project: "WEB" });
+      await run("create_task", { title: "History child", description: "Inside the group.", project: "WEB", parent: group.id });
+      await load("/#history?project=WEB&kind=task");
+      await page.until(`return Boolean(document.querySelector('.history-event[data-id="${group.id}"]'))`, "the History group event");
+      await page.click(`.history-event[data-id="${group.id}"] .history-event-item`);
+      await page.until("return !document.getElementById('panel').hidden", "the group panel from History");
+      assert.equal(await page.run("return document.querySelectorAll('#detail .open-group').length"), 0);
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("loads an earlier page without repeating events", async () => {
+      const historyProject = await run("create_project", { title: "History paging", prefix: "HSTPAG" });
+      const historyTask = await run("create_task", { title: "Paginated history", description: "A private paging fixture.", project: historyProject.id });
+      const outsideProject = await run("create_project", { title: "Outside history", prefix: "HSTOUT" });
+      const outside = await run("create_task", { title: "Outside update", description: "Not in WEB.", project: outsideProject.id });
+      await run("update_task", { id: outside.id, version: outside.version, priority: 17 });
+      let version = historyTask.version;
+      for (let priority = 1; priority <= 201; priority++) {
+        version = (await run("update_task", { id: historyTask.id, version, priority: 100 + priority })).version;
+      }
+      await load("/#history?project=HSTPAG&kind=task&action=updated");
+      await page.until("return document.querySelectorAll('#history-list .history-event').length === 100 && !document.getElementById('history-more').hidden", "the first bounded History page");
+      const first = await page.run<string[]>("return [...document.querySelectorAll('.history-event')].map(e => e.dataset.place)");
+      await page.run("document.querySelector('.history-event-item').focus(); document.getElementById('history-more').click()");
+      await page.until("return document.querySelectorAll('#history-list .history-event').length === 200 && !document.getElementById('history-more').hidden", "the earlier History page");
+      const all = await page.run<string[]>("return [...document.querySelectorAll('.history-event')].map(e => e.dataset.place)");
+      assert.equal(all.length, 200);
+      assert.deepEqual(all.slice(0, 100), first);
+      assert.equal(new Set(all).size, all.length, "no event appears twice across pages");
+      const loadedItems = await page.run<string[]>("return [...document.querySelectorAll('.history-event')].map(e => e.dataset.id)");
+      const loadedKinds = await page.run<string[]>("return [...document.querySelectorAll('.history-event-kind')].map(e => e.textContent.trim())");
+      const projectTasks = new Set((await readAll<{ id: string }>((operation, input) => run(operation, input), "list_tasks", { project: "HSTPAG" })).map((entry) => entry.id));
+      assert.ok(loadedItems.every((id) => projectTasks.has(id) && id !== outside.id), "the project filter excludes an updated task in another project");
+      assert.ok(loadedKinds.every((kind) => kind === "task"), "the item-kind filter holds on the next page");
+      assert.ok(loadedItems.every((id) => id === historyTask.id), "the isolated project contains only the task fixture");
+      assert.equal(await page.run<string | null>("return document.activeElement.closest('.history-event')?.dataset.place ?? null"), first[0], "appending a page keeps focus on its event");
+
+      await page.run("document.getElementById('history-more').focus()");
+      await page.key("Enter");
+      await page.until("return document.querySelectorAll('#history-list .history-event').length === 201 && document.getElementById('history-more').hidden", "the final History page");
+      assert.equal(await page.run<string | null>("return document.activeElement.closest('.history-event')?.dataset.place ?? null"), await page.run<string | null>("return document.querySelector('.history-event:last-child')?.dataset.place ?? null"), "when Load earlier disappears, focus moves to the oldest loaded event");
+
+      const versionNow = (await run("get", { id: historyTask.id })).version;
+      await run("update_task", { id: historyTask.id, version: versionNow, priority: 999 });
+      await page.click("#refresh");
+      await page.until("return document.querySelectorAll('#history-list .history-event').length === 202 && document.querySelector('.history-event').dataset.place !== " + JSON.stringify(first[0]), "new changes without losing previously loaded pages");
+      const refreshed = await page.run<string[]>("return [...document.querySelectorAll('.history-event')].map(e => e.dataset.place)");
+      assert.equal(refreshed.length, 202);
+      assert.equal(new Set(refreshed).size, refreshed.length, "a refresh adds new events without duplicating loaded pages");
+      assert.ok(first.every((place) => refreshed.includes(place)), "the older loaded events remain available after refresh");
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("refreshes user events even when project and task lists are unchanged", async () => {
+      await load("/#history?kind=user");
+      await page.until("return !document.getElementById('history-status').textContent.includes('Reading')", "the first user-history read");
+      await page.run(`window.realHistoryFetch = window.fetch; window.historyCalls = 0; window.instanceCalls = 0; window.holdHistory = true; window.fetch = async (...args) => { const path = new URL(String(args[0]), location.href).pathname; if (path === '/api/instance') window.instanceCalls++; const response = await window.realHistoryFetch(...args); if (path === '/api/list-history') { window.historyCalls++; if (window.holdHistory) { window.holdHistory = false; await new Promise((release) => window.releaseHistory = release); } } return response; }`);
+      await page.run("document.getElementById('history-action').value = 'created'; document.getElementById('history-filters').requestSubmit()");
+      await page.until("return window.historyCalls === 1 && typeof window.releaseHistory === 'function'", "the initial History read to pause");
+      const made = await service.engine.execute("create_user", "admin", { username: `hist${Date.now()}`, type: "person" }) as any;
+      const instanceCalls = await page.run<number>("return window.instanceCalls");
+      await page.click("#refresh");
+      await page.until(`return window.instanceCalls > ${instanceCalls}`, "the manual refresh to finish while History is pending");
+      await page.run("window.releaseHistory()");
+      await page.until(`return Boolean(document.querySelector('.history-event[data-kind="user"][data-id="${made.user.id}"][data-action="created"]'))`, "the new user event after refresh");
+      assert.ok(await page.run<boolean>("return window.historyCalls >= 2"), "the pending refresh triggers another History read after the old one completes");
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("moves focus to the History heading when the final user-only page hides Load earlier", async () => {
+      for (let i = 0; i < 101; i++) await service.engine.execute("create_user", "admin", { username: `histpage${i}`, type: "person" });
+      await load("/#history?kind=user&action=created");
+      await page.until("return document.querySelectorAll('#history-list .history-event').length === 100 && !document.getElementById('history-more').hidden", "the first page of user events");
+      await page.run("document.getElementById('history-more').focus()");
+      await page.key("Enter");
+      await page.until("return document.getElementById('history-more').hidden && document.querySelectorAll('#history-list .history-event').length > 100", "the last user-event page");
+      assert.equal(await page.run<string>("return document.activeElement.id"), "history-heading");
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("shows the connection form and clears retained History content after the feed is rejected", async () => {
+      await load("/#history?project=WEB&kind=task&actor=agent1");
+      await page.until("return document.querySelectorAll('#history-list .history-event').length > 0", "the private History entries");
+      await page.run("window.historyRealFetch = window.fetch; window.fetch = async (...args) => String(args[0]).endsWith('/api/list-history') ? new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'History key was refused' } }), { status: 401, headers: { 'content-type': 'application/json' } }) : window.historyRealFetch(...args)");
+      await page.run("document.getElementById('history-action').value = 'updated'; document.getElementById('history-filters').requestSubmit()");
+      await page.until("return document.getElementById('main').hidden && Boolean(document.querySelector('#notice input'))", "the connection form after History is refused");
+      assert.deepEqual(await page.run("return [document.querySelectorAll('#history-list .history-event').length, document.getElementById('history-status').textContent, ...['history-kind','history-actor','history-action','history-from','history-to'].map(id => document.getElementById(id).value)]"), [0, "", "", "", "", "", ""]);
+      assert.deepEqual(page.errors, []);
+    });
+  }, { concurrency: false });
 });

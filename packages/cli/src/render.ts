@@ -290,6 +290,16 @@ const linkText = (result: any): string => `${result.link.from} ${result.link.typ
 const linked: Printer = (ui, result) => note(ui, "ok", result.created === true ? `Linked: ${linkText(result)}` : `Already linked: ${linkText(result)}`);
 const unlinked: Printer = (ui, result) => note(ui, "ok", `Removed: ${linkText(result)}`);
 
+const historyChanges: Printer = (ui, result) => {
+  for (const change of result.changes) {
+    const item = change.title ? `${change.kind} ${change.id} · ${change.title}` : `${change.kind} ${change.id}`;
+    ui.out(`${change.at}  ${change.action.replaceAll("_", " ")}  ${item}  by ${change.by}`);
+    if (Object.keys(change.data).length) ui.out(`  ${JSON.stringify(change.data)}`);
+  }
+  // `more` says to add the continuation to the command that produced this page, so its original filters stay in place.
+  more(ui, result);
+};
+
 const deleted: Printer = (ui, result) => {
   const forGood = result.permanent === true;
   note(ui, "ok", `${result.kind} ${result.id} deleted${forGood ? " permanently" : ""}`, forGood ? undefined : `To bring it back: vigile restore ${result.id}`);
@@ -313,6 +323,7 @@ const PRINTED: Record<string, Printer> = {
   update_task: item,
   set_task_status: item,
   list_tasks: tasks(false),
+  list_history: historyChanges,
   list_next_tasks: tasks(true),
   list_stale_tasks: staleTasks,
   get: read,

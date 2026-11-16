@@ -219,7 +219,7 @@ of these. Over MCP the guide is also offered as resources
 
 ### The web page
 
-The page has two views, linked from its header. It is for reading the plan, with
+The page has three views, linked from its header. It is for reading the plan, with
 one small steering control: in a task's panel, − and + lower or raise its
 priority by one. The change uses the version the panel read, so another change
 meanwhile is shown as a conflict and never overwritten. Priority affects where
@@ -230,6 +230,9 @@ the task appears in `list_next_tasks`.
 - **Graph.** Projects and groups as boxes around their tasks, and an arrow from
   each task to the tasks that wait for it. Drag to move it; zoom with the wheel
   or the buttons.
+- **History.** Retained events from across the plan, newest first. Each row says
+  what changed, when, who did it and which item it affected. Open a project or
+  task from its row. Load older changes a page at a time.
 
 ![The graph: a box for each project and each group, tasks coloured by state, and arrows from each task to the ones that wait for it](images/graph.webp)
 
@@ -248,9 +251,9 @@ longer there is greyed out, and a greyed box says "no longer here"; what is new
 has no place in the drawing. The page says how many items and arrows are new
 and how many are gone, and offers "Draw it again".
 
-Selecting a project or typing in the filter narrows both views. Clicking a
-project keeps the current toggle behavior: only its tasks are shown, all
-project cards stay visible, and the other projects are dimmed. A separate
+Selecting a project narrows all three views; typing in the filter narrows the
+Board and Graph. Clicking a project keeps the current toggle behavior: only its
+tasks are shown; all project cards stay visible, and the other projects are dimmed. A separate
 "Zoom in" button on each project, including in the folded project row, hides
 the project row and shows only that project's work. The zoom controls offer
 "Leave project". Both choices have their own bookmarkable address and history entry; leaving project zoom returns to
@@ -262,6 +265,9 @@ open a project panel from its address or graph node. Project cards use a progres
 bar without a finished-task count, in both expanded cards and the folded row.
 On expanded cards, the problem indicator is at the bottom left and "Zoom in" is
 at the bottom right.
+In History, the project selection works the same way. Filters narrow events by
+item kind, actor, action or time range; the address keeps those choices when the
+view is reloaded or shared.
 Following a link in the
 panel opens the linked item, with a button back to the one you came from. The
 item ID is a copy button. Moving over the description reveals a small copy
@@ -968,7 +974,7 @@ it prints while it runs is the service's log.
 
 ### Operations
 
-The same nineteen operations are MCP tools (`set_task_status`), HTTP endpoints
+The same twenty operations are MCP tools (`set_task_status`), HTTP endpoints
 (`POST /api/set-task-status`) and commands (`vigile set-task-status`). Commands
 act as `admin` unless given `--as <username>`.
 
@@ -981,6 +987,7 @@ act as `admin` unless given `--as <username>`.
 | `vigile update-task` | Changes a task's title, type, description, reason, priority, value or size. |
 | `vigile set-task-status` | Changes a task's status, within the allowed moves and only when its dependencies allow. |
 | `vigile list-tasks` | Lists tasks, filtered by project, group, top level, status, type, user or problems. |
+| `vigile list-history` | Lists retained changes newest first; filter by project, item kind, actor, action or time range, and continue with `--continuation`. |
 | `vigile list-next-tasks` | Lists the tasks that can start now, most important first. |
 | `vigile get` | Reads one project, task or user in full; `--history` adds the recorded changes. A list of more than 100 entries says so and gives the `--continuation` that reads on. |
 | `vigile delete` | Deletes a project, task or user. |
@@ -996,12 +1003,12 @@ act as `admin` unless given `--as <username>`.
 
 No answer holds more than 100 entries of anything:
 
-- **Lists** (`list_projects`, `list_tasks`, `list_next_tasks`, `list_users`)
-  return at most 100 items and a `continuation` token for the next page. The
+- **Lists** (`list_projects`, `list_tasks`, `list_history`, `list_next_tasks`, `list_users`)
+  return at most 100 items or changes and a `continuation` token for the next page. The
   token belongs to the list it came from: the same operation and the same
   filters are sent with it, and for `list_next_tasks` by the same user. A token
   is a word to hand back as it came: letters, digits, `-` and `_`, which can be
-  put into a command as it is. A page never holds more than 100 items, and
+  put into a command as it is. A page never holds more than 100 entries, and
   there is a token after every item, never longer than a thousand characters:
   an ID too long to be written into one, which only damaged data has, is named
   in the token by a short mark, and the next page finds the item by it. Should

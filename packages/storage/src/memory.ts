@@ -7,6 +7,8 @@ import {
   type Head,
   type HistoryPage,
   type HistoryPageRequest,
+  type HistoryFeedPage,
+  type HistoryFeedPageRequest,
   type HistoryRecord,
   type LinkKey,
   type LinkRecord,
@@ -122,6 +124,49 @@ export class MemoryStorage implements StorageAdapter {
     const { before } = page;
     const earlier = before ? all.filter((h) => h.revision < before.revision || (h.revision === before.revision && h.seq < before.seq)) : all;
     return { records: copy(earlier.slice(Math.max(0, earlier.length - page.limit))), total: all.length };
+  }
+
+  async readHistoryFeedPage(tenant: string, page: HistoryFeedPageRequest): Promise<HistoryFeedPage> {
+    const stored = this.tenants.get(tenant);
+    if (!stored) return { records: [], hasMore: false };
+
+    const inProject = page.project === undefined ? null : new Set([objectKey("project", page.project)]);
+    if (inProject) {
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const link of stored.links.values()) {
+          if (link.type !== "contains" || !inProject.has(objectKey(link.fromKind, link.fromId))) continue;
+          const target = objectKey(link.toKind, link.toId);
+          if (inProject.has(target)) continue;
+          inProject.add(target);
+          grew = true;
+        }
+      }
+    }
+
+    const beginnings = new Map<string, HistoryRecord>();
+    for (const record of stored.history) {
+      if (record.action !== "created") continue;
+      const key = objectKey(record.kind, record.id);
+      const before = beginnings.get(key);
+      if (!before || record.revision > before.revision || (record.revision === before.revision && record.seq > before.seq)) beginnings.set(key, record);
+    }
+    const before = page.before;
+    const records = stored.history.filter((record) => {
+      const start = beginnings.get(objectKey(record.kind, record.id));
+      if (start && (record.revision < start.revision || (record.revision === start.revision && record.seq < start.seq))) return false;
+      if (before && (record.revision > before.revision || (record.revision === before.revision && record.seq >= before.seq))) return false;
+      if (page.project !== undefined && !inProject?.has(objectKey(record.kind, record.id))) return false;
+      if (page.kind !== undefined && record.kind !== page.kind) return false;
+      if (page.actor !== undefined && record.actor !== page.actor) return false;
+      if (page.action !== undefined && record.action !== page.action) return false;
+      if (page.from !== undefined && record.at < page.from) return false;
+      if (page.to !== undefined && record.at > page.to) return false;
+      return true;
+    }).sort((a, b) => b.revision - a.revision || b.seq - a.seq);
+    const selected = records.slice(0, page.limit + 1);
+    return { records: copy(selected.slice(0, page.limit)), hasMore: selected.length > page.limit };
   }
 
   async readTimeline(tenant: string, kind: string, id: string, page: TimelinePageRequest = {}): Promise<TimelinePage> {

@@ -383,6 +383,7 @@ function fixed(snapshot: Snapshot, timelines: Timelines = {}): StorageAdapter {
     readText: async () => null,
     readHistory: async () => [],
     readHistoryPage: async () => ({ records: [], total: 0 }),
+    readHistoryFeedPage: async () => ({ records: [], hasMore: false }),
     readTimeline: async (_tenant, kind, id, page = {}) => {
       const all = Object.hasOwn(timelines, `${kind} ${id}`) ? timelines[`${kind} ${id}`]! : [];
       const end = Math.min(page.before ?? all.length, all.length);

@@ -178,7 +178,12 @@ export function namesPlace(says: OpenToken, key: unknown, identity?: string): bo
  * as the operation takes it. In whatever order the filters were written, the question is the same.
  */
 export function questionOfList(operation: string, input: Record<string, unknown> = {}): unknown {
-  const filters = Object.entries(input).filter(([name, value]) => name !== "continuation" && value !== undefined);
+  const filters = Object.entries(input)
+    .filter(([name, value]) => name !== "continuation" && value !== undefined)
+    .map(([name, value]) => [
+      name,
+      operation === "list_history" && ["project", "actor", "action"].includes(name) && typeof value === "string" ? value.trim() : value,
+    ] as const);
   return [operation, Object.fromEntries(filters.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))];
 }
 
@@ -241,6 +246,14 @@ const linkKey = (entry: any): string | undefined => (typeof entry?.id === "strin
 const ORDERS = {
   list_projects: inOrderOfIds("projects", compareProjectIds),
   list_tasks: inOrderOfIds("tasks", compareTaskIds),
+  /** Recorded changes across the tenant, newest first by the revision that stored them. */
+  list_history: {
+    entries: "changes",
+    isKey: (key: unknown): key is readonly [number, number] => Array.isArray(key) && key.length === 2 && key.every(isCount),
+    compare: (a: readonly [number, number], b: readonly [number, number]) => b[0] - a[0] || b[1] - a[1],
+    keyOf: (entry: any): unknown => entry?.place,
+    identityOf: (entry: any) => (Array.isArray(entry?.place) && entry.place.length === 2 && entry.place.every(isCount) ? entry.place.join(".") : undefined),
+  } satisfies Order<readonly [number, number]>,
   list_users: inOrderOfIds("users", compareUserIds),
   /**
    * Containment priority path first, highest at the first difference, then by ID. A prefix comes before what it
@@ -292,7 +305,7 @@ const ORDERS = {
 } as const;
 
 /** The operations that return a list in pages, each with the field its entries are in. */
-export const PAGED = { list_projects: "projects", list_tasks: "tasks", list_next_tasks: "tasks", list_stale_tasks: "claims", list_users: "users" } as const;
+export const PAGED = { list_projects: "projects", list_tasks: "tasks", list_history: "changes", list_next_tasks: "tasks", list_stale_tasks: "claims", list_users: "users" } as const;
 export type PagedOperation = keyof typeof PAGED;
 export const isPaged = (operation: string): operation is PagedOperation => Object.hasOwn(PAGED, operation);
 /** The lists that are the asking user's own. */
