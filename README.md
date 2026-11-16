@@ -282,14 +282,19 @@ shown. One compact, framed surface holds the minus, level, plus, current
 breadcrumb and “Leave group”; search uses the same height and shape beside it.
 The task counts stay in a small pill at the bottom-right of a wide window,
 clear of the board, and disappear when the window is too narrow; each column
-still shows its own count. A nonempty search has one clear button that removes
-the filter and keeps the keyboard in search. The minus and plus close or open
-one level of groups at a time, down to
-"Top level": the groups that are
-in no other group, and the tasks that are in none. A group at the last open
-level is closed. Its card stands for the tasks it holds: it says how many of
-them are done, in progress and waiting, whether any has a problem, and, under
-the filter, how many match. It stands in the column of the group's own state.
+still shows its own count. The colored open-bugs and with-problems counts are
+filters: choose one to show the matching tasks, and projects with problems, then
+clear it with the same clear button used for text search. The selected filter
+stays marked until cleared. If the problem filter hides a selected project, a
+separate control lets you clear that project scope. The selected filter and its
+clear action stay visible in Graph view and in focus mode. A nonempty search has
+one clear button that removes the filter and keeps the keyboard in search. The
+minus and plus close or open one level of groups at a time, down to
+“Top level”: the groups that are in no other group, and the tasks that are in none.
+One group at the last open level is closed. Its card stands for the tasks it
+holds: it says how many are done, in progress and waiting, whether any has a
+problem, and, under a filter, how many match. It stands in the column of its
+own state.
 The accented "Zoom in" action, marked by a magnifier with a geometrically
 centered plus, runs along the bottom of such a card. It, or "Show only this
 group" in the panel of any group, shows that group alone. The accented zoom

@@ -295,10 +295,16 @@ main { padding: 18px clamp(14px, 3vw, 28px) 76px; display: grid; grid-template-c
 body.summary-docked.column-scroll:not(.graph-view) .summary { position: fixed; z-index: 4; right: clamp(14px, 3vw, 28px); bottom: 12px; max-width: calc(100vw - 28px); }
 /* Counts describe the board's cards. Over the graph they would cover and intercept its lower-right canvas. */
 body.graph-view .summary { display: none; }
+body.graph-view:not(.focus):not(.graph-full) .filters > .summary:has(.summary-filter[aria-pressed="true"], [data-clear-project-filter]) { display: flex; }
+body.graph-view:not(.focus):not(.graph-full) .filters > .summary:has(.summary-filter[aria-pressed="true"], [data-clear-project-filter]) > :not(.summary-filter) { display: none; }
 .summary > span { display: inline-flex; align-items: center; gap: 0.25em; white-space: nowrap; }
 .summary > span:not(.tag) { min-height: 24px; }
-.summary > span + span::before { content: ""; width: 1px; height: 14px; margin: 0 10px; background: var(--line); }
+.summary > :is(span, button) + :is(span, button)::before { content: ""; width: 1px; height: 14px; margin: 0 10px; background: var(--line); }
 .summary b { color: var(--text); font-weight: 650; }
+.summary > .summary-filter { display: inline-flex; align-items: center; min-height: 0; padding: 3px 8px; border: 1px solid color-mix(in srgb, currentColor 28%, transparent); font: inherit; line-height: 1.2; cursor: pointer; }
+.summary > .summary-filter:hover { filter: brightness(0.94); }
+.summary > .summary-filter[aria-pressed="true"] { box-shadow: inset 0 0 0 1px currentColor; }
+.summary > .summary-filter:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
 
 /*
  * Columns always sit side by side in one row. When they do not fit, the row scrolls sideways; it never wraps.
@@ -447,7 +453,9 @@ body.graph-view .summary { display: none; }
  * Focus: the header's toggle folds away everything above the board or the graph. While a project, a group, a
  * filter or the board's zoom narrows what is shown, the line that says so stays.
  */
-body.focus #projects-section, body.focus .filters > .search, body.focus .filters > .summary { display: none; }
+body.focus #projects-section, body.focus .filters > .search { display: none; }
+body.focus .filters > .summary:not(:has(.summary-filter[aria-pressed="true"], [data-clear-project-filter])) { display: none; }
+body.graph-view.focus .filters > .summary:has(.summary-filter[aria-pressed="true"], [data-clear-project-filter]) { display: flex; }
 /* Focus mode keeps only the position line when the view is narrowed. Zoom and leave remain available again when
  * the full toolbar returns; this preserves the compact room the mode promises without splitting the surface. */
 body.focus:not(.scoped) .filters { display: none; }
@@ -463,6 +471,10 @@ body.graph-view main { padding-bottom: 12px; }
 /* Full screen: only the graph, its controls and its legend. */
 body.graph-full .top, body.graph-full #projects-section, body.graph-full .board-head, body.graph-full .filters { display: none; }
 body.graph-full main { padding: 10px 12px 12px; }
+body.graph-full .filters:has(.summary-filter[aria-pressed="true"], [data-clear-project-filter]) { position: fixed; z-index: 8; right: clamp(14px, 3vw, 28px); bottom: 12px; display: flex; width: max-content; max-width: calc(100vw - 28px); margin: 0; }
+body.graph-full .filters:has(.summary-filter[aria-pressed="true"], [data-clear-project-filter]) > :not(.summary) { display: none; }
+body.graph-full .filters > .summary:has(.summary-filter[aria-pressed="true"], [data-clear-project-filter]) { display: flex; }
+body.graph-full:has(.filters .summary-filter[aria-pressed="true"], .filters [data-clear-project-filter]) main { padding-bottom: 76px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 10px; padding: 0; list-style: none; font-size: 13px; color: var(--muted); }
 .legend li { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .legend .line { display: inline-block; width: 22px; height: 0; border-top: 2px solid var(--idle); }
@@ -625,7 +637,8 @@ button.link:hover { background: var(--idle-soft); }
 /* Below the width where all three board tools fit on one row, keep the primary controls compact and omit the
  * redundant counts. Every column still carries its own count, and the complete summary returns with room. */
 @media (max-width: 1120px) {
-  body:not(.graph-view) .filters > .summary { display: none; }
+  body:not(.graph-view) .filters > .summary:not(:has(.summary-filter[aria-pressed="true"], [data-clear-project-filter])) { display: none; }
+  body:not(.graph-view) .filters > .summary:has(.summary-filter[aria-pressed="true"], [data-clear-project-filter]) > :not(.summary-filter) { display: none; }
 }
 
 @media (max-width: 640px) {

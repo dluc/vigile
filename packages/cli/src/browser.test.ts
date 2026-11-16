@@ -284,6 +284,190 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.run(`for (const more of document.querySelectorAll('.more[aria-expanded="true"]')) more.click()`);
     });
 
+    it("filters the board to open bugs from the summary and clears the filter with the keyboard", async () => {
+      await page.size(1440, 900);
+      await load();
+      const bugs = [ids.bugBusy, ids.incident, ids.issue, ids.refunds].sort();
+      const summaryFilter = () => page.run(`return document.querySelector('#summary [data-summary-filter="trouble"]')?.getAttribute('aria-pressed') ?? null`);
+
+      assert.equal(await summaryFilter(), "false", "the open-bugs count is an available filter");
+      await page.click('#summary [data-summary-filter="trouble"]');
+      assert.equal(await summaryFilter(), "true", "the selected summary filter is visible");
+      assert.deepEqual(await page.run<string[]>(`return [...document.querySelectorAll('#board .card')].map((card) => card.dataset.id).sort()`), bugs, "only unfinished bugs, issues and incidents remain");
+
+      await page.run(`document.querySelector('#summary [data-summary-filter="trouble"]').focus()`);
+      await page.key("Space");
+      assert.equal(await summaryFilter(), "false", "Space clears the selected summary filter");
+      assert.equal(await count("#board .card"), 55, "clearing restores the whole board");
+
+      await page.click('#summary [data-summary-filter="trouble"]');
+      assert.equal(await page.run<boolean>("return !document.getElementById('clear-filter').hidden"), true, "the ordinary clear-filter control is available");
+      await page.run(`const input = document.getElementById('filter'); input.value = 'Checkout'; input.dispatchEvent(new Event('input', { bubbles: true }))`);
+      assert.equal(await page.run<string>("return document.getElementById('clear-filter').getAttribute('aria-label')"), "Clear open bugs filter and search", "the clear control names both active filters");
+      assert.equal(await page.run<string>("return document.getElementById('clear-filter').title"), "Clear open bugs filter and search", "the tooltip also explains that search will be cleared");
+      assert.equal(await count("#board .card"), 1, "both filters narrow the board together");
+      await page.click("#clear-filter");
+      assert.equal(await summaryFilter(), "false", "the clear control removes the selected summary filter");
+      assert.equal(await page.run<string>("return document.getElementById('filter').value"), "", "it also clears the active search as its label promises");
+      assert.equal(await count("#board .card"), 55);
+    });
+
+    it("counts open bugs inside closed groups and keeps their group on the filtered board", async () => {
+      await page.size(1440, 900);
+      await load("/#board?zoom=1");
+      assert.match(await text("#summary [data-summary-filter='trouble']"), /^4 open bugs/);
+      await page.click('#summary [data-summary-filter="trouble"]');
+      assert.deepEqual(await page.run<string[]>(`return [...document.querySelectorAll('#board .card')].map((card) => card.dataset.id).sort()`), [ids.bugBusy, ids.checkout, ids.incident, ids.issue].sort(), "the closed group that contains an open bug remains as its representative");
+      assert.equal(await count(`#board .card[data-id="${ids.refunds}"]`), 0, "the nested bug stays inside its closed group");
+      assert.match(await text("#summary [data-summary-filter='trouble']"), /^4 open bugs/, "the filter count describes matching tasks, not only visible group cards");
+    });
+
+    it("filters tasks and projects with problems from the summary and clears the filter", async () => {
+      await page.size(1440, 900);
+      const empty = await run("get", { id: "EMPTY", kind: "project" });
+      await run("set_project_status", { id: "EMPTY", status: "broken", version: empty.version });
+      await run("add_link", { from: ids.address, type: "depends on", to: ids.receipts });
+      try {
+        await load();
+        const tasks = (await run("list_tasks", {})).tasks;
+        const expectedTasks = tasks.filter((task: any) => task.has_problems).map((task: any) => task.id).sort();
+        const projects = (await run("list_projects", {})).projects;
+        const expectedProjects = projects.filter((project: any) => project.has_problems).map((project: any) => project.id).sort();
+        const filter = () => page.run(`return document.querySelector('#summary [data-summary-filter="problems"]')?.getAttribute('aria-pressed') ?? null`);
+
+        assert.ok(expectedTasks.includes(ids.address), "the started task waiting on new work has a problem");
+        assert.ok(expectedProjects.includes("EMPTY"), "the broken project has a problem");
+        await page.click('#summary [data-summary-filter="problems"]');
+        assert.equal(await filter(), "true", "the with-problems filter stays visibly selected");
+        assert.deepEqual(await page.run<string[]>(`return [...document.querySelectorAll('#board .card')].map((card) => card.dataset.id).sort()`), expectedTasks, "the board contains only tasks with problems");
+        assert.deepEqual(await page.run<string[]>(`return [...document.querySelectorAll('#projects .project-id')].map((node) => node.textContent).sort()`), expectedProjects, "the project row contains only projects with problems");
+        assert.equal(await page.run<boolean>("return !document.getElementById('clear-filter').hidden"), true, "the selected filter can be cleared");
+        await page.click("#clear-filter");
+        assert.equal(await filter(), "false", "clearing removes the selected filter");
+        assert.equal(await count("#board .card"), 55, "clearing restores the whole board");
+      } finally {
+        await run("remove_link", { from: ids.address, type: "depends on", to: ids.receipts });
+        const current = await run("get", { id: "EMPTY", kind: "project" });
+        await run("set_project_status", { id: "EMPTY", status: "open", version: current.version });
+        await load();
+      }
+    });
+
+    it("offers the problems filter when only a project has a problem", async () => {
+      await page.size(1440, 900);
+      const empty = await run("get", { id: "EMPTY", kind: "project" });
+      await run("set_project_status", { id: "EMPTY", status: "broken", version: empty.version });
+      try {
+        await load();
+        assert.equal(await page.run(`return document.querySelector('#summary [data-summary-filter="problems"]')?.getAttribute('aria-pressed') ?? null`), "false");
+        assert.match(await text("#summary"), /1 item with problems/, "problem counts include projects as well as tasks");
+        await page.click('#summary [data-summary-filter="problems"]');
+        assert.deepEqual(await page.run<string[]>(`return [...document.querySelectorAll('#board .card')].map((card) => card.dataset.id)`), [], "no task is shown when none has a problem");
+        assert.deepEqual(await page.run<string[]>(`return [...document.querySelectorAll('#projects .project-id')].map((node) => node.textContent).sort()`), ["EMPTY"], "the project's problem remains available to open");
+        assert.equal(await page.run(`return document.querySelector('#summary [data-summary-filter="problems"]')?.getAttribute('aria-pressed')`), "true");
+      } finally {
+        const current = await run("get", { id: "EMPTY", kind: "project" });
+        await run("set_project_status", { id: "EMPTY", status: "open", version: current.version });
+        await load();
+      }
+    });
+
+    it("keeps the selected summary filter and its clear action visible in focus mode", async () => {
+      await page.size(1440, 900);
+      await load();
+      await page.click('#summary [data-summary-filter="trouble"]');
+      await page.click("#focus");
+      assert.equal(await page.run(`return document.body.classList.contains('focus')`), true);
+      assert.equal(await page.run(`return document.querySelector('#summary [data-summary-filter="trouble"]')?.getAttribute('aria-pressed')`), "true");
+      assert.equal(await page.run(`return Boolean(document.querySelector('#summary [data-clear-summary-filter]'))`), true);
+      await page.click("#view-graph");
+      await graphReady();
+      await page.click("#graph-full");
+      await page.until("return document.body.classList.contains('graph-full')", "the graph focus view");
+      assert.equal(await page.run(`return getComputedStyle(document.getElementById('summary')).display !== 'none'`), true, "the active summary filter remains visible over the focused graph");
+      assert.equal(await page.run(`return Boolean(document.querySelector('#summary [data-clear-summary-filter]'))`), true, "the focused graph retains a clear action");
+      await page.click("#summary [data-clear-summary-filter]");
+      assert.equal(await page.run(`return document.querySelector('#summary [data-summary-filter="trouble"]')?.getAttribute('aria-pressed')`), "false");
+      await page.click("#graph-full");
+      await page.click("#view-board");
+      await page.until("return document.getElementById('board').getBoundingClientRect().height > 0", "the board after leaving graph focus");
+      await page.click("#focus");
+    });
+
+    it("keeps an active summary filter visible and clearable in ordinary Graph view", async () => {
+      await page.size(1440, 900);
+      await load();
+      if (await page.run<boolean>("return document.body.classList.contains('focus')")) await page.click("#focus");
+      await page.click('#summary [data-summary-filter="trouble"]');
+      await page.click("#view-graph");
+      await graphReady();
+      assert.equal(await page.run("return document.body.classList.contains('focus')"), false, "focus mode is off");
+      assert.equal(await page.run("return getComputedStyle(document.getElementById('summary')).display"), "flex", "the active filter indicator remains visible over the graph");
+      assert.equal(await page.run(`return document.querySelector('#summary [data-summary-filter="trouble"]')?.getAttribute('aria-pressed')`), "true");
+      assert.equal(await page.run("return Boolean(document.querySelector('#summary [data-clear-summary-filter]'))"), true, "the graph view keeps an explicit clear control");
+      const filteredTasks = await page.run<number>(`return window.vigileGraph.nodes('[kind = "task"]').length`);
+      assert.equal(filteredTasks, 4, "the graph is narrowed to the open bugs");
+      await page.click("#summary [data-clear-summary-filter]");
+      await page.until(`return window.vigileGraph?.scratch('settled') && window.vigileGraph.nodes('[kind = "task"]').length > ${filteredTasks}`, "the complete graph after clearing the filter");
+      assert.equal(await page.run("return getComputedStyle(document.getElementById('summary')).display"), "none", "the count bar still stays out of the graph when no filter is active");
+    });
+
+    it("keeps keyboard focus on a summary filter when a live refresh redraws it", async () => {
+      await page.size(1440, 900);
+      await load();
+      await setting("auto");
+      await page.click('#summary [data-summary-filter="trouble"]');
+      await page.run(`document.querySelector('#summary [data-summary-filter="trouble"]').focus()`);
+      try {
+        const title = "Bug changed while its summary filter has focus";
+        await run("update_task", { id: ids.bugBusy, version: (await run("get", { id: ids.bugBusy })).version, title });
+        await page.until(`return document.querySelector('#board .card[data-id="${ids.bugBusy}"] .card-title')?.textContent === ${JSON.stringify(title)} && document.activeElement?.dataset.summaryFilter === 'trouble'`, "the refreshed card and keyboard focus on its summary filter");
+      } finally {
+        await setting("auto");
+        await run("update_task", { id: ids.bugBusy, version: (await run("get", { id: ids.bugBusy })).version, title: "Checkout page is blank on phones" });
+        await load();
+      }
+    });
+
+    it("keeps a clear control when live refresh removes the selected project card", async () => {
+      await page.size(1440, 900);
+      await load();
+      const empty = await run("get", { id: "EMPTY", kind: "project" });
+      await run("set_project_status", { id: "EMPTY", status: "broken", version: empty.version });
+      await load();
+      await page.run(`const project = [...document.querySelectorAll('#projects .project')].find((item) => item.querySelector('.project-id')?.textContent === 'EMPTY'); project.querySelector('.project-main').click()`);
+      await page.until("return document.querySelector('#projects .project.selected .project-id')?.textContent === 'EMPTY'", "the empty project selection");
+      await page.click('#summary [data-summary-filter="problems"]');
+      await setting("auto");
+      try {
+        const current = await run("get", { id: "EMPTY", kind: "project" });
+        await run("set_project_status", { id: "EMPTY", status: "open", version: current.version });
+        await page.until("return ![...document.querySelectorAll('#projects .project-id')].some((item) => item.textContent === 'EMPTY') && Boolean(document.querySelector('[data-clear-project-filter]'))", "a visible clear action after refresh removes the selected project card");
+        await page.click("#summary [data-clear-project-filter]");
+        assert.equal(await page.run<string>("return location.hash"), "#board", "clearing the project scope updates its bookmarkable route");
+        assert.equal(await page.run("return [...document.querySelectorAll('#projects .project.selected')].length"), 0, "clearing the unavailable project removes the stale project scope");
+        assert.equal(await text("#projects .empty"), "No projects with problems.", "the problems filter remains active after the project scope is cleared");
+        await page.click("#summary [data-clear-summary-filter]");
+        assert.equal(await count("#projects .project"), 3, "clearing the problem filter restores all projects");
+      } finally {
+        const latest = await run("get", { id: "EMPTY", kind: "project" });
+        if (latest.status === "broken") await run("set_project_status", { id: "EMPTY", status: "open", version: latest.version });
+        await setting("auto");
+        await load();
+      }
+    });
+
+    it("keeps summary filter pills padded wherever the summary is shown", async () => {
+      for (const width of [320, 640, 1024, 1121, 1280, 1440, 1920]) {
+        await page.size(width, 900, width <= 640);
+        await load();
+        const pill = await page.run<{ summaryDisplay: string; padding: string }>(`const s = document.getElementById('summary'); const el = s.querySelector('[data-summary-filter="trouble"]'); return { summaryDisplay: getComputedStyle(s).display, padding: el ? getComputedStyle(el).padding : "none" }`);
+        if (width <= 1120) assert.equal(pill.summaryDisplay, "none", `summary pills are hidden at ${width}px`);
+        else assert.equal(pill.padding, "3px 8px", `summary pills have intentional internal padding at ${width}px`);
+        await layout(`summary filter pills at ${width}px`);
+      }
+    });
+
     it("gives bugs, issues and incidents a column of their own on request, and says there which state each is in", async () => {
       await load();
       await setting("bugs-apart");
@@ -7497,7 +7681,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.deepEqual(await cards(), these(...TWO));
       assert.deepEqual((await says("sub")).tags, ["0/7 done", "1 in progress", "1 waiting", "1 open bug or issue", `in ${z.alpha}`, `in ${z.beta}`, "ZOO"]);
       assert.deepEqual((await says("near")).tags, [`in ${z.alpha}`, `in ${z.sub}`, "ZOO"]);
-      assert.match(await text("#summary"), /^12 cards for 18 tasks\s*1 in progress\s*10 next\s*0 waiting\s*1 done$/, "the counts are of the cards, and the bug inside the closed group is not among them");
+      assert.match(await text("#summary"), /^12 cards for 18 tasks\s*1 in progress\s*10 next\s*0 waiting\s*1 done\s*1 open bug, issue or incident$/, "the card counts stay at this level, while the open-bugs count includes the bug inside its closed group");
 
       // All the way out: the groups that are in nothing, and the tasks that are in no group.
       await page.click("#level-out");
@@ -7514,7 +7698,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       });
       // The group and the task that are in both groups are counted in each, and once in the total.
       assert.deepEqual((await says("beta")).tags, ["0/10 done", "1 in progress", "1 waiting", "1 open bug or issue", "ZOO"]);
-      assert.match(await text("#summary"), /^6 cards for 18 tasks\s*0 in progress\s*6 next\s*0 waiting\s*0 done$/);
+      assert.match(await text("#summary"), /^6 cards for 18 tasks\s*0 in progress\s*6 next\s*0 waiting\s*0 done\s*1 open bug, issue or incident$/);
       assert.deepEqual(await columns(), { "In progress": 0, Next: 6, Done: 0 });
       assert.deepEqual(await page.run<string[]>("return [...document.querySelectorAll('.column[data-key=\"next\"] .card')].slice(0, 2).map((c) => c.dataset.id)"), [z.alpha, z.beta], "the closed groups come first in their column");
       await layout("on the board zoomed out to the top level");
@@ -7731,7 +7915,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         // The one unfinished bug is inside a closed group: the column for bugs has nothing to show, and the group says what it holds.
         await setting("bugs-apart");
         assert.deepEqual([await bugs(), await count(".column[data-tone='bug']")], [[], 0]);
-        assert.equal(await count("#summary .tag.trouble"), 0);
+        assert.equal(await count("#summary .tag.trouble"), 1, "the open-bugs count includes the bug inside the closed group");
         assert.ok((await says("alpha")).tags.includes("1 open bug or issue"));
         await page.click("#level-in");
         assert.deepEqual(await bugs(), [], "two levels: the bug is one level further down");
