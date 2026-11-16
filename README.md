@@ -244,10 +244,17 @@ longer there is greyed out, and a greyed box says "no longer here"; what is new
 has no place in the drawing. The page says how many items and arrows are new
 and how many are gone, and offers "Draw it again".
 
-Selecting a project or typing in the filter narrows both views. The board
-follows the filter letter by letter; the graph is drawn again once the typing
-pauses. Clicking a task or a project opens a panel with its description,
-reason, links, details, status timeline and history. Following a link in the
+Selecting a project or typing in the filter narrows both views. Clicking a
+project keeps the current toggle behavior: only its tasks are shown, all
+project cards stay visible, and the other projects are dimmed. A separate
+"Zoom in" button on each project, including in the folded project row, hides
+the project row and shows only that project's work. The zoom controls offer
+"Leave project". Both choices have their own bookmarkable address and history entry; leaving project zoom returns to
+the selected-project view. The board follows the filter letter by letter; the
+graph is drawn again once the typing pauses. Clicking a task card or a task or
+project in the graph opens a panel with its description, reason, links, details,
+status timeline and history. Project cards have no separate details button;
+open a project panel from its address or graph node. Following a link in the
 panel opens the linked item, with a button back to the one you came from. The
 item ID is a copy button. Moving over the description reveals a small copy
 button for its exact text; both controls also work from the keyboard and say
@@ -293,10 +300,12 @@ screen reader once, in a few words.
 The graph is not zoomed this way: it has its own "Collapse groups" switch, and
 shares with the board only the group that was zoomed into.
 
-Every view and every open item has its own address, such as `/#board`,
-`/#graph/WEB-012` or `/#board/project:WEB`. So does the zoom:
-`/#board?in=WEB-003&zoom=1` is the top level of the group WEB-003. Bookmark it
-or share it; the browser's Back returns to the item, or the zoom, before.
+Every view, project mode and open item has its own address, such as `/#board`,
+`/#graph/WEB-012`, `/#board?project=WEB` for the toggle selection, or
+`/#board?project=WEB&projectZoom=1` for project zoom. Group zoom is bookmarkable
+too: `/#board?in=WEB-003&zoom=1` is the top level of the group WEB-003. Bookmark
+or share any of them; the browser's Back and Forward restore the exact view,
+selection or zoom.
 When the service no longer accepts the page's key, the page empties itself and
 its address names the view alone, since the IDs of groups and items are part of
 the plan; given a key that is accepted, it is back where it was.

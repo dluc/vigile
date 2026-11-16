@@ -225,7 +225,7 @@ const isOpenTrouble = (task) => isTrouble(task) && !FINISHED.includes(task.statu
  */
 const boardColumn = (task) => (state.bugsApart && isOpenTrouble(task) ? "trouble" : columnOf(task));
 
-const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, filter: "", expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
+const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
 
 /** One worker per task. Leaving a panel cancels unsent clicks, but never creates a rival for a write in flight. */
 const priorityWorkers = new Map();
@@ -418,28 +418,57 @@ function pill(status) {
 }
 
 function renderProjects() {
+  $("projects-section").hidden = state.projectZoom;
   $("projects-section").classList.toggle("folded", state.projectsFolded);
   $("projects-fold").setAttribute("aria-expanded", String(!state.projectsFolded));
   $("projects-chevron").textContent = state.projectsFolded ? "▸" : "▾";
-  const cards = state.projects.map((project) => {
+  const visibleProjects = state.projectZoom ? [] : state.projects;
+  const cards = visibleProjects.map((project) => {
     const { finished, total } = project.progress;
     const percent = total ? Math.round((finished / total) * 100) : 0;
     const pressed = state.project === projectRef(project);
     // With one project selected, the others step back.
     const dimmed = state.project && !pressed ? " dimmed" : "";
     const choose = () => {
-      state.project = pressed ? null : projectRef(project);
-      render();
+      go(state.view, state.open, state.trail, { project: pressed ? null : projectRef(project), projectZoom: false });
     };
+    const zoomed = state.projectZoom && pressed;
+    const toggleProjectZoom = () => {
+      const zoom = !zoomed;
+      go(state.view, null, [], {
+        project: projectRef(project),
+        projectZoom: zoom,
+        zoom: null,
+        into: [],
+      });
+      if (zoom) focusVisible($("leave-group"));
+    };
+    const zoomButton = (className = "project-zoom") => el(
+      "button",
+      {
+        class: className,
+        type: "button",
+        "aria-pressed": String(zoomed),
+        "aria-label": zoomed ? `Leave project zoom for ${project.id} · ${project.title}` : `Zoom into ${project.id} · ${project.title}`,
+        title: zoomed ? "Leave project zoom" : "Show only this project",
+        onclick: toggleProjectZoom,
+      },
+      zoomed ? "Leave zoom" : className === "project-chip-zoom" ? "Zoom" : "Zoom in",
+    );
     // Folded, a project is one small item: its ID, its progress, and a mark when it has problems.
     if (state.projectsFolded) {
       return el(
-        "button",
-        { class: `project-chip${pressed ? " selected" : ""}${dimmed}`, type: "button", "aria-pressed": String(pressed), title: `${project.title}: ${finished} of ${total} finished. ${pressed ? "Show all projects" : "Show only this project"}`, onclick: choose },
-        el("span", { class: "project-id" }, project.id),
-        el("span", { class: "bar", role: "img", "aria-label": `${percent}% finished` }, el("i", { style: `width:${percent}%` })),
-        el("span", {}, `${finished}/${total}`),
-        project.has_problems && el("span", { class: "warn", title: "Has problems" }, "⚠"),
+        "span",
+        { class: "project-chip-wrap" },
+          el(
+            "button",
+            { class: `project-chip${pressed ? " selected" : ""}${dimmed}`, type: "button", "aria-pressed": String(pressed), title: `${project.title}: ${finished} of ${total} finished. ${pressed ? "Show all projects" : "Show only this project"}`, onclick: choose },
+            el("span", { class: "project-id" }, project.id),
+            el("span", { class: "bar", role: "img", "aria-label": `${percent}% finished` }, el("i", { style: `width:${percent}%` })),
+            el("span", {}, `${finished}/${total}`),
+            project.has_problems && el("span", { class: "warn", title: "Has problems" }, "⚠"),
+          ),
+        zoomButton("project-chip-zoom"),
       );
     }
     return el(
@@ -462,10 +491,9 @@ function renderProjects() {
         "div",
         { class: "project-foot" },
         el("span", {}, `${finished} of ${total} finished`),
-        el(
-          "button",
-          { class: `tag${project.has_problems ? " warn" : ""} tag-button`, type: "button", onclick: () => openItem("project", project.id) },
-          project.has_problems ? "⚠ problems" : "details",
+        el("span", { class: "project-actions" },
+          zoomButton(),
+          project.has_problems && el("span", { class: "tag warn" }, "⚠ problems"),
         ),
       ),
     );
@@ -898,9 +926,10 @@ function renderSummary(tasks, all) {
     ]),
   );
   const leave = $("leave-group");
-  leave.hidden = steps.length === 0;
+  leave.hidden = steps.length === 0 && !state.projectZoom;
   leave.dataset.group = steps.at(-1)?.id ?? "";
-  leave.title = steps.length > 1 ? `Back out to ${steps.at(-2).id}` : "Show everything here again";
+  leave.textContent = state.projectZoom && steps.length === 0 ? "↑ Leave project" : "↑ Leave group";
+  leave.title = steps.length > 1 ? `Back out to ${steps.at(-2).id}` : state.projectZoom && steps.length === 0 ? "Return to all projects with this project selected" : "Show everything here again";
 }
 
 /**
@@ -919,8 +948,8 @@ const when = (iso) => new Date(iso).toLocaleString(undefined, { dateStyle: "medi
  * other and the last the one in view, and `zoom` how many levels are open; neither is there for the whole plan
  * with everything shown. #board?in=VIG-003/VIG-012&zoom=1 is the top level of VIG-012, reached through VIG-003.
  */
-function readRoute() {
-  const [, view, item, asks] = /^#(board|graph)(?:\/([^?]*))?(?:\?(.*))?$/.exec(location.hash) ?? [];
+function readRoute(address = location.hash) {
+  const [, view, item, asks] = /^#(board|graph)(?:\/([^?]*))?(?:\?(.*))?$/.exec(address) ?? [];
   // An address that was cut off or mistyped names no item, or no group: the view is shown without it.
   const decoded = (text) => {
     try {
@@ -941,11 +970,13 @@ function readRoute() {
   const levels = /^[1-9]\d*$/.test(asked.get("zoom") ?? "") ? Number(asked.get("zoom")) : NaN;
   const zoom = Number.isSafeInteger(levels) ? levels : null;
   const into = (asked.get("in") ?? "").split("/").map(decoded).filter(Boolean);
-  return { view: view ?? "board", open: !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : { kind: "task", id }, zoom, into };
+  const project = decoded(asked.get("project") ?? "") || null;
+  const projectZoom = Boolean(project && asked.get("projectZoom") === "1");
+  return { view: view ?? "board", open: !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : { kind: "task", id }, zoom, into, project, projectZoom };
 }
 
-function routeOf(view, open, zoom = state.zoom, into = state.into) {
-  const asks = [into.length > 0 && `in=${into.map(encodeURIComponent).join("/")}`, zoom !== null && `zoom=${zoom}`].filter(Boolean).join("&");
+function routeOf(view, open, zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom) {
+  const asks = [project && `project=${encodeURIComponent(project)}`, into.length > 0 && `in=${into.map(encodeURIComponent).join("/")}`, zoom !== null && `zoom=${zoom}`, projectZoom && "projectZoom=1"].filter(Boolean).join("&");
   return `#${view}${open ? `/${open.kind === "project" ? "project:" : ""}${encodeURIComponent(open.id)}` : ""}${asks ? `?${asks}` : ""}`;
 }
 /** A task ID as the service stores it, for comparing supported bookmark spellings without losing large digits. */
@@ -962,20 +993,12 @@ const sameTrail = (a, b) => a.length === b.length && a.every((id, at) => id === 
  * Goes to an address as a new entry in the browser's history. The entry remembers the items the panel came
  * through. The zoom stays as it is unless another one is given.
  */
-function go(view, open, trail = [], { zoom = state.zoom, into = state.into } = {}) {
-  const route = routeOf(view, open, zoom, into);
+function go(view, open, trail = [], { zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom } = {}) {
+  const route = routeOf(view, open, zoom, into, project, projectZoom);
   if (route === location.hash) return;
   history.pushState({ trail }, "", route);
   applyRoute();
 }
-
-/**
- * The project that was selected when the page was locked out, from then until it is let in again; `undefined` at
- * every other time, and when the page was loaded locked out and never knew. The selection is not part of the
- * address and so belongs to no entry of the browser's history: it is the same on every entry the person goes to
- * while the page is locked out, and those are given this one, not the selection the page was emptied of.
- */
-let projectLockedOut;
 
 /**
  * Locked out, the address names the view and nothing of the plan: the groups that were zoomed into and the item
@@ -986,9 +1009,16 @@ let projectLockedOut;
  * locked out, still knows where it was; the project is the one the page was locked out with, when it knows it.
  */
 function putRouteAway() {
-  const bare = `#${readRoute().view}`;
+  const route = readRoute();
+  const bare = `#${route.view}`;
   const before = history.state?.kept;
-  const kept = { route: before ? before.route : location.hash, project: projectLockedOut !== undefined ? projectLockedOut : (before?.project ?? null) };
+  const prior = before?.route ? readRoute(before.route) : null;
+  const onlyView = !route.open && !route.project && !route.projectZoom && !route.into.length && route.zoom === null;
+  const keptRoute = before && prior && onlyView && route.view !== prior.view
+    ? routeOf(route.view, prior.open, prior.zoom, prior.into, prior.project, prior.projectZoom)
+    : before ? before.route : location.hash;
+  const project = before && Object.hasOwn(before, "project") ? before.project : (route.project ?? prior?.project ?? null);
+  const kept = { route: keptRoute, project };
   history.replaceState({ ...history.state, kept }, "", location.hash === "" || location.hash === bare ? undefined : bare);
 }
 
@@ -1001,7 +1031,7 @@ function takeRouteBack() {
   const { kept, ...rest } = history.state ?? {};
   if (!kept) return undefined;
   history.replaceState(rest, "", kept.route || undefined);
-  return kept.project ?? null;
+  return kept;
 }
 
 /**
@@ -1010,12 +1040,10 @@ function takeRouteBack() {
  * the checks that follow every reading.
  */
 function comeBack() {
-  const put = takeRouteBack();
-  const project = projectLockedOut !== undefined ? projectLockedOut : put;
-  projectLockedOut = undefined;
-  if (project === undefined) return;
+  const kept = takeRouteBack();
+  if (!kept) return;
   const route = readRoute();
-  Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, trail: history.state?.trail ?? [], project });
+  Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, trail: history.state?.trail ?? [], project: route.project ?? kept.project ?? null, projectZoom: route.projectZoom });
 }
 
 /** Shows what the address says: called when it changes, by this page or by Back and Forward. */
@@ -1024,20 +1052,27 @@ function applyRoute() {
   // An entry that was gone to then, and is come back to now that the page is let in, has its address again.
   if (locked) putRouteAway();
   else takeRouteBack();
-  const route = readRoute();
+  let route = readRoute();
+  if (state.loadedAt && route.project && !state.projects.some((project) => projectRef(project) === route.project)) {
+    history.replaceState(history.state, "", routeOf(route.view, route.open, route.zoom, route.into, null, false));
+    route = readRoute();
+  }
   const viewChanged = route.view !== state.view;
   const zoomChanged = route.zoom !== state.zoom || !sameTrail(route.into, state.into);
+  const projectChanged = route.project !== state.project || route.projectZoom !== state.projectZoom;
   state.view = route.view;
   state.zoom = route.zoom;
   state.into = route.into;
+  state.project = route.project;
+  state.projectZoom = route.projectZoom;
   state.group = route.into.at(-1) ?? null;
   // The items the panel came through have titles: locked out, they stay with the entry and out of the page.
   state.trail = locked ? [] : (history.state?.trail ?? []);
   // The address may name a group that is not there: once the plan is known, it is put right.
   if (state.loadedAt && !locked) settleZoom();
   if (zoomChanged) boardMoved = true;
-  if (viewChanged || zoomChanged) render();
-  if (zoomChanged && state.loadedAt && !locked) sayZoom();
+  if (viewChanged || zoomChanged || projectChanged) render();
+  if ((zoomChanged || projectChanged) && state.loadedAt && !locked) sayZoom();
   if (!route.open) return hidePanel();
   const reopen = !sameItem(route.open, state.open) || $("panel").hidden;
   if (priorityWork && !sameItem(route.open, { kind: "task", id: priorityWork.id })) priorityWork.pending = 0;
@@ -1093,6 +1128,11 @@ function zoomOut(steps) {
   keyboardTo(placeOf(left, ".zoom-into"));
 }
 
+/** Leaves project zoom but keeps the project selected, returning to the existing toggle view. */
+function leaveProjectZoom() {
+  go(state.view, null, [], { project: state.project, projectZoom: false, zoom: null, into: [] });
+}
+
 /** The timer that empties what was said of a zoom, so that it is not found on the page later, when it no longer holds. */
 let said = null;
 
@@ -1122,7 +1162,7 @@ function stepLevel(by) {
 }
 $("level-out").addEventListener("click", () => stepLevel(-1));
 $("level-in").addEventListener("click", () => stepLevel(1));
-$("leave-group").addEventListener("click", () => zoomOut(Math.max(0, state.into.length - 1)));
+$("leave-group").addEventListener("click", () => state.projectZoom && state.into.length === 0 ? leaveProjectZoom() : zoomOut(Math.max(0, state.into.length - 1)));
 
 /** Opens an item in the panel. Opened from inside the panel, it remembers the item it came from. */
 /** Finds the control the panel was opened from, as it is now, so that the keyboard can go back to it. */
@@ -2078,6 +2118,12 @@ function keyboardPlace() {
   // from the control itself: by now the page may be somewhere else already.
   if (at.matches("#leave-group")) {
     const group = at.dataset.group;
+    if (!group && state.project) {
+      const selectedProject = state.projects.find((project) => projectRef(project) === state.project)?.id;
+      return ofBoard(() => [...$("projects").querySelectorAll(".project, .project-chip-wrap")]
+        .find((item) => item.querySelector(".project-id")?.textContent === selectedProject)
+        ?.querySelector(".project-main, .project-chip"));
+    }
     return ofBoard(() => ($("leave-group").dataset.group === group ? $("leave-group") : null), { item: group ?? null, kind: ".zoom-into" });
   }
   if (at.matches("#scope .crumb")) {
@@ -2092,12 +2138,15 @@ function keyboardPlace() {
   // The board's zoom and the graph's tools are not drawn again, and are out of sight in the other view, or
   // where there is nothing to zoom.
   if (at.closest("#levels, #graph-panel")) return ofBoard(() => (at.isConnected ? at : null));
-  const project = at.closest("#projects .project, #projects .project-chip");
+  const project = at.closest("#projects .project, #projects .project-chip, #projects .project-chip-wrap");
   if (project) {
     const id = project.querySelector(".project-id")?.textContent;
-    const part = at.matches(".tag-button") ? ".tag-button" : at.matches(".project-main") ? ".project-main" : null;
+    const part = at.matches(".project-zoom") ? ".project-zoom"
+      : at.matches(".project-chip-zoom") ? ".project-chip-zoom"
+      : at.matches(".project-main") ? ".project-main"
+      : at.matches(".project-chip") ? ".project-chip" : null;
     return () => {
-      const again = [...$("projects").querySelectorAll(".project, .project-chip")].find((item) => item.querySelector(".project-id")?.textContent === id);
+      const again = [...$("projects").querySelectorAll(".project, .project-chip-wrap")].find((item) => item.querySelector(".project-id")?.textContent === id);
       return part ? again?.querySelector(part) : again;
     };
   }
@@ -2268,7 +2317,24 @@ function draw() {
 }
 /** The links to the two views lead to the same group, and the board is at the same zoom when it is come back to. */
 function linkViews() {
-  for (const view of ["board", "graph"]) $(`view-${view}`).setAttribute("href", routeOf(view, null));
+  for (const view of ["board", "graph"]) {
+    const link = $(`view-${view}`);
+    link.setAttribute("href", routeOf(view, null));
+    link.onclick = (event) => {
+      if (!locked) return;
+      // The visible address must not reveal plan IDs while locked out. Carry the target view with the hidden route
+      // in this history entry so a switch between Board and Graph still restores the same bookmark after sign-in.
+      event.preventDefault();
+      const before = history.state?.kept;
+      const route = readRoute(before?.route ?? location.hash);
+      const kept = {
+        route: routeOf(view, null, route.zoom, route.into, route.project, route.projectZoom),
+        project: route.project ?? before?.project ?? null,
+      };
+      history.pushState({ kept }, "", `#${view}`);
+      applyRoute();
+    };
+  }
 }
 
 /**
@@ -2338,18 +2404,13 @@ function lockOut(refused = "") {
   // The key that was refused is forgotten. Another one, given in another tab while the answer was on its way,
   // was not refused and stays.
   if (refused) localStorage.removeItemIf(KEY_NAME, refused);
-  // Where the page was names groups and items of the plan. It leaves the address, and is kept with the entry in
-  // the browser's history for when the page is let in again, with the project that is selected now: the page is
-  // about to be emptied of it. A page that is locked out already has none to keep, and one that was loaded
-  // locked out goes by what was put away with its entry before.
-  if (state.loadedAt) projectLockedOut = state.project;
-  else if (projectLockedOut === undefined && history.state?.kept) projectLockedOut = history.state.kept.project ?? null;
+  // Where this entry was is kept with it in browser history, and nowhere a person or screen reader comes by.
   putRouteAway();
   // Nothing is loaded any more, and the header must go on saying that the page is not connected. Nor does the
   // page go on holding where it was, what was open or which project was selected: all of it is of the plan.
   Object.assign(state, { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, shown: null, drawn: null, item: null, have: null, further: null, troubled: false, openTitle: "", loadedAt: null, loadedMs: null, failed: true });
   $("instance").textContent = "";
-  Object.assign(state, { project: null, zoom: null, into: [], group: null, open: null, trail: [] });
+  Object.assign(state, { project: null, projectZoom: false, zoom: null, into: [], group: null, open: null, trail: [] });
   holdings = { of: null, held: new Map(), inside: new Map() };
   panelOpener = null;
   // What was typed into the filter is often a title or an ID, and is repeated in the line that says what is in
@@ -2428,7 +2489,11 @@ async function refresh() {
     // The service lets the page in: when it was locked out before, also before it was loaded again, it is
     // where it was then.
     comeBack();
-    if (state.project && !projects.some((p) => projectRef(p) === state.project)) state.project = null;
+    if (state.project && !projects.some((p) => projectRef(p) === state.project)) {
+      state.project = null;
+      state.projectZoom = false;
+      history.replaceState(history.state, "", routeOf(state.view, readRoute().open, state.zoom, state.into, null, false));
+    }
     // A group the board was in may be gone, or no longer hold the one after it in the trail.
     const left = settleZoom();
     $("instance").textContent = instance.name ?? "";
@@ -3605,7 +3670,7 @@ document.addEventListener("visibilitychange", () => !locked && (auto || state.fa
 
 {
   const route = readRoute();
-  Object.assign(state, { view: route.view, open: route.open, trail: history.state?.trail ?? [], zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null });
+  Object.assign(state, { view: route.view, open: route.open, trail: history.state?.trail ?? [], zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, project: route.project, projectZoom: route.projectZoom });
   linkViews();
 }
 setAutoRefresh(localStorage.getItem(AUTO_NAME) === "on");
