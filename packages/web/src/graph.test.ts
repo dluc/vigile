@@ -96,6 +96,10 @@ describe("graph elements", () => {
     const elements = buildElements(tasks, [project("AAA"), project("WEB")]);
     assert.equal(node(elements, "task:WEB-001").parent, "project:WEB", "the project its ID names is its home");
     assert.deepEqual(arrows(elements), ["project:AAA -> task:WEB-001 (contains)"]);
+
+    const reloaded = buildElements([task("WEB-001", { contained_in: ["WEB", "AAA"] })], [project("WEB"), project("AAA")]);
+    assert.equal(node(reloaded, "task:WEB-001").parent, "project:WEB", "reordered project links do not change the task's home");
+    assert.deepEqual(arrows(reloaded), arrows(elements), "reordered project links do not change the drawing");
   });
 
   it("draws a dependency on a whole project from that project, and leaves out projects with nothing to show", () => {
