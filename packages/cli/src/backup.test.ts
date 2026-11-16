@@ -4329,4 +4329,18 @@ describe("at the command line", () => {
     assert.deepEqual(one.automatic(), [named(START)]);
     assert.equal(one.service.backups.status().last_at, new Date(START).toISOString());
   });
+
+  it("gives two manual backups in the same second distinct millisecond names", async () => {
+    const one = await instance({ "backup.enabled": "false" });
+    await one.start();
+    await one.service.stop();
+    const first = takeBackup({ dataDir: one.data, folder: one.backups, at: new Date(START + 123) });
+    const second = takeBackup({ dataDir: one.data, folder: one.backups, at: new Date(START + 456) });
+    const [a, b] = [first.files[0]!.file, second.files[0]!.file];
+    assert.notEqual(a, b);
+    assert.match(a, /default-\d{8}-\d{6}-\d{3}\.sqlite$/);
+    assert.match(b, /default-\d{8}-\d{6}-\d{3}\.sqlite$/);
+    assert.equal(existsSync(a), true);
+    assert.equal(existsSync(b), true);
+  });
 });

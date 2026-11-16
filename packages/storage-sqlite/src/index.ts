@@ -1,8 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { DatabaseSync as Database } from "node:sqlite";
 import {
@@ -10,6 +10,7 @@ import {
   RevisionConflictError,
   assertCommitSize,
   assertTenantName,
+  isTenantName,
   type CommitRequest,
   type Head,
   type HistoryPage,
@@ -56,6 +57,103 @@ let found: typeof import("node:sqlite") | undefined;
 function openDatabase(file: string, options?: { readOnly?: boolean }): Database {
   const { DatabaseSync } = (found ??= needSqlite());
   return options ? new DatabaseSync(file, options) : new DatabaseSync(file);
+}
+
+interface ReadOnlyConnection {
+  db: Database;
+  close(): void;
+}
+
+/** A read-only maintenance connection can proceed when only the optional folder lock is unwritable. */
+function folderLockIsReadOnly(error: unknown): boolean {
+  const failure = error as NodeJS.ErrnoException & { errcode?: number };
+  const sqliteCode = failure.errcode ?? 0;
+  return ["EACCES", "EPERM", "EROFS"].includes(failure.code ?? "") || (sqliteCode & 0xff) === 8 || /read.?only|permission denied|unable to open database file/i.test(failure.message ?? "");
+}
+
+/**
+ * Read-only maintenance resolves symlinks before checking WAL sidecars. For a stopped Vigile data folder, hold
+ * the folder for the connection's lifetime before using immutable mode; this excludes a service starting during
+ * the read. If a service already holds the folder, use ordinary SQLite read-only WAL handling. A timestamped final
+ * backup name is published only after its content is complete, so it is also safe to read immutably.
+ */
+function openReadOnlyDatabase(file: string): ReadOnlyConnection {
+  const resolved = realpathSync(file);
+  const directory = dirname(resolved);
+  const hasOwner = existsSync(join(directory, OWNER_FILE));
+  const hasLegacyHolder = existsSync(join(directory, HOLD_FILE));
+  const isDataFolder = hasOwner || hasLegacyHolder;
+  // Avoid creating the other generation's lock file as a side effect of reading an old or partial folder. If
+  // existing markers are readable but unwritable, preserve ordinary read-only WAL access instead of failing the
+  // inspection; immutable mode still requires a successfully acquired lock.
+  let releaseFolder: (() => void) | null = null;
+  if (hasOwner && hasLegacyHolder) {
+    try {
+      // Maintenance should not wait behind an active service: one lock attempt is enough to choose between
+      // immutable access with exclusion and normal read-only WAL access.
+      releaseFolder = tryHoldFolder(directory);
+    } catch (error) {
+      if (!folderLockIsReadOnly(error)) throw error;
+    }
+  }
+  const sidecars = ["-wal", "-shm", "-journal"].map((suffix) => `${resolved}${suffix}`);
+  let before: Map<string, { dev: number; ino: number } | null>;
+  try {
+    before = new Map(sidecars.map((path) => {
+      const stat = lstatSync(path, { throwIfNoEntry: false });
+      return [path, stat?.isFile() ? { dev: stat.dev, ino: stat.ino } : null] as const;
+    }));
+  } catch (error) {
+    // The scan precedes opening SQLite, so there is no connection cleanup to release a lock if metadata fails.
+    releaseFolder?.();
+    throw error;
+  }
+  const committedBackup = /^[a-z][a-z0-9-]{0,62}-\d{8}-\d{6}-\d{3}(?:-auto)?\.sqlite$/.test(basename(resolved));
+  const immutable = !sidecars.some((path) => before.get(path) !== null) && (releaseFolder !== null || (!isDataFolder && committedBackup));
+  const created = new Map<string, { dev: number; ino: number }>();
+  const recordCreated = () => {
+    if (!releaseFolder) return;
+    for (const path of sidecars) {
+      if (before.get(path) !== null || created.has(path)) continue;
+      const current = lstatSync(path, { throwIfNoEntry: false });
+      if (current?.isFile()) created.set(path, { dev: current.dev, ino: current.ino });
+    }
+  };
+  const cleanup = () => {
+    if (!releaseFolder) return;
+    for (const [path, expected] of created) {
+      const current = lstatSync(path, { throwIfNoEntry: false });
+      if (current?.isFile() && current.dev === expected.dev && current.ino === expected.ino) rmSync(path);
+    }
+  };
+  let db: Database | undefined;
+  try {
+    if (immutable) {
+      const uri = pathToFileURL(resolved);
+      uri.searchParams.set("mode", "ro");
+      uri.searchParams.set("immutable", "1");
+      db = openDatabase(uri.href, { readOnly: true });
+    } else db = openDatabase(resolved, { readOnly: true });
+    recordCreated();
+  } catch (error) {
+    try { db?.close(); } finally {
+      try { cleanup(); } finally { releaseFolder?.(); }
+    }
+    throw error;
+  }
+  const opened = db;
+  if (!opened) throw new Error("The read-only database was not opened");
+  let closed = false;
+  return {
+    db: opened,
+    close() {
+      if (closed) return;
+      closed = true;
+      try { opened.close(); } finally {
+        try { cleanup(); } finally { releaseFolder?.(); }
+      }
+    },
+  };
 }
 /** SQLite's code for "another connection has the lock". */
 
@@ -126,6 +224,7 @@ export class SqliteStorage implements StorageAdapter {
     return readdirSync(this.directory)
       .filter((f) => f.endsWith(".sqlite"))
       .map((f) => f.slice(0, -".sqlite".length))
+      .filter(isTenantName)
       .sort();
   }
 
@@ -158,12 +257,21 @@ export class SqliteStorage implements StorageAdapter {
     return db;
   }
 
+  /** Reads never bootstrap a tenant: only a commit may create its file. */
+  private existingDb(tenant: string): Database | null {
+    if (this.closed) throw new Error("The store is closed");
+    const opened = this.open.get(tenant);
+    if (opened) return opened;
+    return existsSync(this.tenantFile(tenant)) ? this.db(tenant) : null;
+  }
+
   private head(db: Database): Head | null {
     return headIn(db);
   }
 
   async load(tenant: string): Promise<Snapshot | null> {
-    const db = this.db(tenant);
+    const db = this.existingDb(tenant);
+    if (!db) return null;
     db.exec("BEGIN");
     try {
       return snapshotIn(db);
@@ -262,26 +370,33 @@ export class SqliteStorage implements StorageAdapter {
   }
 
   async readRevision(tenant: string): Promise<number | null> {
-    const row = this.db(tenant).prepare("SELECT revision FROM head WHERE id = 1").get() as { revision: number } | undefined;
+    const db = this.existingDb(tenant);
+    if (!db) return null;
+    const row = db.prepare("SELECT revision FROM head WHERE id = 1").get() as { revision: number } | undefined;
     return row?.revision ?? null;
   }
 
   async readText(tenant: string, kind: string, id: string): Promise<string | null> {
-    const row = this.db(tenant).prepare("SELECT text FROM objects WHERE kind = ? AND id = ?").get(kind, id) as
+    const db = this.existingDb(tenant);
+    if (!db) return null;
+    const row = db.prepare("SELECT text FROM objects WHERE kind = ? AND id = ?").get(kind, id) as
       | { text: string | null }
       | undefined;
     return row?.text ?? null;
   }
 
   async readHistory(tenant: string, kind: string, id: string): Promise<HistoryRecord[]> {
-    const rows = this.db(tenant)
+    const db = this.existingDb(tenant);
+    if (!db) return [];
+    const rows = db
       .prepare("SELECT kind, id, revision, seq, at, actor, action, data FROM history WHERE kind = ? AND id = ? ORDER BY revision, seq")
       .all(kind, id) as unknown as Array<Omit<HistoryRecord, "data"> & { data: string }>;
     return rows.map((r) => ({ ...r, data: JSON.parse(r.data) as JsonObject }));
   }
 
   async readHistoryPage(tenant: string, kind: string, id: string, page: HistoryPageRequest): Promise<HistoryPage> {
-    const db = this.db(tenant);
+    const db = this.existingDb(tenant);
+    if (!db) return { records: [], total: 0 };
     const { before, sinceLast } = page;
     const columns = "SELECT kind, id, revision, seq, at, actor, action, data FROM history WHERE kind = ? AND id = ?";
     const latest = "ORDER BY revision DESC, seq DESC LIMIT ?";
@@ -753,7 +868,8 @@ export function tenantFiles(directory: string): Array<{ tenant: string; file: st
   return readdirSync(directory)
     .filter((f) => f.endsWith(".sqlite"))
     .sort()
-    .map((f) => ({ tenant: f.slice(0, -".sqlite".length), file: join(directory, f) }));
+    .map((f) => ({ tenant: f.slice(0, -".sqlite".length), file: join(directory, f) }))
+    .filter(({ tenant }) => isTenantName(tenant));
 }
 
 /**
@@ -762,9 +878,10 @@ export function tenantFiles(directory: string): Array<{ tenant: string; file: st
  */
 export function inspectTenantFile(tenant: string, file: string): TenantFileReport {
   const report: TenantFileReport = { tenant, file, ok: false, messages: [], format: null, revision: null };
-  let db: Database | undefined;
+  let connection: ReadOnlyConnection | undefined;
   try {
-    db = openDatabase(file, { readOnly: true });
+    connection = openReadOnlyDatabase(file);
+    const { db } = connection;
     const rows = db.prepare("PRAGMA integrity_check").all() as unknown as Array<{ integrity_check: string }>;
     report.messages = rows.map((r) => r.integrity_check);
     const head = db.prepare("SELECT format, revision FROM head WHERE id = 1").get() as { format: number; revision: number } | undefined;
@@ -782,7 +899,7 @@ export function inspectTenantFile(tenant: string, file: string): TenantFileRepor
   } catch (error) {
     report.messages.push((error as Error).message);
   } finally {
-    db?.close();
+    connection?.close();
   }
   return report;
 }
@@ -945,11 +1062,11 @@ function unreadable(db: Database): string | null {
  * is for whoever checks a file before it takes the place of the data.
  */
 export function historyOwners(file: string): Array<{ kind: string; id: string }> {
-  const db = openDatabase(file, { readOnly: true });
+  const connection = openReadOnlyDatabase(file);
   try {
-    return db.prepare("SELECT DISTINCT kind, id FROM history").all() as unknown as Array<{ kind: string; id: string }>;
+    return connection.db.prepare("SELECT DISTINCT kind, id FROM history").all() as unknown as Array<{ kind: string; id: string }>;
   } finally {
-    db.close();
+    connection.close();
   }
 }
 
@@ -958,17 +1075,18 @@ export function historyOwners(file: string): Array<{ kind: string; id: string }>
  * whoever has to know that a file will open as a plan before it is put in the place of the data.
  */
 export function readTenantFile(file: string): Snapshot | null {
-  const db = openDatabase(file, { readOnly: true });
+  const connection = openReadOnlyDatabase(file);
   try {
-    return snapshotIn(db);
+    return snapshotIn(connection.db);
   } finally {
-    db.close();
+    connection.close();
   }
 }
 
 /** Writes a consistent copy of a tenant file, through a read-only connection, while a service may be using it. */
 export function backupTenantFile(file: string, destination: string, expected?: { device: number; inode: number; staging?: { directory: string; file: string; device: number; inode: number; fileDevice: number; fileInode: number } }): void {
-  const db = openDatabase(file, { readOnly: true });
+  const connection = openReadOnlyDatabase(file);
+  const { db } = connection;
   let handle: number | null = null;
   let staged: number | null = null;
   let staging: string | null = null;
@@ -1036,7 +1154,7 @@ export function backupTenantFile(file: string, destination: string, expected?: {
         }
       }
     } finally {
-      db.close();
+      connection.close();
     }
     if (cleanupError) throw cleanupError;
   }

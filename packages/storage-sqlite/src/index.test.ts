@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
 import { once } from "node:events";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { it } from "node:test";
+import { it, mock } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { runStorageContractTests } from "@vigile/storage/contract-tests";
-import { SqliteStorage, backupTenantFile, flushFolder, folderIsHeld, holdFile, holdFolder, holdTenantFiles, needSqlite } from "./index.js";
+import { SqliteStorage, backupTenantFile, flushFolder, folderIsHeld, holdFile, holdFolder, holdTenantFiles, inspectTenantFile, needSqlite, readTenantFile, tenantFiles } from "./index.js";
 import { stopProcess } from "./stop-process.js";
 
 it("does not follow a replacement link when SQLite opens a prepared backup destination", { skip: process.platform === "win32" }, () => {
@@ -342,6 +344,236 @@ it("sqlite: keeps one file per tenant, checks integrity and writes a backup", as
     store.backup("default", copy);
     assert.equal(existsSync(copy), true);
   } finally {
+    await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("read-only storage calls for missing tenants leave the data folder untouched", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-sqlite-missing-text-"));
+  const store = new SqliteStorage({ directory });
+  try {
+    assert.equal(await store.readText("ghost", "task", "VIG-001"), null);
+    assert.equal(await store.load("missing-load"), null);
+    assert.equal(await store.readRevision("missing-revision"), null);
+    assert.deepEqual(await store.readHistory("missing-history", "task", "VIG-001"), []);
+    assert.deepEqual(await store.readHistoryPage("missing-page", "task", "VIG-001", { limit: 10 }), { records: [], total: 0 });
+    assert.deepEqual(readdirSync(directory), []);
+  } finally {
+    await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("lists only valid tenant filenames in the store and doctor scan", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-sqlite-tenant-names-"));
+  const store = new SqliteStorage({ directory });
+  try {
+    for (const name of ["default.sqlite", "Upper.sqlite", "has space.sqlite", "bad_name.sqlite", ".sqlite", "not-sqlite.db"]) {
+      writeFileSync(join(directory, name), "unrelated file");
+    }
+    assert.deepEqual(store.listTenants(), ["default"]);
+    assert.deepEqual(tenantFiles(directory), [{ tenant: "default", file: join(directory, "default.sqlite") }]);
+  } finally {
+    await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("inspecting and backing up a stopped tenant leaves no SQLite sidecars behind", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-sqlite-stopped-read-"));
+  const data = join(directory, "data");
+  const backups = join(directory, "backups");
+  mkdirSync(data);
+  mkdirSync(backups);
+  const file = join(data, "default.sqlite");
+  const store = new SqliteStorage({ directory: data });
+  try {
+    const release = holdFolder(data);
+    assert.ok(release);
+    release();
+    await store.commit("default", {
+      expectedRevision: null,
+      counters: { task: 1 },
+      changes: [{ op: "put_object", record: { kind: "task", id: "001", version: 1, data: {} }, text: "description" }],
+    });
+    await store.close();
+    const stoppedFiles = readdirSync(data).sort();
+    assert.ok(stoppedFiles.includes("default.sqlite"));
+    assert.equal(stoppedFiles.some((name) => /-wal$|-shm$|-journal$/.test(name)), false, "a cleanly stopped store has no WAL sidecars");
+
+    assert.equal(inspectTenantFile("default", file).ok, true);
+    assert.deepEqual(readdirSync(data).sort(), stoppedFiles, "doctor's file inspection is read-only");
+
+    backupTenantFile(file, join(backups, "copy.sqlite"));
+    assert.deepEqual(readdirSync(data).sort(), stoppedFiles, "a manual backup does not add WAL sidecars beside stopped data");
+    assert.deepEqual(readdirSync(backups), ["copy.sqlite"]);
+  } finally {
+    await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("releases a stopped-folder lock when checking its SQLite sidecars fails", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-sqlite-sidecar-failure-"));
+  const file = join(directory, "default.sqlite");
+  const store = new SqliteStorage({ directory });
+  try {
+    await store.commit("default", {
+      expectedRevision: null,
+      counters: { task: 1 },
+      changes: [{ op: "put_object", record: { kind: "task", id: "001", version: 1, data: {} }, text: "description" }],
+    });
+    await store.close();
+    const setupRelease = holdFolder(directory);
+    assert.ok(setupRelease);
+    setupRelease();
+    const resolvedFile = realpathSync(file);
+    const original = lstatSync;
+    mock.method(fs, "lstatSync", ((path: fs.PathLike, options?: Parameters<typeof lstatSync>[1]) => {
+      if (String(path) === `${resolvedFile}-wal`) throw new Error("injected sidecar scan failure");
+      return original(path, options);
+    }) as typeof lstatSync);
+    syncBuiltinESMExports();
+    try {
+      const report = inspectTenantFile("default", file);
+      assert.equal(report.ok, false);
+      assert.match(report.messages.join(" "), /injected sidecar scan failure/);
+    } finally {
+      mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+    assert.equal(folderIsHeld(directory), false, "inspection releases the lock even though its sidecar scan failed");
+    const release = holdFolder(directory);
+    assert.ok(release, "the next operation can acquire the folder");
+    release();
+  } finally {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+    await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("closes SQLite and releases the folder lock when recording new sidecars fails", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-sqlite-sidecar-record-failure-"));
+  const file = join(directory, "default.sqlite");
+  const store = new SqliteStorage({ directory });
+  try {
+    await store.commit("default", {
+      expectedRevision: null,
+      counters: { task: 1 },
+      changes: [{ op: "put_object", record: { kind: "task", id: "001", version: 1, data: {} }, text: "description" }],
+    });
+    await store.close();
+    const setupRelease = holdFolder(directory);
+    assert.ok(setupRelease);
+    setupRelease();
+    const resolvedFile = realpathSync(file);
+    const original = lstatSync;
+    let walScans = 0;
+    mock.method(fs, "lstatSync", ((path: fs.PathLike, options?: Parameters<typeof lstatSync>[1]) => {
+      if (String(path) === `${resolvedFile}-wal` && ++walScans >= 2) throw new Error("injected sidecar recording failure");
+      return original(path, options);
+    }) as typeof lstatSync);
+    syncBuiltinESMExports();
+    try {
+      const report = inspectTenantFile("default", file);
+      assert.equal(report.ok, false);
+      assert.match(report.messages.join(" "), /injected sidecar recording failure/);
+    } finally {
+      mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+    assert.equal(folderIsHeld(directory), false, "inspection releases the folder lock after connection setup fails");
+    const release = holdFolder(directory);
+    assert.ok(release, "the next operation can acquire the folder");
+    release();
+  } finally {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+    await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("keeps inspecting a readable tenant when its folder lock files are read-only", { skip: process.platform === "win32" }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-sqlite-readonly-locks-"));
+  const file = join(directory, "default.sqlite");
+  const store = new SqliteStorage({ directory });
+  try {
+    await store.commit("default", {
+      expectedRevision: null,
+      counters: { task: 1 },
+      changes: [{ op: "put_object", record: { kind: "task", id: "001", version: 1, data: {} }, text: "description" }],
+    });
+    await store.commit("default", {
+      expectedRevision: 1,
+      counters: { task: 1 },
+      changes: [{ op: "put_object", record: { kind: "task", id: "001", version: 2, data: { updated: true } } }],
+    });
+    const release = holdFolder(directory);
+    assert.ok(release);
+    release();
+    chmodSync(directory, 0o755);
+    chmodSync(file, 0o644);
+    for (const suffix of ["-wal", "-shm"]) if (existsSync(`${file}${suffix}`)) chmodSync(`${file}${suffix}`, 0o644);
+    chmodSync(join(directory, "vigile.owner"), 0o444);
+    chmodSync(join(directory, "vigile.hold"), 0o444);
+
+    const moduleUrl = new URL("./index.js", import.meta.url).href;
+    const script = `import { inspectTenantFile } from ${JSON.stringify(moduleUrl)}; console.log(JSON.stringify(inspectTenantFile("default", process.argv[1])));`;
+    const asUnprivileged = process.getuid?.() === 0 ? { uid: 65534, gid: 65534 } : {};
+    const output = execFileSync(process.execPath, ["--input-type=module", "--eval", script, file], { encoding: "utf8", ...asUnprivileged });
+    const report = JSON.parse(output.trim()) as ReturnType<typeof inspectTenantFile>;
+    assert.equal(report.ok, true, report.messages.join("; "));
+    assert.equal(report.revision, 2, "ordinary read-only WAL access includes the latest committed change");
+  } finally {
+    for (const name of ["vigile.owner", "vigile.hold"]) {
+      const lockFile = join(directory, name);
+      if (existsSync(lockFile)) chmodSync(lockFile, 0o600);
+    }
+    await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("read-only checks through a symlink include committed WAL records", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-sqlite-symlink-wal-"));
+  const data = join(directory, "data");
+  const alias = join(directory, "alias");
+  const backups = join(directory, "backups");
+  mkdirSync(data);
+  mkdirSync(alias);
+  mkdirSync(backups);
+  const store = new SqliteStorage({ directory: data });
+  let release: (() => void) | null = null;
+  try {
+    await store.commit("default", {
+      expectedRevision: null,
+      counters: { task: 1 },
+      changes: [{ op: "put_object", record: { kind: "task", id: "001", version: 1, data: {} }, text: "description" }],
+    });
+    await store.commit("default", {
+      expectedRevision: 1,
+      counters: { task: 1 },
+      changes: [{ op: "put_object", record: { kind: "task", id: "001", version: 2, data: { updated: true } } }],
+    });
+    release = holdFolder(data);
+    assert.ok(release, "simulate the running service's data-folder exclusion");
+    const source = join(data, "default.sqlite");
+    assert.ok(existsSync(`${source}-wal`), "the open writer has a WAL with the latest commit");
+    const throughAlias = join(alias, "default.sqlite");
+    symlinkSync(source, throughAlias);
+
+    assert.equal(inspectTenantFile("default", throughAlias).revision, 2);
+    const backup = join(backups, "copy.sqlite");
+    backupTenantFile(throughAlias, backup);
+    assert.equal(readTenantFile(backup)?.head.revision, 2);
+    release();
+    release = null;
+  } finally {
+    release?.();
     await store.close();
     rmSync(directory, { recursive: true, force: true });
   }
