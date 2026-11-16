@@ -258,7 +258,9 @@ the selected-project view. The board follows the filter letter by letter; the
 graph is drawn again once the typing pauses. Clicking a task card or a task or
 project in the graph opens a panel with its description, reason, links, details,
 status timeline and history. Project cards have no separate details button;
-open a project panel from its address or graph node. Following a link in the
+open a project panel from its address or graph node. Project cards use a progress
+bar without a finished-task count, in both expanded cards and the folded row.
+Following a link in the
 panel opens the linked item, with a button back to the one you came from. The
 item ID is a copy button. Moving over the description reveals a small copy
 button for its exact text; both controls also work from the keyboard and say

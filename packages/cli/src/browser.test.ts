@@ -999,12 +999,18 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     it("folds the projects into one small row, which still selects a project, and remembers it", async () => {
       await page.size(1280, 800);
       await load();
+      const expanded = await page.run<{ text: string; progress: Array<string | null> }>(`const cards = [...document.querySelectorAll('.project')]; return { text: cards.map((card) => card.textContent).join(' '), progress: cards.map((card) => card.querySelector('.bar[role="img"]')?.getAttribute('aria-label') ?? null) }`);
+      assert.doesNotMatch(expanded.text, /\d+\s+of\s+\d+\s+finished|\b\d+\/\d+\b/, "expanded project cards omit finished-task counts");
+      assert.deepEqual(expanded.progress, ["0% finished", "0% finished", "43% finished"], "the progress bars keep their accessible labels");
       const boardTop = () => page.run<number>("return Math.round(document.getElementById('board').getBoundingClientRect().top)");
       const open = await boardTop();
       assert.equal(await count(".project"), 3);
       await page.click("#projects-fold");
       assert.equal(await page.run<string | null>("return document.getElementById('projects-fold').getAttribute('aria-expanded')"), "false");
-      assert.deepEqual(await page.run<string[]>("return [...document.querySelectorAll('.project-chip')].map((c) => c.textContent)"), ["EMPTY0/0", "LONGNAME0/1", "WEB23/53"]);
+      const foldedProjects = await page.run<{ text: string[]; titles: string[]; progress: Array<string | null> }>(`const chips = [...document.querySelectorAll('.project-chip')]; return { text: chips.map((chip) => chip.textContent), titles: chips.map((chip) => chip.title), progress: chips.map((chip) => chip.querySelector('.bar[role="img"]')?.getAttribute('aria-label') ?? null) }`);
+      assert.deepEqual(foldedProjects.text, ["EMPTY", "LONGNAME", "WEB"], "folded project chips omit finished-task counts");
+      assert.ok(foldedProjects.titles.every((title) => !/finished/.test(title)), "folded project tooltips omit finished-task counts too");
+      assert.deepEqual(foldedProjects.progress, ["0% finished", "0% finished", "43% finished"], "folded progress bars keep their accessible labels");
       assert.equal(await count(".project"), 0);
       const folded = await boardTop();
       assert.ok(open - folded > 90, `the board moves up by the room the cards took: ${open - folded}px`);
@@ -8650,7 +8656,8 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await open("/#board?zoom=1");
         await page.run("[...document.querySelectorAll('#projects .project-main')].find((main) => main.querySelector('.project-id').textContent === 'ZOO').click()");
         assert.match(await text("#summary"), /^3 cards for 17 tasks/);
-        assert.match(await text("#projects .project.selected .project-foot"), /^1 of 17 finished/, "which is the project's own count");
+        assert.doesNotMatch(await text("#projects .project.selected .project-foot"), /\d+\s+of\s+\d+\s+finished/, "the project card omits its finished-task count");
+        assert.equal(await page.run<string>("return document.querySelector('#projects .project.selected .bar[role=img]')?.getAttribute('aria-label')"), "6% finished", "the progress bar retains an accessible label");
 
         // A group is deleted while the board is in a group below it: the board stays where it is, and the trail
         // keeps the group above, which still holds this one.
