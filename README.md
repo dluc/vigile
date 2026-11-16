@@ -288,8 +288,9 @@ shown. One compact, framed surface holds the minus, level, plus, current
 breadcrumb and “Leave group”; search uses the same height and shape beside it.
 The task counts stay in a small pill at the bottom-right of a wide window,
 clear of the board, and disappear when the window is too narrow; each column
-still shows its own count. The colored open-bugs and with-problems counts are
-filters: choose one to show the matching tasks, and projects with problems, then
+still shows its own count. Thin dividers separate the numeric counts. The
+colored open-bugs and with-problems counts are filters: choose one to show the
+matching tasks, and projects with problems, then
 clear it with the same clear button used for text search. The selected filter
 stays marked until cleared. If the problem filter hides a selected project, a
 separate control lets you clear that project scope. The selected filter and its

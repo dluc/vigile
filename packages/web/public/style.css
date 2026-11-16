@@ -337,7 +337,7 @@ body.graph-view:not(.focus):not(.graph-full) .filters > .summary:has(.summary-fi
 body.graph-view:not(.focus):not(.graph-full) .filters > .summary:has(.summary-filter[aria-pressed="true"], [data-clear-project-filter]) > :not(.summary-filter) { display: none; }
 .summary > span { display: inline-flex; align-items: center; gap: 0.25em; white-space: nowrap; }
 .summary > span:not(.tag) { min-height: 24px; }
-.summary > :is(span, button) + :is(span, button)::before { content: ""; width: 1px; height: 14px; margin: 0 10px; background: var(--line); }
+.summary > span + span::before { content: ""; width: 1px; height: 14px; margin: 0 10px; background: var(--line); }
 .summary b { color: var(--text); font-weight: 650; }
 .summary > .summary-filter { display: inline-flex; align-items: center; min-height: 0; padding: 3px 8px; border: 1px solid color-mix(in srgb, currentColor 28%, transparent); font: inherit; line-height: 1.2; cursor: pointer; }
 .summary > .summary-filter:hover { filter: brightness(0.94); }
