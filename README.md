@@ -263,21 +263,26 @@ by itself, with a note that its further pages are not shown.
 ![A task open in the panel: its state, description, reason, links grouped by kind, and details](images/task.webp)
 
 The board can be zoomed out for a high-level view. It opens with every task
-shown. One compact surface holds the minus, level, plus, current breadcrumb and
-“Leave group”; search and counts use the same height, spacing and shape beside
-it. A nonempty search has one clear button that removes the filter and keeps
-the keyboard in search. The minus and plus close or open one level of groups at a time, down to
+shown. One compact, framed surface holds the minus, level, plus, current
+breadcrumb and “Leave group”; search uses the same height and shape beside it.
+The task counts stay in a small pill at the bottom-right of a wide window,
+clear of the board, and disappear when the window is too narrow; each column
+still shows its own count. A nonempty search has one clear button that removes
+the filter and keeps the keyboard in search. The minus and plus close or open
+one level of groups at a time, down to
 "Top level": the groups that are
 in no other group, and the tasks that are in none. A group at the last open
 level is closed. Its card stands for the tasks it holds: it says how many of
 them are done, in progress and waiting, whether any has a problem, and, under
 the filter, how many match. It stands in the column of the group's own state.
-The accented "Zoom in" action, marked by a magnifier and plus, along the bottom of such a card, or "Show only
-this group" in the panel of any group, shows that group alone. The accented
-zoom controls appear before search. Their breadcrumb keeps each earlier step
+The accented "Zoom in" action, marked by a magnifier with a geometrically
+centered plus, runs along the bottom of such a card. It, or "Show only this
+group" in the panel of any group, shows that group alone. The accented zoom
+controls appear before search. Their breadcrumb keeps each earlier step
 reachable without adding another row of controls above the board. A
 task in two groups is on the board as soon as one of them is open, and is
-counted once. The counts above the board are those of the cards on it. With
+counted once. The counts in the bottom-right pill are those of the cards on
+the board. With
 auto-refresh on, a change to anything a closed group's card shows, also among
 the tasks it holds, rings that card; your own typing in the filter and your
 own zooming ring nothing. Where nothing holds anything, the position remains

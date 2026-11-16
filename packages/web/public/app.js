@@ -541,13 +541,28 @@ const columnShown = () => (columnMode() ? 50 : 12);
 /** With columns that scroll by themselves, the board is as tall as the room left in the window. */
 function fitBoard() {
   const board = $("board");
-  const on = columnMode() && state.view === "board";
+  const main = $("main");
+  const on = columnMode() && state.view === "board" && !board.hidden;
   document.body.classList.toggle("column-scroll", on);
-  if (!on || $("main").hidden) return board.style.removeProperty("--board-height");
+  if (!on || main.hidden) {
+    document.body.classList.remove("summary-docked");
+    main.style.removeProperty("--summary-room");
+    return board.style.removeProperty("--board-height");
+  }
   // Fitting the board can remove the page's scrollbar, which widens the page and can move the board up: measure again.
   for (let round = 0; round < 3; round++) {
+    // Measure the layout the dock would make, not whichever mode happened to be left by the preceding draw. At
+    // widths where an in-flow summary wraps the tools, measuring that wrap would make docking depend on history.
+    document.body.classList.add("summary-docked");
     const top = board.getBoundingClientRect().top + window.scrollY;
-    const height = `${Math.max(360, Math.floor(window.innerHeight - top - 12))}px`;
+    const summary = $("summary").getBoundingClientRect();
+    const bottomRoom = summary.height > 0 ? summary.height + 24 : 12;
+    const available = Math.floor(window.innerHeight - top - bottomRoom);
+    const docked = available >= 360;
+    document.body.classList.toggle("summary-docked", docked);
+    if (docked) main.style.setProperty("--summary-room", `${Math.ceil(bottomRoom)}px`);
+    else main.style.removeProperty("--summary-room");
+    const height = `${Math.max(360, available)}px`;
     if (board.style.getPropertyValue("--board-height") === height) break;
     board.style.setProperty("--board-height", height);
   }
@@ -2237,7 +2252,7 @@ function draw() {
   $("focus").setAttribute("aria-label", state.focus ? "Show everything above the board again" : "Hide everything above the board");
   $("graph-full").setAttribute("aria-pressed", String(state.full));
   $("graph-full").textContent = state.full ? "Leave full screen" : "Full screen";
-  $("board").hidden = graph;
+  $("board").hidden = graph || tasks.length === 0;
   showLights();
   $("bugs-apart").checked = state.bugsApart;
   $("column-scroll").checked = state.columnScroll;

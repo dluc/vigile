@@ -310,6 +310,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.equal(await count(".column[data-tone='bug']"), 1, "the choice survives a reload");
       await page.click("#view-graph");
       await graphReady();
+      assert.equal(await page.run<number>("return document.getElementById('summary').getBoundingClientRect().height"), 0, "board counts do not cover or intercept the graph");
       await page.click("#view-board");
       await page.until("return document.getElementById('board').getBoundingClientRect().height > 0", "the board");
       await setting("bugs-apart");
@@ -877,6 +878,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.type("zzz no such task");
       assert.equal(await count(".column"), 0);
       assert.equal(await text("#empty"), 'No task matches "zzz no such task".');
+      assert.deepEqual(await page.run("const e = document.getElementById('empty'); const r = e.getBoundingClientRect(); return { board: document.getElementById('board').getBoundingClientRect().height, summary: getComputedStyle(document.getElementById('summary')).position, hit: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === e }"), { board: 0, summary: "static", hit: true }, "the unused board collapses and the empty message stays visible and clickable");
       await layout("with a filter that matches nothing");
       await page.run("document.getElementById('filter').select()");
       await page.key("Backspace");
@@ -911,7 +913,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.equal(await count(".project"), 0);
       const folded = await boardTop();
       assert.ok(open - folded > 90, `the board moves up by the room the cards took: ${open - folded}px`);
-      assert.ok(await page.run<boolean>("const b = document.getElementById('board').getBoundingClientRect(); return b.bottom <= innerHeight && b.bottom > innerHeight - 30"), "and still reaches the bottom of the window");
+      assert.ok(await page.run<boolean>("const b = document.getElementById('board').getBoundingClientRect(); const s = document.getElementById('summary').getBoundingClientRect(); return Math.abs(s.top - b.bottom - 12) < 2"), "and still reaches to just above the docked counts");
       const row = await page.run<number>("return Math.round(document.getElementById('projects-section').getBoundingClientRect().height)");
       assert.ok(row <= 40, `the folded projects are one small row: ${row}px`);
       await page.click(".project-chip", 2);
@@ -954,7 +956,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       const fit = () => page.run<{ pageScrolls: boolean; bottom: number; height: number }>("const b = document.getElementById('board').getBoundingClientRect(); return { pageScrolls: document.documentElement.scrollHeight > innerHeight, bottom: Math.round(b.bottom), height: Math.round(b.height) }");
       const first = await fit();
       assert.equal(first.pageScrolls, false, "the page itself has nothing to scroll");
-      assert.ok(first.bottom <= 800 && first.bottom > 770, `the board reaches the bottom of the window: ${first.bottom}`);
+      assert.ok(await page.run<boolean>("const b = document.getElementById('board').getBoundingClientRect(); const s = document.getElementById('summary').getBoundingClientRect(); return Math.abs(s.top - b.bottom - 12) < 2"), `the board reaches to just above the docked counts: ${first.bottom}`);
 
       const next = "[...document.querySelectorAll('.column')].find((c) => c.querySelector('.column-head').childNodes[1].textContent === 'Next')";
       assert.deepEqual(await page.run(`const c = ${next}; const cards = c.querySelector('.cards'); return { cards: c.querySelectorAll('.card').length, scrolls: cards.scrollHeight > cards.clientHeight, more: Boolean(c.querySelector('.more')), inside: c.getBoundingClientRect().bottom <= document.getElementById('board').getBoundingClientRect().bottom }`), { cards: 23, scrolls: true, more: false, inside: true });
@@ -972,15 +974,28 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await layout("with columns that scroll by themselves");
 
       await page.size(1280, 1100);
-      await page.until("return Math.abs(document.getElementById('board').getBoundingClientRect().bottom - 1088) < 3", "the board to follow a taller window");
+      await page.until("const b = document.getElementById('board').getBoundingClientRect(); const s = document.getElementById('summary').getBoundingClientRect(); return Math.abs(s.top - b.bottom - 12) < 2", "the board to follow a taller window above the docked counts");
       await page.size(1280, 560);
       await page.until("return Math.round(document.getElementById('board').getBoundingClientRect().height) === 360", "the board to keep a usable height in a short window");
       assert.equal((await fit()).pageScrolls, true, "in a short window the page scrolls the little that is needed");
+      await page.run("scrollTo(0, document.documentElement.scrollHeight / 2)");
+      assert.deepEqual(
+        await page.run("const visible = [...document.querySelectorAll('.card')].filter((card) => { const r = card.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight; }).sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)[0]; const r = visible.getBoundingClientRect(); const hit = document.elementFromPoint(r.right - 8, r.top + Math.min(24, r.height / 2)); return { summary: getComputedStyle(document.getElementById('summary')).position, card: Boolean(hit?.closest('.card') === visible) }"),
+        { summary: "static", card: true },
+        "a short minimum-height board keeps counts in flow and its intermediate card clickable",
+      );
       await layout("with scrolling columns in a short window");
       await page.size(1280, 800);
 
       await setting("column-scroll");
       assert.deepEqual(await page.run(`const c = ${next}; return { cards: c.querySelectorAll('.card').length, more: c.querySelector('.more')?.textContent, pageScrolls: document.documentElement.scrollHeight > innerHeight, stored: localStorage.getItem('vigile.scroll') }`), { cards: 12, more: "Show all 23", pageScrolls: true, stored: "page" });
+      await page.run("scrollTo(0, document.documentElement.scrollHeight / 2)");
+      assert.deepEqual(
+        await page.run(`const visible = [...document.querySelectorAll('.card')].filter((card) => { const r = card.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight; }).sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)[0]; const r = visible.getBoundingClientRect(); const hit = document.elementFromPoint(r.right - 8, r.top + Math.min(24, r.height / 2)); return { summary: getComputedStyle(document.getElementById('summary')).position, card: Boolean(hit?.closest('.card') === visible) }`),
+        { summary: "static", card: true },
+        "page scrolling leaves an intermediate lower-right card visible and clickable",
+      );
+      await page.run("scrollTo(0, 0)");
       await load();
       assert.equal(await page.run<boolean>("return document.getElementById('column-scroll').checked"), false, "the choice survives a reload");
       await setting("column-scroll");
@@ -6483,7 +6498,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.deepEqual(await page.run("const heading = document.getElementById('board-heading'); const holder = heading.closest('.board-head'); const box = holder.getBoundingClientRect(); return [Math.round(box.width), Math.round(box.height), holder.classList.contains('visually-hidden'), heading.isConnected];"), [1, 1, true, true], "the Tasks heading remains in screen-reader heading navigation");
       assert.ok(folded.top - (await header()) <= 14, `the board starts right under the header: ${folded.top - (await header())}px below it`);
       assert.ok(800 - folded.bottom <= 14 && folded.bottom <= 800, "and reaches the bottom of the window");
-      assert.ok(folded.height - open.height > 250, `the board gained ${folded.height - open.height}px`);
+      assert.ok(folded.height - open.height > 240, `the board gained ${folded.height - open.height}px`);
       assert.equal(await page.run<boolean>("return document.documentElement.scrollHeight > innerHeight"), false);
       await layout("with everything above the board folded away");
 
@@ -6509,7 +6524,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.click(".project-main", 2);
       await page.click("#focus");
       assert.equal(await text("#scope .scope-text"), 'in WEB · Website relaunch, matching "Prerequisite"');
-      assert.ok((await place("board")).top - (await header()) < 50, "and the board is still near the top");
+      assert.ok((await place("board")).top - (await header()) < 80, "and the framed position control keeps the board near the top");
       await layout("folded away while a filter narrows the board");
       await page.click("#focus");
       assert.equal(await text("#scope .scope-text"), "in WEB · Website relaunch", "with the filter in sight, the line does not repeat it");
@@ -7590,6 +7605,11 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await open(`/#board?in=${z.alpha}&zoom=1`);
         await page.click("#focus");
         assert.equal(await text("#scope .scope-text"), `in all projects › ${z.alpha} · Alpha, top level only`);
+        assert.deepEqual(
+          await page.run(`const levels = document.getElementById('levels'); const style = getComputedStyle(levels); const search = getComputedStyle(document.querySelector('.search')); const badge = getComputedStyle(levels, '::before'); return [style.borderTopStyle, style.backgroundColor !== 'rgba(0, 0, 0, 0)', style.borderRadius === search.borderRadius, badge.content !== 'none' && badge.content !== 'normal'];`),
+          ["solid", true, true, true],
+          "full screen keeps the scoped breadcrumb framed as the same zoom control",
+        );
         await page.click('#scope .crumb[data-step="0"]');
         assert.equal(await text("#scope .scope-text"), "in all projects, top level only");
         assert.ok(await page.run<boolean>("return document.getElementById('levels').getBoundingClientRect().height > 0"), "the position line is there for the zoom alone");
@@ -7637,10 +7657,16 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
             document.getElementById('leave-group').parentElement.id,
             tools.map((tool) => tool.parentElement === filters),
             styles.every((style) => style.borderTopStyle === 'solid' && style.borderRadius === styles[0].borderRadius),
-            Math.max(...boxes.map((box) => box.top)) - Math.min(...boxes.map((box) => box.top)) < 2,
+            Math.abs(boxes[0].top - boxes[1].top) < 2,
+            Math.abs(innerHeight - boxes[2].bottom - 12) < 2 && Math.abs(innerWidth - boxes[2].right) < 30,
           ];
         `),
-        ["levels", "levels", [true, true, true], true, true],
+        ["levels", "levels", [true, true, true], true, true, true],
+      );
+      assert.deepEqual(
+        await page.run(`const icon = document.body.appendChild(Object.assign(document.createElement('span'), { className: 'zoom-into-icon' })); const plus = getComputedStyle(icon, '::before'); const answer = [plus.content, plus.width, plus.height, plus.backgroundImage.split('linear-gradient').length - 1]; icon.remove(); return answer;`),
+        ['""', "17px", "17px", 2],
+        "the card zoom icon draws its plus from two centered strokes instead of font metrics",
       );
       assert.equal(await page.run<boolean>("return document.getElementById('clear-filter').hidden"), true);
       assert.deepEqual(await page.run("const filter = document.getElementById('filter'); const clear = document.getElementById('clear-filter'); return [[...filter.labels].map((label) => label.textContent), clear.getAttribute('aria-label')];"), [["Filter tasks"], "Clear search"], "search and its clear action have independent names");
@@ -7657,16 +7683,22 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         ["", true, "filter"],
         "one click clears the filter and keeps the keyboard in search",
       );
+      await page.size(900, 844);
+      assert.deepEqual(
+        await page.run(`const filters = document.querySelector('.filters').getBoundingClientRect(); const search = document.querySelector('.search').getBoundingClientRect(); return [getComputedStyle(document.getElementById('summary')).display, Math.round(filters.height), Math.round(search.height)];`),
+        ["none", 48, 48],
+        "when all three tools no longer fit, counts disappear instead of making the filter row taller",
+      );
       await page.size(390, 844);
       assert.deepEqual(
         await page.run(`
           const filters = document.querySelector('.filters').getBoundingClientRect();
-          const tools = ['levels', 'filter', 'summary'].map((id) => document.getElementById(id).closest('.board-tool').getBoundingClientRect());
+          const tools = ['levels', 'filter'].map((id) => document.getElementById(id).closest('.board-tool').getBoundingClientRect());
           const scope = document.getElementById('scope').getBoundingClientRect();
           const zoom = document.getElementById('level-out').getBoundingClientRect();
-          return [tools.every((tool) => tool.width >= filters.width - 2), scope.top > zoom.top];
+          return [tools.every((tool) => tool.width >= filters.width - 2), scope.top > zoom.top, getComputedStyle(document.getElementById('summary')).display];
         `),
-        [true, true],
+        [true, true, "none"],
       );
       assert.deepEqual(page.errors, []);
     });
