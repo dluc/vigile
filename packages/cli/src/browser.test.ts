@@ -944,6 +944,39 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.equal(await count(".project-main"), 3);
     });
 
+    it("puts project problems at the bottom left and zoom at the bottom right", async () => {
+      await page.size(1280, 900);
+      await load();
+      const previousFold = await page.run<string | null>("return localStorage.getItem('vigile.projects')");
+      const status = (await run("get", { kind: "project", id: "EMPTY" })).status as string;
+      const setStatus = async (value: string) => run("set_project_status", {
+        id: "EMPTY",
+        status: value,
+        version: (await run("get", { kind: "project", id: "EMPTY" })).version,
+      });
+      try {
+        await setStatus("broken");
+        await page.run("localStorage.setItem('vigile.projects', 'open')");
+        for (const [width, height, phone] of [[1280, 900, false], [360, 780, true]] as const) {
+          await page.size(width, height, phone);
+          await load();
+          await page.until(
+            "return [...document.querySelectorAll('#projects .project')].find((card) => card.querySelector('.project-id')?.textContent === 'EMPTY')?.querySelector('.project-foot .tag.warn')?.textContent === '⚠ problems'",
+            `the warning on the ${phone ? "phone-width" : "wide"} project card`,
+          );
+          const positions = await page.run<{ problemLeft: number; footerLeft: number; zoomRight: number; footerRight: number; cardBottom: number; footerBottom: number }>(`const card = [...document.querySelectorAll('#projects .project')].find((item) => item.querySelector('.project-id')?.textContent === 'EMPTY'); const footer = card.querySelector('.project-foot'); const problem = footer.querySelector('.tag.warn').getBoundingClientRect(); const zoom = footer.querySelector('.project-zoom').getBoundingClientRect(); const foot = footer.getBoundingClientRect(); return { problemLeft: problem.left, footerLeft: foot.left, zoomRight: zoom.right, footerRight: foot.right, cardBottom: card.getBoundingClientRect().bottom, footerBottom: foot.bottom }`);
+          assert.ok(Math.abs(positions.problemLeft - positions.footerLeft) <= 1, "the problem indicator starts at the footer's left edge");
+          assert.ok(Math.abs(positions.zoomRight - positions.footerRight) <= 1, "the zoom button ends at the footer's right edge");
+          assert.ok(positions.cardBottom - positions.footerBottom >= 12 && positions.cardBottom - positions.footerBottom <= 16, "the footer stays at the bottom of the card");
+        }
+      } finally {
+        await setStatus(status);
+        await page.run(`if (${JSON.stringify(previousFold)} === null) localStorage.removeItem('vigile.projects'); else localStorage.setItem('vigile.projects', ${JSON.stringify(previousFold)})`);
+        await page.size(1280, 900);
+        await load();
+      }
+    });
+
     it("moves keyboard focus to Leave project after zooming from expanded or folded projects", async () => {
       await load();
       const previousFold = await page.run<string | null>("return localStorage.getItem('vigile.projects')");

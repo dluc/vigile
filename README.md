@@ -260,6 +260,8 @@ project in the graph opens a panel with its description, reason, links, details,
 status timeline and history. Project cards have no separate details button;
 open a project panel from its address or graph node. Project cards use a progress
 bar without a finished-task count, in both expanded cards and the folded row.
+On expanded cards, the problem indicator is at the bottom left and "Zoom in" is
+at the bottom right.
 Following a link in the
 panel opens the linked item, with a button back to the one you came from. The
 item ID is a copy button. Moving over the description reveals a small copy

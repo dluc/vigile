@@ -489,10 +489,8 @@ function renderProjects() {
       el(
         "div",
         { class: "project-foot" },
-        el("span", { class: "project-actions" },
-          zoomButton(),
-          project.has_problems && el("span", { class: "tag warn" }, "⚠ problems"),
-        ),
+        project.has_problems && el("span", { class: "tag warn" }, "⚠ problems"),
+        el("span", { class: "project-actions" }, zoomButton()),
       ),
     );
   });
