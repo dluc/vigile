@@ -225,7 +225,7 @@ const isOpenTrouble = (task) => isTrouble(task) && !FINISHED.includes(task.statu
  */
 const boardColumn = (task) => (state.bugsApart && isOpenTrouble(task) ? "trouble" : columnOf(task));
 
-const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
+const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
 
 /** One worker per task. Leaving a panel cancels unsent clicks, but never creates a rival for a write in flight. */
 const priorityWorkers = new Map();
@@ -312,6 +312,17 @@ function tasksInView() {
 /** What is typed in the filter, as it is compared. */
 const filterText = () => state.filter.trim().toLowerCase();
 
+/** A selected summary pill narrows both views without turning its label into a text-search query. */
+function matchesSummaryFilter(task) {
+  if (state.summaryFilter === "trouble") return isOpenTrouble(task);
+  if (state.summaryFilter === "problems") return task.has_problems;
+  return true;
+}
+
+function matchesVisibleTask(task, text = filterText()) {
+  return matchesFilter(task, text) && matchesSummaryFilter(task);
+}
+
 function matchesFilter(task, text = filterText()) {
   if (!text) return true;
   return [task.id, task.title, ...task.assigned_to].some((value) => value.toLowerCase().includes(text));
@@ -382,7 +393,7 @@ function insideOf(task, held, text) {
     if (columnOf(inner) === "waiting") found.waiting++;
     if (inner.has_problems) found.problems++;
     if (isOpenTrouble(inner)) found.trouble++;
-    if (text && matchesFilter(inner, text)) found.matching++;
+    if ((text || state.summaryFilter) && matchesVisibleTask(inner, text)) found.matching++;
     for (const deeper of held.get(inner.id) ?? []) if (!seen.has(deeper.id)) queue.push(deeper);
   }
   return found;
@@ -405,7 +416,7 @@ function boardAt(tasks) {
     const stands = level !== null && depth.get(task.id) === level && (held.get(task.id) ?? []).some((inner) => depth.get(inner.id) > level);
     const inside = stands ? insideOf(task, held, text) : null;
     if (inside) closed.set(task.id, inside);
-    if (matchesFilter(task, text) || inside?.matching) cards.push(task);
+    if (matchesVisibleTask(task, text) || inside?.matching) cards.push(task);
   }
   return { cards, closed, level, deepest };
 }
@@ -422,7 +433,7 @@ function renderProjects() {
   $("projects-section").classList.toggle("folded", state.projectsFolded);
   $("projects-fold").setAttribute("aria-expanded", String(!state.projectsFolded));
   $("projects-chevron").textContent = state.projectsFolded ? "▸" : "▾";
-  const visibleProjects = state.projectZoom ? [] : state.projects;
+  const visibleProjects = state.projectZoom ? [] : state.projects.filter((project) => state.summaryFilter !== "problems" || project.has_problems);
   const cards = visibleProjects.map((project) => {
     const { finished, total } = project.progress;
     const percent = total ? Math.round((finished / total) * 100) : 0;
@@ -494,7 +505,7 @@ function renderProjects() {
       ),
     );
   });
-  $("projects").replaceChildren(...(cards.length ? cards : [el("p", { class: "empty" }, "No projects yet.")]));
+  $("projects").replaceChildren(...(cards.length ? cards : [el("p", { class: "empty" }, state.summaryFilter === "problems" ? "No projects with problems." : "No projects yet.")]));
 }
 
 /** The first few of a list, then how many more there are, so one card never grows without limit. */
@@ -614,7 +625,7 @@ function readCollapsedColumns() {
 /** The columns that are being collapsed or opened, while the board is drawn again for it. */
 let folding = null;
 /** What the board is narrowed to: the project, the group, the filter, and whether bugs have a column of their own. Whatever else comes to narrow it belongs here. */
-const boardScope = () => JSON.stringify([state.project, state.group, state.filter.trim().toLowerCase(), state.bugsApart, state.level]);
+const boardScope = () => JSON.stringify([state.project, state.group, state.filter.trim().toLowerCase(), state.summaryFilter, state.bugsApart, state.level]);
 
 /**
  * The board as it was last drawn, whether or not a card is drawn for each task: what it is narrowed to, what its
@@ -870,11 +881,24 @@ function renderBoard(tasks, closed) {
  * On a board that is zoomed out the cards are fewer than the tasks, and the first count says how many tasks they
  * stand for: every task in view that matches the filter, each counted once however many groups hold it.
  */
-function renderSummary(tasks, all) {
+function renderSummary(tasks, all, visibleTasks = tasks) {
+  const active = document.activeElement;
+  const focusedFilter = active?.closest?.("#summary [data-summary-filter]")?.dataset.summaryFilter;
+  const focusedClear = Boolean(active?.closest?.("#summary [data-clear-summary-filter]"));
+  const focusedProjectClear = Boolean(active?.closest?.("#summary [data-clear-project-filter]"));
   // Counted as the board shows them: with bugs in a column of their own, they are not also among the waiting or the next.
   const count = (key) => tasks.filter((t) => boardColumn(t) === key).length;
-  const trouble = tasks.filter(isOpenTrouble).length;
-  const problems = tasks.filter((t) => t.has_problems).length;
+  const trouble = visibleTasks.filter(isOpenTrouble).length;
+  const problems = visibleTasks.filter((t) => t.has_problems).length + (state.group ? 0 : state.projects.filter((project) => project.has_problems && (!state.project || projectRef(project) === state.project)).length);
+  const summaryFilter = (key, count, text, tone) => el("button", {
+    class: `tag ${tone} summary-filter`,
+    type: "button",
+    "data-summary-filter": key,
+    "aria-pressed": String(state.summaryFilter === key),
+    "aria-label": `${count} ${text}${state.summaryFilter === key ? "; selected filter" : "; filter board"}`,
+    title: state.summaryFilter === key ? `Clear ${text} filter` : `Show ${text}`,
+    onclick: () => selectSummaryFilter(key),
+  }, `${count} ${text}`);
   $("summary").replaceChildren(...present([
     state.level && state.view === "board"
       ? el("span", {}, el("b", {}, String(tasks.length)), tasks.length === 1 ? " card for " : " cards for ", el("b", {}, String(all)), all === 1 ? " task" : " tasks")
@@ -883,23 +907,37 @@ function renderSummary(tasks, all) {
     el("span", {}, el("b", {}, String(count("next"))), " next"),
     el("span", {}, el("b", {}, String(count("waiting"))), " waiting"),
     el("span", {}, el("b", {}, String(count("done"))), " done"),
-    trouble ? el("span", { class: "tag trouble" }, `${trouble} open ${trouble === 1 ? "bug, issue or incident" : "bugs, issues and incidents"}`) : null,
-    problems ? el("span", { class: "tag warn" }, `⚠ ${problems} with problems`) : null,
+    trouble || state.summaryFilter === "trouble" ? summaryFilter("trouble", trouble, trouble === 1 ? "open bug, issue or incident" : "open bugs, issues and incidents", "trouble") : null,
+    problems || state.summaryFilter === "problems" ? summaryFilter("problems", problems, problems === 1 ? "item with problems" : "items with problems", "warn") : null,
+    state.summaryFilter && el("button", { class: "tag summary-filter summary-filter-clear", type: "button", "data-clear-summary-filter": "", "aria-label": "Clear selected summary filter", title: "Clear selected summary filter", onclick: () => selectSummaryFilter(state.summaryFilter) }, "Clear filter"),
+    state.project && !state.projects.some((project) => projectRef(project) === state.project && (state.summaryFilter !== "problems" || project.has_problems))
+      ? el("button", { class: "tag summary-filter summary-project-clear", type: "button", "data-clear-project-filter": "", "aria-label": `Clear selected project filter ${state.project}`, title: "Clear selected project filter", onclick: clearProjectFilter }, `Clear ${state.project} project filter`)
+      : null,
   ]));
+  syncFilterClear();
+  if (active && !$("summary").contains(active) && (focusedFilter || focusedClear || focusedProjectClear)) {
+    const target = focusedProjectClear
+      ? $("summary").querySelector("[data-clear-project-filter]")
+      : focusedClear
+        ? $("summary").querySelector("[data-clear-summary-filter]")
+        : $("summary").querySelector(`[data-summary-filter="${focusedFilter}"]`);
+    focusVisible(target, $("filter"));
+  }
   const project = state.projects.find((p) => projectRef(p) === state.project);
-  const top = project ? `${project.id} · ${project.title}` : "all projects";
+  const top = project ? `${project.id} · ${project.title}` : state.project ? `${state.project} · project no longer available` : "all projects";
   // The groups that were zoomed into, one inside the other: the last is the one in view.
   const steps = state.into.map((id) => ({ id, title: state.byId.get(id)?.title ?? "" }));
   // With the top section folded away the filter and the zoom are out of sight, so the line that says what is
   // shown names them too.
   const filter = state.focus && state.filter.trim() ? `, matching "${state.filter.trim()}"` : "";
+  const summary = state.summaryFilter ? `, showing ${state.summaryFilter === "trouble" ? "open bugs, issues and incidents" : "items with problems"}` : "";
   const zoom = state.focus && state.view === "board" && state.level ? `, ${state.level === 1 ? "top level only" : `${state.level} levels deep`}` : "";
   // Each step of the trail but the last leads back out to it. Of a long trail the last steps are shown, and of
   // the ones on the way only the ID, the project's too, so that the place the board is in is not pushed out of
   // the line. The line's full text, which is shown on request, names the same steps with their titles: a trail
   // is as long as the plan is deep, and a plan may be a thousand deep.
   const shown = steps.slice(-TRAIL_SHOWN);
-  const where = [top, ...(steps.length > shown.length ? ["…"] : []), ...shown.map((step) => `${step.id} · ${step.title}`)].join(" › ") + filter + zoom;
+  const where = [top, ...(steps.length > shown.length ? ["…"] : []), ...shown.map((step) => `${step.id} · ${step.title}`)].join(" › ") + filter + summary + zoom;
   // Each of them also says which group it names, for the keyboard: see keyboardPlace.
   const out = (count, text, title) => el("button", { class: "crumb", type: "button", "data-step": String(count), "data-group": steps[count - 1]?.id, title, onclick: () => zoomOut(count) }, text);
   $("scope").replaceChildren(
@@ -926,6 +964,31 @@ function renderSummary(tasks, all) {
   leave.dataset.group = steps.at(-1)?.id ?? "";
   leave.textContent = state.projectZoom && steps.length === 0 ? "↑ Leave project" : "↑ Leave group";
   leave.title = steps.length > 1 ? `Back out to ${steps.at(-2).id}` : state.projectZoom && steps.length === 0 ? "Return to all projects with this project selected" : "Show everything here again";
+}
+
+/** Keeps the existing clear-search control usable for both typed and summary-selected filters. */
+function syncFilterClear() {
+  const clear = $("clear-filter");
+  const active = Boolean(state.filter || state.summaryFilter);
+  const filters = [
+    state.summaryFilter && `${state.summaryFilter === "trouble" ? "open bugs" : "with problems"} filter`,
+    state.filter && "search",
+  ].filter(Boolean);
+  const label = filters.length ? `Clear ${filters.join(" and ")}` : "Clear search";
+  clear.hidden = !active;
+  clear.setAttribute("aria-label", label);
+  clear.title = label;
+}
+
+function selectSummaryFilter(filter) {
+  state.summaryFilter = state.summaryFilter === filter ? null : filter;
+  render();
+  focusVisible($("summary").querySelector(`[data-summary-filter="${filter}"]`), $("filter"));
+}
+
+function clearProjectFilter() {
+  go(state.view, state.open, state.trail, { project: null, projectZoom: false });
+  focusVisible(() => $("summary").querySelector("[data-clear-summary-filter]"), $("filter"));
 }
 
 /**
@@ -1994,7 +2057,7 @@ async function renderGraphView(tasks) {
   if (!shown.length) return void showGraphStatus(null);
   // Only the projects in view are drawn: all of them, or the one that is selected.
   const projects = state.project ? state.projects.filter((p) => projectRef(p) === state.project) : state.projects;
-  const scope = JSON.stringify([state.project, state.group, state.filter.trim().toLowerCase(), state.hideFinished, state.collapsed]);
+  const scope = JSON.stringify([state.project, state.group, state.filter.trim().toLowerCase(), state.summaryFilter, state.hideFinished, state.collapsed]);
   // A large graph is drawn when the person has said they want large ones and now asks for another. One that is
   // there stays as it is when the plan changes under it: with auto-refresh on, that could be every few seconds.
   const large = scope === graphScope ? "keep" : state.large ? "draw" : "clear";
@@ -2131,6 +2194,12 @@ function keyboardPlace() {
     const key = at.closest(".column").dataset.key;
     return ofBoard(() => [...$("board").querySelectorAll(".column")].find((column) => column.dataset.key === key)?.querySelector(".more"));
   }
+  if (at.matches("#summary [data-summary-filter]")) {
+    const filter = at.dataset.summaryFilter;
+    return () => $("summary").querySelector(`[data-summary-filter="${filter}"]`);
+  }
+  if (at.matches("#summary [data-clear-summary-filter]")) return () => $("summary").querySelector("[data-clear-summary-filter]");
+  if (at.matches("#summary [data-clear-project-filter]")) return () => $("summary").querySelector("[data-clear-project-filter]");
   // The board's zoom and the graph's tools are not drawn again, and are out of sight in the other view, or
   // where there is nothing to zoom.
   if (at.closest("#levels, #graph-panel")) return ofBoard(() => (at.isConnected ? at : null));
@@ -2271,7 +2340,7 @@ function draw() {
   renderProjects();
   const inView = tasksInView();
   const text = filterText();
-  const tasks = inView.filter((task) => matchesFilter(task, text));
+  const tasks = inView.filter((task) => matchesVisibleTask(task, text));
   const graph = state.view === "graph";
   // The zoom is the board's: the graph has its own way of showing groups closed, and draws every task in view.
   const board = graph ? null : boardAt(inView);
@@ -2279,11 +2348,13 @@ function draw() {
   state.level = board ? board.level : null;
   state.deepest = board ? board.deepest : 0;
   state.closed = board ? board.closed : null;
-  renderSummary(board ? board.cards : tasks, tasks.length);
+  renderSummary(board ? board.cards : tasks, tasks.length, tasks);
   showLevels(board);
   $("empty").hidden = tasks.length > 0;
   $("empty").textContent =
     state.tasks.length === 0 ? "No tasks yet."
+    : state.summaryFilter === "trouble" && !state.filter.trim() ? "No open bugs, issues or incidents in this view."
+    : state.summaryFilter === "problems" && !state.filter.trim() ? "No tasks with problems in this view."
     : state.filter.trim() ? `No task matches "${state.filter.trim()}".`
     : state.group ? `${state.group} holds no tasks${state.project ? " in this project" : ""}.`
     : "No tasks in this project.";
@@ -2292,7 +2363,7 @@ function draw() {
   document.body.classList.toggle("graph-view", graph);
   document.body.classList.toggle("graph-full", graph && state.full);
   document.body.classList.toggle("focus", state.focus);
-  document.body.classList.toggle("scoped", Boolean(state.project || state.group || state.filter.trim() || state.level));
+  document.body.classList.toggle("scoped", Boolean(state.project || state.group || state.filter.trim() || state.summaryFilter || state.level));
   $("focus").setAttribute("aria-pressed", String(state.focus));
   $("focus").setAttribute("aria-label", state.focus ? "Show everything above the board again" : "Hide everything above the board");
   $("graph-full").setAttribute("aria-pressed", String(state.full));
@@ -2568,13 +2639,14 @@ async function refresh() {
 
 $("filter").addEventListener("input", (event) => {
   state.filter = event.target.value;
-  $("clear-filter").hidden = !state.filter;
+  syncFilterClear();
   clearTimeout(typing);
   typing = state.view === "graph" ? setTimeout(() => ((typing = null), render()), TYPING_PAUSE_MS) : null;
   render();
 });
 $("clear-filter").addEventListener("click", () => {
   const filter = $("filter");
+  state.summaryFilter = null;
   filter.value = "";
   filter.dispatchEvent(new Event("input", { bubbles: true }));
   filter.focus({ preventScroll: true });
