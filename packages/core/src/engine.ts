@@ -272,6 +272,7 @@ export class Engine {
       unchangedSince: (ref) => this.unchanged.since(ref),
       readHistory: (ref) => this.history(ref),
       readHistoryPage: (ref, before) => this.historyPage(ref, before),
+      readHistoryFeedPage: (page) => this.storage.readHistoryFeedPage(this.tenant, page),
       readTimeline: (ref) => this.timeline(ref),
       readTimelinePage: (ref, before) => this.timelinePage(ref, before),
     };

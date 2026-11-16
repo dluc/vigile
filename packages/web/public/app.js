@@ -208,6 +208,18 @@ const STATUS_TONE = {
   in_preview: "review", broken: "stop", paused: "idle", draft: "idle", cancelled: "idle",
 };
 
+const HISTORY_ACTIONS = {
+  created: "Created",
+  status_changed: "Status changed",
+  updated: "Updated",
+  link_added: "Link added",
+  link_removed: "Link removed",
+  deleted: "Deleted",
+  restored: "Restored",
+  key_reset: "Key reset",
+  timestamp_overridden: "Timestamp overridden",
+};
+
 const label = (status) => status.replaceAll("_", " ");
 
 function columnOf(task) {
@@ -225,7 +237,9 @@ const isOpenTrouble = (task) => isTrouble(task) && !FINISHED.includes(task.statu
  */
 const boardColumn = (task) => (state.bugsApart && isOpenTrouble(task) ? "trouble" : columnOf(task));
 
-const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
+const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, historyFilters: { kind: null, actor: null, action: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
+let historyTurn = 0;
+let historyLoadingTurn = 0;
 
 /** One worker per task. Leaving a panel cancels unsent clicks, but never creates a rival for a write in flight. */
 const priorityWorkers = new Map();
@@ -433,7 +447,8 @@ function renderProjects() {
   $("projects-section").classList.toggle("folded", state.projectsFolded);
   $("projects-fold").setAttribute("aria-expanded", String(!state.projectsFolded));
   $("projects-chevron").textContent = state.projectsFolded ? "▸" : "▾";
-  const visibleProjects = state.projectZoom ? [] : state.projects.filter((project) => state.summaryFilter !== "problems" || project.has_problems);
+  const filterProjectsWithProblems = state.view !== "history" && state.summaryFilter === "problems";
+  const visibleProjects = state.projectZoom ? [] : state.projects.filter((project) => !filterProjectsWithProblems || project.has_problems);
   const cards = visibleProjects.map((project) => {
     const { finished, total } = project.progress;
     const percent = total ? Math.round((finished / total) * 100) : 0;
@@ -505,7 +520,7 @@ function renderProjects() {
       ),
     );
   });
-  $("projects").replaceChildren(...(cards.length ? cards : [el("p", { class: "empty" }, state.summaryFilter === "problems" ? "No projects with problems." : "No projects yet.")]));
+  $("projects").replaceChildren(...(cards.length ? cards : [el("p", { class: "empty" }, filterProjectsWithProblems ? "No projects with problems." : "No projects yet.")]));
 }
 
 /** The first few of a list, then how many more there are, so one card never grows without limit. */
@@ -1000,6 +1015,13 @@ const TRAIL_SHOWN = 3;
 
 const when = (iso) => new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
+/** A bookmarked History date must be a real calendar date, not merely something the Date parser tolerates. */
+function validHistoryDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value ? null : value;
+}
+
 /**
  * The address after the # names the view and, when one is open, the item: #board, #graph/VIG-041,
  * #board/project:VIG. So an item can be bookmarked, and the browser's Back returns to the one before it.
@@ -1008,7 +1030,7 @@ const when = (iso) => new Date(iso).toLocaleString(undefined, { dateStyle: "medi
  * with everything shown. #board?in=VIG-003/VIG-012&zoom=1 is the top level of VIG-012, reached through VIG-003.
  */
 function readRoute(address = location.hash) {
-  const [, view, item, asks] = /^#(board|graph)(?:\/([^?]*))?(?:\?(.*))?$/.exec(address) ?? [];
+  const [, view, item, asks] = /^#(board|graph|history)(?:\/([^?]*))?(?:\?(.*))?$/.exec(address) ?? [];
   // An address that was cut off or mistyped names no item, or no group: the view is shown without it.
   const decoded = (text) => {
     try {
@@ -1027,15 +1049,36 @@ function readRoute(address = location.hash) {
   // A whole number of levels, from 1 up, written in digits alone: as many as a plan can be deep, so there is no
   // limit short of the numbers that can be counted with exactly. Anything else is no zoom.
   const levels = /^[1-9]\d*$/.test(asked.get("zoom") ?? "") ? Number(asked.get("zoom")) : NaN;
-  const zoom = Number.isSafeInteger(levels) ? levels : null;
-  const into = (asked.get("in") ?? "").split("/").map(decoded).filter(Boolean);
+  const zoom = view !== "history" && Number.isSafeInteger(levels) ? levels : null;
+  const into = view === "history" ? [] : (asked.get("in") ?? "").split("/").map(decoded).filter(Boolean);
   const project = decoded(asked.get("project") ?? "") || null;
-  const projectZoom = Boolean(project && asked.get("projectZoom") === "1");
-  return { view: view ?? "board", open: !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : { kind: "task", id }, zoom, into, project, projectZoom };
+  const projectZoom = view !== "history" && Boolean(project && asked.get("projectZoom") === "1");
+  const historyFilters = {
+    kind: ["project", "task", "user"].includes(asked.get("kind")) ? asked.get("kind") : null,
+    actor: decoded(asked.get("actor") ?? "") || null,
+    action: decoded(asked.get("action") ?? "") || null,
+    from: validHistoryDate(decoded(asked.get("from") ?? "")),
+    to: validHistoryDate(decoded(asked.get("to") ?? "")),
+  };
+  if (historyFilters.from && historyFilters.to && historyFilters.from > historyFilters.to) {
+    historyFilters.from = null;
+    historyFilters.to = null;
+  }
+  return { view: view ?? "board", open: !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : { kind: "task", id }, zoom, into, project, projectZoom, historyFilters };
 }
 
-function routeOf(view, open, zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom) {
-  const asks = [project && `project=${encodeURIComponent(project)}`, into.length > 0 && `in=${into.map(encodeURIComponent).join("/")}`, zoom !== null && `zoom=${zoom}`, projectZoom && "projectZoom=1"].filter(Boolean).join("&");
+function routeOf(view, open, zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom, historyFilters = state.historyFilters) {
+  const asks = [
+    project && `project=${encodeURIComponent(project)}`,
+    view === "history" && historyFilters.kind && `kind=${encodeURIComponent(historyFilters.kind)}`,
+    view === "history" && historyFilters.actor && `actor=${encodeURIComponent(historyFilters.actor)}`,
+    view === "history" && historyFilters.action && `action=${encodeURIComponent(historyFilters.action)}`,
+    view === "history" && historyFilters.from && `from=${encodeURIComponent(historyFilters.from)}`,
+    view === "history" && historyFilters.to && `to=${encodeURIComponent(historyFilters.to)}`,
+    view !== "history" && into.length > 0 && `in=${into.map(encodeURIComponent).join("/")}`,
+    view !== "history" && zoom !== null && `zoom=${zoom}`,
+    view !== "history" && projectZoom && "projectZoom=1",
+  ].filter(Boolean).join("&");
   return `#${view}${open ? `/${open.kind === "project" ? "project:" : ""}${encodeURIComponent(open.id)}` : ""}${asks ? `?${asks}` : ""}`;
 }
 /** A task ID as the service stores it, for comparing supported bookmark spellings without losing large digits. */
@@ -1052,8 +1095,8 @@ const sameTrail = (a, b) => a.length === b.length && a.every((id, at) => id === 
  * Goes to an address as a new entry in the browser's history. The entry remembers the items the panel came
  * through. The zoom stays as it is unless another one is given.
  */
-function go(view, open, trail = [], { zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom } = {}) {
-  const route = routeOf(view, open, zoom, into, project, projectZoom);
+function go(view, open, trail = [], { zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom, historyFilters = state.historyFilters } = {}) {
+  const route = routeOf(view, open, zoom, into, project, projectZoom, historyFilters);
   if (route === location.hash) return;
   history.pushState({ trail }, "", route);
   applyRoute();
@@ -1072,9 +1115,9 @@ function putRouteAway() {
   const bare = `#${route.view}`;
   const before = history.state?.kept;
   const prior = before?.route ? readRoute(before.route) : null;
-  const onlyView = !route.open && !route.project && !route.projectZoom && !route.into.length && route.zoom === null;
+  const onlyView = !route.open && !route.project && !route.projectZoom && !route.into.length && route.zoom === null && !Object.values(route.historyFilters).some(Boolean);
   const keptRoute = before && prior && onlyView && route.view !== prior.view
-    ? routeOf(route.view, prior.open, prior.zoom, prior.into, prior.project, prior.projectZoom)
+      ? routeOf(route.view, prior.open, prior.zoom, prior.into, prior.project, prior.projectZoom, prior.historyFilters)
     : before ? before.route : location.hash;
   const project = before && Object.hasOwn(before, "project") ? before.project : (route.project ?? prior?.project ?? null);
   const kept = { route: keptRoute, project };
@@ -1102,7 +1145,7 @@ function comeBack() {
   const kept = takeRouteBack();
   if (!kept) return;
   const route = readRoute();
-  Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, trail: history.state?.trail ?? [], project: route.project ?? kept.project ?? null, projectZoom: route.projectZoom });
+  Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, trail: history.state?.trail ?? [], project: route.project ?? kept.project ?? null, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
 }
 
 /** Shows what the address says: called when it changes, by this page or by Back and Forward. */
@@ -1112,25 +1155,39 @@ function applyRoute() {
   if (locked) putRouteAway();
   else takeRouteBack();
   let route = readRoute();
+  if (route.view === "history") {
+    const canonical = routeOf(route.view, route.open, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters);
+    if (canonical !== location.hash) {
+      history.replaceState(history.state, "", canonical);
+      route = readRoute();
+    }
+  }
   if (state.loadedAt && route.project && !state.projects.some((project) => projectRef(project) === route.project)) {
-    history.replaceState(history.state, "", routeOf(route.view, route.open, route.zoom, route.into, null, false));
+    history.replaceState(history.state, "", routeOf(route.view, route.open, route.zoom, route.into, null, false, route.historyFilters));
     route = readRoute();
   }
   const viewChanged = route.view !== state.view;
   const zoomChanged = route.zoom !== state.zoom || !sameTrail(route.into, state.into);
   const projectChanged = route.project !== state.project || route.projectZoom !== state.projectZoom;
+  const historyChanged = JSON.stringify(route.historyFilters) !== JSON.stringify(state.historyFilters);
   state.view = route.view;
   state.zoom = route.zoom;
   state.into = route.into;
   state.project = route.project;
   state.projectZoom = route.projectZoom;
+  state.historyFilters = route.historyFilters;
+  if (route.view === "history" && (viewChanged || historyChanged)) syncHistoryControls();
   state.group = route.into.at(-1) ?? null;
   // The items the panel came through have titles: locked out, they stay with the entry and out of the page.
   state.trail = locked ? [] : (history.state?.trail ?? []);
   // The address may name a group that is not there: once the plan is known, it is put right.
   if (state.loadedAt && !locked) settleZoom();
+  if (route.view === "history" && (viewChanged || projectChanged || historyChanged)) {
+    state.historyKey = "";
+    historyRefreshPending = false;
+  }
   if (zoomChanged) boardMoved = true;
-  if (viewChanged || zoomChanged || projectChanged) render();
+  if (viewChanged || zoomChanged || projectChanged || historyChanged) render();
   if ((zoomChanged || projectChanged) && state.loadedAt && !locked) sayZoom();
   if (!route.open) return hidePanel();
   const reopen = !sameItem(route.open, state.open) || $("panel").hidden;
@@ -1914,7 +1971,7 @@ async function renderDetail(more) {
           },
           watched.has(item.id) ? "Watching. Stop" : "Tell me when it is done",
         ),
-        item.kind === "task" && item.progress && state.byId.has(item.id) && el(
+        state.view !== "history" && item.kind === "task" && item.progress && state.byId.has(item.id) && el(
           "button",
           { class: "open-group", type: "button", onclick: () => zoomInto(item.id) },
           `Show only this group (${item.progress.total} ${item.progress.total === 1 ? "task" : "tasks"})`,
@@ -2072,6 +2129,205 @@ async function renderGraphView(tasks) {
   }
 }
 
+/** The current History query; the project's address filter is shared with the Board and Graph. */
+function historyQueryState() {
+  return Object.fromEntries(Object.entries({
+    project: state.project,
+    kind: state.historyFilters.kind,
+    actor: state.historyFilters.actor,
+    action: state.historyFilters.action,
+    from: state.historyFilters.from,
+    to: state.historyFilters.to,
+  }).filter(([, value]) => value));
+}
+
+/** A calendar day is local to the person using the page; send its exact local-day bounds as UTC moments. */
+function historyDateBound(day, end = false) {
+  if (!day) return undefined;
+  const [year, month, date] = day.split("-").map(Number);
+  const value = new Date(year, month - 1, end ? date + 1 : date);
+  if (end) value.setMilliseconds(-1);
+  return value.toISOString();
+}
+
+function historyInput() {
+  const filters = historyQueryState();
+  if (filters.project) filters.project = filters.project.trim();
+  if (filters.actor) filters.actor = filters.actor.trim();
+  if (filters.action) filters.action = filters.action.trim();
+  return {
+    ...filters,
+    ...(filters.from ? { from: historyDateBound(filters.from) } : {}),
+    ...(filters.to ? { to: historyDateBound(filters.to, true) } : {}),
+  };
+}
+
+const historyQueryKey = () => JSON.stringify(historyQueryState());
+
+function renderHistoryList() {
+  const list = $("history-list");
+  if (locked) {
+    list.replaceChildren();
+    $("history-status").textContent = "";
+    $("history-empty").textContent = "";
+    $("history-empty").hidden = true;
+    $("history-more").hidden = true;
+    return;
+  }
+  const loadMore = $("history-more");
+  const loadMoreFocused = document.activeElement === loadMore;
+  const focusedPlace = document.activeElement?.closest?.(".history-event-item")?.closest(".history-event")?.dataset.place;
+  list.replaceChildren(...state.historyEvents.map((event) => {
+    const id = event.kind === "project" && /^\d+$/.test(event.id) ? `project:${event.id}` : event.id;
+    const title = event.title || "Item no longer available";
+    const item = event.kind === "project" || event.kind === "task"
+      ? el("button", { class: "history-event-item", type: "button", "data-id": event.id, "data-kind": event.kind, "aria-label": `Open ${event.kind} ${id}: ${title}`, onclick: () => openItem(event.kind, event.id) },
+          el("span", { class: "id" }, id), el("span", { class: "history-event-title" }, title))
+      : el("span", { class: "history-event-item passive" }, el("span", { class: "id" }, id), el("span", { class: "history-event-title" }, title));
+    const description = describeChange(event.data ?? {});
+    return el("li", { class: "history-event", "data-action": event.action, "data-kind": event.kind, "data-id": event.id, "data-place": event.place.join(".") },
+      el("div", { class: "history-event-top" },
+        el("span", { class: "history-event-action" }, HISTORY_ACTIONS[event.action] ?? label(event.action)),
+        el("span", { class: "history-event-actor" }, `by ${event.by}`),
+        el("time", { datetime: event.at }, when(event.at)),
+      ),
+      item,
+      description && el("div", { class: "history-event-detail" }, description),
+      el("span", { class: "history-event-kind" }, event.kind),
+    );
+  }));
+  if (focusedPlace) {
+    [...list.querySelectorAll(".history-event")]
+      .find((event) => event.dataset.place === focusedPlace)
+      ?.querySelector(".history-event-item")
+      ?.focus({ preventScroll: true });
+  }
+  const filters = historyInput();
+  $("history-status").textContent = state.historyError
+    ? `History could not be loaded: ${state.historyError}`
+    : state.historyLoading
+      ? "Reading recorded changes…"
+      : `${counted(state.historyEvents.length, "change")}${state.historyContinuation ? " loaded · more available" : ""}${Object.keys(filters).length ? " · filtered" : ""}`;
+  $("history-empty").hidden = state.historyEvents.length > 0 || state.historyLoading;
+  $("history-empty").textContent = state.historyError
+    ? "Try again to read history."
+    : Object.keys(filters).length
+      ? "No recorded changes match these filters."
+      : "No recorded changes yet.";
+  const more = $("history-more");
+  more.hidden = !state.historyContinuation && !state.historyError;
+  more.disabled = false;
+  more.setAttribute("aria-disabled", String(state.historyLoading));
+  more.textContent = state.historyError ? "Try again" : state.historyLoading ? "Loading…" : "Load earlier changes";
+  if (loadMoreFocused && more.hidden) {
+    ([...list.querySelectorAll("button.history-event-item")].at(-1) ?? $("history-heading")).focus({ preventScroll: true });
+  }
+}
+
+let historyPageTurn = 0;
+let historyRefreshPending = false;
+
+/** Reads one bounded page of the global feed, validating its cursor as every other page is validated. */
+async function loadHistory(reset = false, preservePages = false) {
+  if (state.view !== "history" || !state.loadedAt || locked) return;
+  if (!reset && (state.historyLoading || !state.historyContinuation)) return;
+  const query = historyInput();
+  const key = historyQueryKey();
+  const turn = reset ? ++historyPageTurn : historyPageTurn;
+  const session = sessions;
+  const pages = state.historyPages;
+  const held = reset ? [] : state.historyEvents;
+  const token = reset ? undefined : state.historyContinuation;
+  state.historyKey = key;
+  if (reset && !preservePages) {
+    state.historyEvents = [];
+    state.historyContinuation = null;
+    state.historyPages = 0;
+  }
+  state.historyError = null;
+  state.historyLoading = true;
+  historyLoadingTurn = turn;
+  renderHistoryList();
+  try {
+    const list = describeList("list_history", query);
+    const progress = reset ? begun() : resume(list, pages, held, token);
+    const changes = reset ? [] : [...held];
+    const oldestPlace = preservePages ? state.historyEvents.at(-1)?.place : undefined;
+    let next;
+    for (let pageIndex = 0; ; pageIndex++) {
+      if (session !== sessions || turn !== historyPageTurn || key !== historyQueryKey() || state.view !== "history" || locked) return;
+      const answer = await api("list-history", { ...query, ...(progress.sent === undefined ? {} : { continuation: progress.sent }) });
+      if (session !== sessions || turn !== historyPageTurn || key !== historyQueryKey() || state.view !== "history" || locked) return;
+      next = takePage(list, progress, answer?.changes, answer && Object.hasOwn(answer, "continuation") ? answer.continuation : ENDS);
+      changes.push(...answer.changes);
+      const lastPlace = answer.changes.at(-1)?.place;
+      const reachedOldest = oldestPlace && lastPlace && (lastPlace[0] < oldestPlace[0] || (lastPlace[0] === oldestPlace[0] && lastPlace[1] <= oldestPlace[1]));
+      if (next === undefined || !preservePages || reachedOldest || (!oldestPlace && pageIndex === 0)) break;
+    }
+    if (session !== sessions || turn !== historyPageTurn || key !== historyQueryKey() || state.view !== "history") return;
+    if (reset && preservePages) {
+      state.historyEvents = changes;
+      state.historyPages = progress.pages;
+      state.historyContinuation = next ?? null;
+    } else {
+      state.historyEvents = changes;
+      state.historyPages = progress.pages;
+      state.historyContinuation = next ?? null;
+    }
+    state.historyError = null;
+  } catch (error) {
+    if (session !== sessions || turn !== historyPageTurn || key !== historyQueryKey() || state.view !== "history") return;
+    if (error.status === 401) return void handleUnauthorized(error);
+    const problem = error instanceof NotAList ? notAsVigile("list-history", error.why) : error;
+    state.historyError = problem.message;
+    if (!preservePages) state.historyContinuation = null;
+  } finally {
+    if (historyLoadingTurn === turn) state.historyLoading = false;
+    if (session === sessions && state.view === "history") {
+      renderHistoryList();
+      if (historyRefreshPending && !locked && key === historyQueryKey() && state.historyPages > 0) {
+        historyRefreshPending = false;
+        void loadHistory(true, true);
+      }
+    }
+  }
+}
+
+/** Shows the current feed and starts a fresh read when its project or History filters change. */
+function renderHistoryView() {
+  const form = $("history-filters");
+  if (!form.contains(document.activeElement)) syncHistoryControls();
+  renderHistoryList();
+  if (state.loadedAt && state.historyKey !== historyQueryKey()) void loadHistory(true);
+}
+
+/** Keeps bookmarkable filter controls in sync with route changes, including Back and Forward. */
+function syncHistoryControls() {
+  $("history-kind").value = state.historyFilters.kind ?? "";
+  $("history-actor").value = state.historyFilters.actor ?? "";
+  $("history-action").value = state.historyFilters.action ?? "";
+  $("history-from").value = state.historyFilters.from ?? "";
+  $("history-to").value = state.historyFilters.to ?? "";
+}
+
+$("history-filters").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const historyFilters = {
+    kind: $("history-kind").value || null,
+    actor: $("history-actor").value.trim() || null,
+    action: $("history-action").value || null,
+    from: $("history-from").value || null,
+    to: $("history-to").value || null,
+  };
+  go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: [], historyFilters });
+});
+$("history-clear").addEventListener("click", () => {
+  for (const id of ["history-kind", "history-actor", "history-action", "history-from", "history-to"]) $(id).value = "";
+  const historyFilters = { kind: null, actor: null, action: null, from: null, to: null };
+  go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: [], historyFilters });
+});
+$("history-more").addEventListener("click", () => void loadHistory(Boolean(state.historyError), Boolean(state.historyError && state.historyPages)));
+
 /** How the graph stands, as the line over it says. */
 let graphStands = null;
 
@@ -2222,6 +2478,12 @@ function keyboardPlace() {
   }
   // "Open all" goes with the line it is in, once the columns are open: the keyboard is then on the first of them.
   if (at.matches("#board .columns-note button")) return () => $("board").querySelector(".columns-note button") ?? $("board").querySelector(".column-fold");
+  if (at.matches(".history-event-item")) {
+    const place = at.closest(".history-event")?.dataset.place;
+    return () => [...$("history-list").querySelectorAll(".history-event")]
+      .find((event) => event.dataset.place === place)
+      ?.querySelector(".history-event-item");
+  }
   // Any other control outside the panel, such as those of the header, is not drawn again: it is that very one,
   // for as long as it is on the page.
   if (at !== document.body && !$("panel").contains(at)) return () => (at.isConnected ? at : null);
@@ -2338,6 +2600,33 @@ const TYPING_PAUSE_MS = 300;
 
 function draw() {
   renderProjects();
+  if (state.view === "history") {
+    if (state.full) stopFullScreen();
+    document.body.classList.remove("graph-view", "graph-full");
+    document.body.classList.add("history-view");
+    document.body.classList.toggle("focus", state.focus);
+    document.body.classList.toggle("scoped", Boolean(state.project || Object.values(state.historyFilters).some(Boolean)));
+    $("focus").setAttribute("aria-pressed", String(state.focus));
+    $("focus").setAttribute("aria-label", state.focus ? "Show everything above History again" : "Hide everything above History");
+    $("focus").title = state.focus ? "Show the projects and controls above History" : "Hide the projects and controls above History";
+    $("board-filters").hidden = true;
+    $("board").hidden = true;
+    $("graph-panel").hidden = true;
+    $("history-panel").hidden = false;
+    $("empty").hidden = true;
+    $("levels").hidden = true;
+    showLights();
+    for (const view of ["board", "graph", "history"]) {
+      if (state.view === view) $(`view-${view}`).setAttribute("aria-current", "page");
+      else $(`view-${view}`).removeAttribute("aria-current");
+    }
+    linkViews();
+    renderHistoryView();
+    return;
+  }
+  document.body.classList.remove("history-view");
+  $("board-filters").hidden = false;
+  $("history-panel").hidden = true;
   const inView = tasksInView();
   const text = filterText();
   const tasks = inView.filter((task) => matchesVisibleTask(task, text));
@@ -2373,7 +2662,7 @@ function draw() {
   $("bugs-apart").checked = state.bugsApart;
   $("column-scroll").checked = state.columnScroll;
   $("graph-panel").hidden = !graph || tasks.length === 0;
-  for (const view of ["board", "graph"]) {
+  for (const view of ["board", "graph", "history"]) {
     if (state.view === view) $(`view-${view}`).setAttribute("aria-current", "page");
     else $(`view-${view}`).removeAttribute("aria-current");
   }
@@ -2384,7 +2673,7 @@ function draw() {
 }
 /** The links to the two views lead to the same group, and the board is at the same zoom when it is come back to. */
 function linkViews() {
-  for (const view of ["board", "graph"]) {
+  for (const view of ["board", "graph", "history"]) {
     const link = $(`view-${view}`);
     link.setAttribute("href", routeOf(view, null));
     link.onclick = (event) => {
@@ -2395,7 +2684,7 @@ function linkViews() {
       const before = history.state?.kept;
       const route = readRoute(before?.route ?? location.hash);
       const kept = {
-        route: routeOf(view, null, route.zoom, route.into, route.project, route.projectZoom),
+        route: routeOf(view, null, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters),
         project: route.project ?? before?.project ?? null,
       };
       history.pushState({ kept }, "", `#${view}`);
@@ -2478,6 +2767,16 @@ function lockOut(refused = "") {
   Object.assign(state, { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, shown: null, drawn: null, item: null, have: null, further: null, troubled: false, openTitle: "", loadedAt: null, loadedMs: null, failed: true });
   $("instance").textContent = "";
   Object.assign(state, { project: null, projectZoom: false, zoom: null, into: [], group: null, open: null, trail: [] });
+  Object.assign(state, { historyFilters: { kind: null, actor: null, action: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null });
+  historyRefreshPending = false;
+  for (const id of ["history-kind", "history-actor", "history-action", "history-from", "history-to"]) $(id).value = "";
+  $("history-list").replaceChildren();
+  $("history-status").textContent = "";
+  $("history-empty").textContent = "";
+  $("history-empty").hidden = true;
+  $("history-more").hidden = true;
+  historyPageTurn++;
+  historyLoadingTurn = historyPageTurn;
   holdings = { of: null, held: new Map(), inside: new Map() };
   panelOpener = null;
   // What was typed into the filter is often a title or an ID, and is repeated in the line that says what is in
@@ -2529,6 +2828,15 @@ function lockOut(refused = "") {
   clearTimeout(quietRetry);
   quietRetry = null;
   keepUp();
+}
+
+/** A refused key clears the plan and returns the person to the same connection form as a refused full refresh. */
+function handleUnauthorized(error) {
+  const stored = localStorage.getItem(KEY_NAME) ?? "";
+  const another = stored !== "" && stored !== (error.key ?? "");
+  lockOut(error.key);
+  showKeyForm(error.message);
+  if (another) void load(true);
 }
 
 async function refresh() {
@@ -2586,8 +2894,12 @@ async function refresh() {
     // A change that arrives while the board is in sight is shown as movement, so the eye can follow it.
     // Not when the board had to leave a group: it then shows other cards, and none of them moved.
     const before = changed && !first && !left && state.view === "board" ? cardPlaces() : null;
-    if (changed) render();
+    if (changed || state.view === "history") render();
     else fitBoard();
+    if (!first && state.view === "history" && state.historyKey === historyQueryKey()) {
+      if (state.historyLoading) historyRefreshPending = true;
+      else if (state.historyPages > 0) void loadHistory(true, true);
+    }
     // The plan took away the group the page was in: where it is now is said, as when the person zooms.
     if (left && !first) sayZoom();
     if (before) showMoves(before);
@@ -2608,12 +2920,7 @@ async function refresh() {
       // forgotten, since afterwards "no key" would look like another one. No key at all is not another key:
       // it is what is left when another tab had the same key refused and forgot it, and trying without a key
       // would let the page in as whoever needs none, where it was to stay locked.
-      const stored = localStorage.getItem(KEY_NAME) ?? "";
-      const another = stored !== "" && stored !== (error.key ?? "");
-      lockOut(error.key);
-      showKeyForm(error.message);
-      // A key that another tab stored meanwhile has not been tried yet: the person gave it, so it is tried now.
-      if (another) load(true);
+      handleUnauthorized(error);
     } else {
       const since = state.loadedAt ? ` Showing what was loaded at ${state.loadedAt}.` : "";
       const what = error.status ? `The service answered with an error: ${error.message}` : "Cannot reach the service.";
@@ -3737,8 +4044,15 @@ $("refresh").addEventListener("click", () => load());
 document.addEventListener("visibilitychange", () => !locked && (auto || state.failed) && !document.hidden && follow());
 
 {
-  const route = readRoute();
-  Object.assign(state, { view: route.view, open: route.open, trail: history.state?.trail ?? [], zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, project: route.project, projectZoom: route.projectZoom });
+  let route = readRoute();
+  if (route.view === "history") {
+    const canonical = routeOf(route.view, route.open, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters);
+    if (canonical !== location.hash) {
+      history.replaceState(history.state, "", canonical);
+      route = readRoute();
+    }
+  }
+  Object.assign(state, { view: route.view, open: route.open, trail: history.state?.trail ?? [], zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, project: route.project, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
   linkViews();
 }
 setAutoRefresh(localStorage.getItem(AUTO_NAME) === "on");

@@ -73,6 +73,32 @@ export interface HistoryPage {
   total: number;
 }
 
+/** Filters for the tenant-wide History feed. Project membership follows current containment links. */
+export interface HistoryFeedFilters {
+  /** A stored project ID; includes that project's events and events for items it contains. */
+  project?: string;
+  kind?: string;
+  /** A stored user ID. */
+  actor?: string;
+  action?: string;
+  /** Inclusive ISO timestamp bounds. */
+  from?: string;
+  to?: string;
+}
+
+export interface HistoryFeedPageRequest extends HistoryFeedFilters {
+  /** Only events before this place in the tenant-wide history. */
+  before?: HistoryPlace;
+  limit: number;
+}
+
+export interface HistoryFeedPage {
+  /** Newest first, ordered by the revision and sequence that recorded each event. */
+  records: HistoryRecord[];
+  /** Whether another matching event exists before this page. */
+  hasMore: boolean;
+}
+
 /** One of the statuses an item has had, as it is added: the store gives it the place after the last. */
 export interface TimelineInput {
   kind: string;
@@ -159,6 +185,8 @@ export interface StorageAdapter {
    * all of the history.
    */
   readHistoryPage(tenant: string, kind: string, id: string, page: HistoryPageRequest): Promise<HistoryPage>;
+  /** A bounded tenant-wide history page, newest first, with optional item and time filters. */
+  readHistoryFeedPage(tenant: string, page: HistoryFeedPageRequest): Promise<HistoryFeedPage>;
   /**
    * The entries of an item's timeline, oldest first: all of them, or at most `limit` of the latest, or of the
    * latest before a place. With them, how many entries the timeline has in all. Neither a page nor the count

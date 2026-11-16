@@ -203,6 +203,7 @@ export async function openAsPlan(tenant: string, file: string): Promise<{ why: s
       readText: async () => null,
       readHistory: async () => [],
       readHistoryPage: async () => ({ records: [], total: 0 }),
+      readHistoryFeedPage: async () => ({ records: [], hasMore: false }),
       // The timelines are read from the file itself: each is checked against the item it belongs to.
       readTimeline: async (_tenant, kind, id, page) => opened.timeline(kind, id, page),
       close: async () => {},

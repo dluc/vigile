@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { HistoryFeedPage, HistoryFeedPageRequest } from "@vigile/storage";
 import type { GraphView } from "./graph.js";
 import { RETIRED_PREFIX, type CounterName, type Link, type Node, type Ref, type StatusEntry, type UserNode, type UserType } from "./model.js";
 
@@ -76,6 +77,8 @@ export interface ReadContext {
   unchangedSince(ref: Ref): number;
   /** The latest recorded changes to an item, or the latest before a given one: at most a page of them, without reading the rest. */
   readHistoryPage(ref: Ref, before?: HistoryPlace): Promise<HistoryPage>;
+  /** One newest-first page across the tenant, filtered by the current plan and stable event position. */
+  readHistoryFeedPage(page: HistoryFeedPageRequest): Promise<HistoryFeedPage>;
   /** Every status an item went through, oldest first. For the one operation that moves them; a timeline is shown a page at a time. */
   readTimeline(ref: Ref): Promise<StatusEntry[]>;
   /** The latest statuses an item went through, or the latest before a place in its timeline: at most a page of them, without reading the rest. */

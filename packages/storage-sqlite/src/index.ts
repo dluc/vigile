@@ -15,6 +15,8 @@ import {
   type Head,
   type HistoryPage,
   type HistoryPageRequest,
+  type HistoryFeedPage,
+  type HistoryFeedPageRequest,
   type HistoryPlace,
   type HistoryRecord,
   type JsonObject,
@@ -211,7 +213,13 @@ CREATE TABLE IF NOT EXISTS timeline (
 ) STRICT, WITHOUT ROWID;
 `;
 
-const SCHEMA = SCHEMA_1 + TIMELINE;
+/** Indexes for the bounded tenant-wide History feed and each item's latest creation boundary. */
+const HISTORY_INDEXES = `
+CREATE INDEX IF NOT EXISTS history_by_place ON history (revision DESC, seq DESC);
+CREATE INDEX IF NOT EXISTS history_by_item_action_place ON history (kind, id, action, revision DESC, seq DESC);
+`;
+
+const SCHEMA = SCHEMA_1 + TIMELINE + HISTORY_INDEXES;
 
 /** The tables a file of a given format has. Everything before the present format is format 1. */
 const schemaOf = (format: number): string => (format >= FORMAT_VERSION ? SCHEMA : SCHEMA_1);
@@ -235,7 +243,7 @@ function formatIn(db: Database): number | null {
  * between the two, whatever ends the process that does this.
  */
 function upgrade(db: Database): void {
-  db.exec(TIMELINE);
+  db.exec(TIMELINE + HISTORY_INDEXES);
   // An entry that is no record, in a list that was damaged, is carried over as what it is: whoever checks the
   // file says so, as before.
   const rows = db.prepare(`
@@ -567,6 +575,56 @@ export class SqliteStorage implements StorageAdapter {
       return (found as { entries: number }).entries;
     };
     return { records: rows.reverse().map((r) => ({ ...r, data: JSON.parse(r.data) as JsonObject })), total: whole ? rows.length : counted() };
+  }
+
+  async readHistoryFeedPage(tenant: string, page: HistoryFeedPageRequest): Promise<HistoryFeedPage> {
+    const db = this.existingDb(tenant);
+    if (!db) return { records: [], hasMore: false };
+
+    const filters: string[] = [
+      `(
+        NOT EXISTS (SELECT 1 FROM history c WHERE c.kind = h.kind AND c.id = h.id AND c.action = 'created')
+        OR (h.revision, h.seq) >= (
+          SELECT c.revision, c.seq FROM history c
+          WHERE c.kind = h.kind AND c.id = h.id AND c.action = 'created'
+          ORDER BY c.revision DESC, c.seq DESC LIMIT 1
+        )
+      )`,
+    ];
+    const values: Array<string | number> = [];
+    let recursive = "";
+    if (page.project !== undefined) {
+      recursive = `WITH RECURSIVE descendants(kind, id) AS (
+        SELECT 'project', ?
+        UNION
+        SELECT l.to_kind, l.to_id FROM links l
+        JOIN descendants d ON l.from_kind = d.kind AND l.from_id = d.id
+        WHERE l.type = 'contains'
+      ) `;
+      values.push(page.project);
+      filters.push("EXISTS (SELECT 1 FROM descendants d WHERE d.kind = h.kind AND d.id = h.id)");
+    }
+    for (const [field, column] of [["kind", "kind"], ["actor", "actor"], ["action", "action"], ["from", "at"], ["to", "at"]] as const) {
+      const value = page[field];
+      if (value === undefined) continue;
+      filters.push(`h.${column} ${field === "from" ? ">=" : field === "to" ? "<=" : "="} ?`);
+      values.push(value);
+    }
+    if (page.before) {
+      filters.push("(h.revision, h.seq) < (?, ?)");
+      values.push(page.before.revision, page.before.seq);
+    }
+    const rows = db.prepare(`${recursive}
+      SELECT h.kind, h.id, h.revision, h.seq, h.at, h.actor, h.action, h.data
+      FROM history h
+      WHERE ${filters.join(" AND ")}
+      ORDER BY h.revision DESC, h.seq DESC
+      LIMIT ?`).all(...values, page.limit + 1) as unknown as Array<Omit<HistoryRecord, "data"> & { data: string }>;
+    const hasMore = rows.length > page.limit;
+    return {
+      records: rows.slice(0, page.limit).map((row) => ({ ...row, data: JSON.parse(row.data) as JsonObject })),
+      hasMore,
+    };
   }
 
   async readTimeline(tenant: string, kind: string, id: string, page: TimelinePageRequest = {}): Promise<TimelinePage> {

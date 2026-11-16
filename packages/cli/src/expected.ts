@@ -189,6 +189,16 @@ const COUNT: Sort = { is: (value) => Number.isSafeInteger(value) && (value as nu
 // Its place among the item's changes is the revision that wrote it and its number in that revision: what the
 // token after a page of history names.
 const HISTORY = each({ at: WORDS, by: WORDS, action: WORDS, data: OBJECT, place: { is: (value) => Array.isArray(value) && value.length === 2 && value.every((part) => COUNT.is(part)), called: "a place" } }, "a history");
+const HISTORY_FEED = {
+  kind: KIND,
+  id: { is: (value: unknown) => typeof value === "string" && KINDS.some((kind) => isIdOfKind(kind, value)), called: "an item ID" },
+  title: orNothing(WORDS),
+  at: MOMENT,
+  by: WHO,
+  action: TEXT,
+  data: OBJECT,
+  place: { is: (value: unknown) => Array.isArray(value) && value.length === 2 && value.every((part) => COUNT.is(part)), called: "a place" },
+};
 /**
  * A continuation token, by the engine's own rule for what it makes: letters, digits, "-" and "_", beginning
  * with a letter. It is printed into the command that reads on and sent on as it came, and is held to being
@@ -477,6 +487,7 @@ export const EXPECTED: Record<string, Judge> = {
   update_task: theItem(["task"]),
   set_task_status: theItem(["task"]),
   list_tasks: listed("list_tasks", "tasks", TASK, "tasks"),
+  list_history: listed("list_history", "changes", HISTORY_FEED, "history changes"),
   // Each of them can be started: that is what the list says of them.
   list_next_tasks: listed("list_next_tasks", "tasks", { ...TASK, is_next: exactly(true), priority_path: listOf(NUMBER, "a priority path") }, "tasks that can be started"),
   list_stale_tasks: listed("list_stale_tasks", "claims", { ...TASK, quiet_since: MOMENT, attention_since: MOMENT }, "quiet task claims", { attention_after_hours: exactly(24) }),

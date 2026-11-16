@@ -289,6 +289,44 @@ main { padding: 18px clamp(14px, 3vw, 28px) 76px; display: grid; grid-template-c
 .clear-filter span::after { transform: rotate(-45deg); }
 .project-main:focus-visible, .link:focus-visible, .card:focus-visible, .close:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
 
+.history-panel { display: grid; align-content: start; gap: 14px; min-width: 0; }
+.history-head { display: flex; align-items: end; justify-content: space-between; gap: 12px; }
+.history-head h2 { margin: 0; font-size: clamp(20px, 2.4vw, 27px); letter-spacing: -0.035em; }
+.history-head p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+.history-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 10px; align-items: end; padding: 12px; border: 1px solid var(--line); border-radius: var(--r-l); background: var(--raised); }
+.history-filters label { display: grid; gap: 4px; min-width: 0; color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: 0.045em; text-transform: uppercase; }
+.history-filters input, .history-filters select { width: 100%; min-width: 0; height: 40px; padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--surface); color: var(--text); font-size: 13px; letter-spacing: normal; text-transform: none; }
+.history-filters input:focus-visible, .history-filters select:focus-visible { outline: 2px solid var(--busy); outline-offset: 1px; }
+.history-filter-actions { display: flex; gap: 6px; align-items: center; min-height: 40px; }
+.history-filter-actions button { min-height: 38px; padding: 6px 12px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--surface); color: var(--text); cursor: pointer; font-size: 13px; font-weight: 650; }
+.history-filter-actions .history-apply { border-color: var(--busy); background: var(--busy); color: var(--bg); }
+.history-filter-actions button:hover { filter: brightness(0.96); }
+.history-filter-actions button:focus-visible, .history-more:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.history-status { min-height: 1.4em; margin: -4px 2px 0; color: var(--muted); font-size: 12px; }
+.history-list { position: relative; display: grid; gap: 0; margin: 0; padding: 0 0 0 22px; list-style: none; }
+.history-list::before { content: ""; position: absolute; top: 8px; bottom: 12px; left: 7px; width: 2px; background: var(--line); }
+.history-event { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; padding: 0 0 18px 14px; min-width: 0; }
+.history-event::before { content: ""; position: absolute; top: 7px; left: -19px; width: 10px; height: 10px; border: 2px solid var(--busy); border-radius: 50%; background: var(--bg); }
+.history-event[data-action="status_changed"]::before { border-color: var(--review); }
+.history-event[data-action="deleted"]::before { border-color: var(--stop); }
+.history-event[data-action="created"]::before { border-color: var(--go); }
+.history-event-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 9px; min-width: 0; }
+.history-event-action { font-weight: 700; }
+.history-event-actor, .history-event time { color: var(--muted); font-size: 12px; }
+.history-event time { font-variant-numeric: tabular-nums; }
+.history-event-detail { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.history-event-item { display: inline-flex; align-items: baseline; gap: 7px; justify-self: start; max-width: 100%; padding: 2px 0; border: 0; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.history-event-item:hover .history-event-title { text-decoration: underline; text-underline-offset: 3px; }
+.history-event-item.passive { cursor: default; }
+.history-event-item.passive:hover .history-event-title { text-decoration: none; }
+.history-event-item:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; border-radius: var(--r-s); }
+.history-event-title { font-weight: 600; overflow-wrap: anywhere; }
+.history-event-kind { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+.history-more { justify-self: center; width: min(100%, 520px); min-height: 42px; }
+.history-list .empty { margin-left: -22px; }
+body.history-view .summary { display: none; }
+body.history-view .project-zoom, body.history-view .project-chip-zoom { display: none !important; }
+
 .summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; width: max-content; max-width: 100%; min-width: 0; padding: 6px 12px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
 /* A fixed dock works while each column owns its scrolling. When the whole page scrolls, keeping this tool in
  * normal flow avoids covering and intercepting cards partway down a long board. */
