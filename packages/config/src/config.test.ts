@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -18,8 +18,10 @@ import {
   loadConfig,
   masked,
   nameNew,
+  placeOf,
   readRaw,
   removeKey,
+  saidNothingOf,
   setKey,
   setKeyWhileServing,
   setValue,
@@ -36,7 +38,8 @@ const OTHER = "vig_zyxwvutsrqponmlkjihg";
 let directory: string;
 let path: string;
 beforeEach(() => {
-  directory = mkdtempSync(join(tmpdir(), "vigile-config-"));
+  // By the name the system has for it: the folders a config leads to are named by where they are.
+  directory = realpathSync(mkdtempSync(join(tmpdir(), "vigile-config-")));
   path = join(directory, "config.toml");
 });
 afterEach(() => rmSync(directory, { recursive: true, force: true }));
@@ -60,6 +63,7 @@ describe("validation", () => {
       log_level: "info",
       listen: { address: "127.0.0.1", port: 8700 },
       auth: { keyless_user: "agent1", keys: { admin: KEY } },
+      backup: { enabled: true, every_hours: 24, folder: "backups", keep: 30 },
     });
   });
 
@@ -157,9 +161,10 @@ describe("the file", () => {
     } finally {
       chmodSync(directory, 0o700);
     }
-    // Something that cannot be a lock stands under its name: a folder.
+    // Something that cannot be a lock stands under its name: a folder. It is not for want of access that the
+    // lock cannot be taken, and what to do is to remove what stands there.
     mkdirSync(`${path}.hold`);
-    assert.throws(() => setValue(path, "name", "x"), says);
+    assert.throws(() => setValue(path, "name", "x"), /config\.toml\.hold is not a lock file of Vigile\. Remove it while no vigile command and no service is running\./);
     rmSync(`${path}.hold`, { recursive: true });
     assert.equal(setValue(path, "name", "now").name, "now", "and with the folder writable again the change is made");
   });
@@ -188,7 +193,162 @@ describe("the file", () => {
     initConfig(path);
     assert.equal(loadConfig(path, {}).dataDir, join(directory, "data"));
     setValue(path, "data_dir", "/var/lib/vigile");
-    assert.equal(loadConfig(path, {}).dataDir, "/var/lib/vigile");
+    assert.equal(loadConfig(path, {}).dataDir, placeOf("/var/lib/vigile"));
+  });
+
+  it("gives the folders as the places their paths lead to, walked as the system walks them: through links, out of a link's folder, and with nothing there yet", () => {
+    initConfig(path);
+    mkdirSync(join(directory, "real", "deep"), { recursive: true });
+    mkdirSync(join(directory, "elsewhere"));
+    symlinkSync(join(directory, "real"), join(directory, "alias"));
+    symlinkSync(join(directory, "real", "deep"), join(directory, "elsewhere", "down"));
+    for (const [written, place] of [
+      ["real/data", "real/data"],
+      ["alias/data", "real/data"],
+      ["./alias/./not-there/../data/", "real/data"],
+      // Out of the folder the link leads to: struck out as written, this would be `elsewhere/data`.
+      ["elsewhere/down/../data", "real/data"],
+      [`${directory}/elsewhere/down/../../alias/data`, "real/data"],
+      ["elsewhere/data", "elsewhere/data"],
+    ] as const) {
+      for (const key of ["data_dir", "backup.folder"] as const) {
+        setValue(path, key, written);
+        const loaded = loadConfig(path, {});
+        assert.equal(key === "data_dir" ? loaded.dataDir : loaded.backupDir, join(directory, place), `${key} = ${written}`);
+        // For one run, from the environment and as an option, it is the same place.
+        unsetValue(path, key);
+        const once = loadConfig(path, { [key === "data_dir" ? "VIGILE_DATA_DIR" : "VIGILE_BACKUP_FOLDER"]: written });
+        assert.equal(key === "data_dir" ? once.dataDir : once.backupDir, join(directory, place), `${key} = ${written}, from the environment`);
+        assert.equal((key === "data_dir" ? loadConfig(path, {}, { data_dir: written }).dataDir : loadConfig(path, {}, { "backup.folder": written }).backupDir), join(directory, place), `${key} = ${written}, as an option`);
+      }
+    }
+    assert.equal(existsSync(join(directory, "real", "data")), false, "nothing is made by asking");
+  });
+
+  it("does not load with a folder whose path leads nowhere, and does not write one: said by its setting, with why, and never taken for another folder", () => {
+    initConfig(path);
+    symlinkSync("itself", join(directory, "itself"));
+    writeFileSync(join(directory, "file"), "a file");
+    // Struck out as written, each of these would be the folder `kept`.
+    mkdirSync(join(directory, "kept"));
+    const before = readFileSync(path, "utf8");
+    for (const [written, why] of [["itself/../kept", /\/itself: its links go round in a circle/], ["file/../kept", /\/file\/\.\.: something on the way is not a folder, and the path goes on through it/], ["file/", /something on the way is not a folder/], [`${directory}/itself/../kept`, /its links go round in a circle/]] as const) {
+      for (const [key, variable] of [["data_dir", "VIGILE_DATA_DIR"], ["backup.folder", "VIGILE_BACKUP_FOLDER"]] as const) {
+        const said = new RegExp(`^${key.replace(".", "\\.")}: ${JSON.stringify(written).replaceAll("/", "\\/").replaceAll(".", "\\.")} leads nowhere: `);
+        for (const refused of [() => loadConfig(path, { [variable]: written }), () => loadConfig(path, {}, { [key]: written }), () => setValue(path, key, written, () => {})]) {
+          const [issue] = issues(refused);
+          assert.match(issue!, said, `${key} = ${written}`);
+          assert.match(issue!, why);
+          assert.match(issue!, /\. Name a folder that the path leads to$/);
+        }
+      }
+    }
+    assert.equal(readFileSync(path, "utf8"), before);
+    assert.deepEqual(readdirSync(join(directory, "kept")), []);
+    // What only has names that are not there yet, or a link that leads nowhere yet, is a folder a config can have.
+    symlinkSync(join(directory, "to-be-made"), join(directory, "dangling"));
+    assert.equal(loadConfig(path, {}, { data_dir: "dangling/data", "backup.folder": "not/there/yet" }).dataDir, join(directory, "to-be-made", "data"));
+  });
+
+  it("has automatic backups on, every 24 hours, into backups beside the config, when the file says nothing of them", () => {
+    initConfig(path);
+    assert.equal(readFileSync(path, "utf8").includes("backup"), false, "a new config does not mention them");
+    const loaded = loadConfig(path, {});
+    assert.deepEqual(loaded.config.backup, { enabled: true, every_hours: 24, folder: "backups", keep: 30 });
+    assert.equal(loaded.backupDir, join(directory, "backups"));
+    assert.deepEqual(["backup.enabled", "backup.every_hours", "backup.folder", "backup.keep"].map((key) => loaded.sources[key]), ["default", "default", "default", "default"]);
+    // A config that has part of the section gets the rest from the defaults.
+    writeFileSync(path, `${readFileSync(path, "utf8")}\n[backup]\nevery_hours = 4\n`);
+    assert.deepEqual(loadConfig(path, {}).config.backup, { enabled: true, every_hours: 4, folder: "backups", keep: 30 });
+    setValue(path, "backup.folder", "/var/backups/vigile");
+    assert.equal(loadConfig(path, {}).backupDir, "/var/backups/vigile");
+  });
+
+  it("takes the backup settings as a yes or no, as hours with a fraction, and as a whole number, and refuses what is none of them", () => {
+    initConfig(path);
+    assert.equal(setValue(path, "backup.enabled", "false").backup.enabled, false);
+    assert.equal(loadConfig(path, {}).config.backup.enabled, false);
+    assert.equal(setValue(path, "backup.every_hours", "4").backup.every_hours, 4);
+    assert.equal(setValue(path, "backup.every_hours", "0.5").backup.every_hours, 0.5);
+    assert.equal(loadConfig(path, {}).config.backup.every_hours, 0.5);
+    assert.equal(setValue(path, "backup.every_hours", "0.25").backup.every_hours, 0.25);
+    assert.equal(setValue(path, "backup.keep", "7").backup.keep, 7);
+    const before = readFileSync(path, "utf8");
+    assert.match(issues(() => setValue(path, "backup.enabled", "yes"))[0]!, /^backup\.enabled: must be true or false/);
+    assert.match(issues(() => setValue(path, "backup.enabled", ""))[0]!, /must be true or false/);
+    assert.match(issues(() => setValue(path, "backup.every_hours", "0.1"))[0]!, /^backup\.every_hours: must be at least 0\.25, which is a quarter of an hour/);
+    assert.match(issues(() => setValue(path, "backup.every_hours", "0"))[0]!, /at least 0\.25/);
+    assert.match(issues(() => setValue(path, "backup.every_hours", "-4"))[0]!, /must be a number, such as 4 or 0\.5/);
+    assert.match(issues(() => setValue(path, "backup.every_hours", "often"))[0]!, /must be a number/);
+    assert.match(issues(() => setValue(path, "backup.every_hours", "1e9"))[0]!, /must be a number/);
+    assert.match(issues(() => setValue(path, "backup.every_hours", "9000"))[0]!, /at most 8760/);
+    assert.match(issues(() => setValue(path, "backup.keep", "0"))[0]!, /^backup\.keep: must be at least 1/);
+    assert.match(issues(() => setValue(path, "backup.keep", "2.5"))[0]!, /whole number/);
+    assert.match(issues(() => setValue(path, "backup.folder", ""))[0]!, /^backup\.folder:/);
+    assert.match(issues(() => setValue(path, "backup.often", "1"))[0]!, /is not a setting/);
+    assert.equal(readFileSync(path, "utf8"), before);
+    // Written by hand, a value of the wrong kind is refused when the file is read.
+    for (const [line, said] of [["enabled = \"no\"", /^backup\.enabled:/], ["every_hours = \"4\"", /^backup\.every_hours:/], ["every_hours = inf", /^backup\.every_hours:/], ["every_hours = nan", /^backup\.every_hours:/], ["keep = 1.5", /^backup\.keep:/], ["hours = 4", /^backup\.hours: is not a setting/]] as const) {
+      const byHand = join(directory, "by-hand.toml");
+      writeFileSync(byHand, `[auth.keys]\nadmin = "${KEY}"\n\n[backup]\n${line}\n`);
+      assert.match(issues(() => loadConfig(byHand, {}))[0]!, said, line);
+    }
+    assert.equal(unsetValue(path, "backup.every_hours").backup.every_hours, 24);
+    assert.equal(unsetValue(path, "backup.enabled").backup.enabled, true);
+    // For one run, from the environment or as an option.
+    const once = loadConfig(path, { VIGILE_BACKUP_ENABLED: "false", VIGILE_BACKUP_EVERY_HOURS: "1.5" }, { "backup.folder": "elsewhere" });
+    assert.deepEqual([once.config.backup.enabled, once.config.backup.every_hours, once.backupDir], [false, 1.5, join(directory, "elsewhere")]);
+    assert.deepEqual([once.sources["backup.enabled"], once.sources["backup.folder"]], ["environment", "option"]);
+    assert.deepEqual(unknownEnvironment({ VIGILE_BACKUP_ENABLED: "false", VIGILE_BACKUP_EVERY_HOURS: "4", VIGILE_BACKUP_FOLDER: "x", VIGILE_BACKUP_KEEP: "3", VIGILE_BACKUP_EVERY: "4" }), ["VIGILE_BACKUP_EVERY"]);
+  });
+
+  it("shows a change as the config that would result, with its folders worked out, to whoever checks it, and writes nothing when that refuses it", () => {
+    initConfig(path);
+    setValue(path, "backup.enabled", "false");
+    const before = readFileSync(path, "utf8");
+    const seen: unknown[] = [];
+    const refuse = (resulting: { path: string; config: { data_dir: string; backup: { enabled: boolean; folder: string } }; dataDir: string; backupDir: string }) => {
+      seen.push([resulting.path, resulting.config.data_dir, resulting.config.backup.enabled, resulting.config.backup.folder, resulting.dataDir, resulting.backupDir]);
+      throw new Error("not like this");
+    };
+    // The value being set, the other values as the file has them, the rest by default.
+    assert.throws(() => setValue(path, "backup.folder", "elsewhere/../data", refuse), /not like this/);
+    assert.throws(() => unsetValue(path, "backup.enabled", refuse), /not like this/);
+    assert.throws(() => setValue(path, "data_dir", "/var/lib/vigile", refuse), /not like this/);
+    assert.deepEqual(seen, [
+      [path, "data", false, "elsewhere/../data", join(directory, "data"), join(directory, "data")],
+      [path, "data", true, "backups", join(directory, "data"), join(directory, "backups")],
+      [path, "/var/lib/vigile", false, "backups", "/var/lib/vigile", join(directory, "backups")],
+    ]);
+    assert.equal(readFileSync(path, "utf8"), before);
+    // A value that does not pass the config's own check is refused before anyone is asked.
+    assert.match(issues(() => setValue(path, "backup.keep", "0", refuse))[0]!, /^backup\.keep:/);
+    assert.equal(seen.length, 3);
+    // A check that lets it through leaves the change to be written.
+    assert.equal(setValue(path, "backup.folder", "kept", () => {}).backup.folder, "kept");
+    assert.equal(unsetValue(path, "backup.folder", () => {}).backup.folder, "backups");
+  });
+
+  it("says nothing of a part of the settings when none of them is written, set or given, whatever the values are", () => {
+    initConfig(path);
+    assert.equal(saidNothingOf(loadConfig(path, {}), "backup"), true);
+    assert.equal(saidNothingOf(loadConfig(path, {}), "listen"), false, "a new config has its address and port written");
+    // Given for one run with the very value it has by default, it is said.
+    assert.equal(saidNothingOf(loadConfig(path, { VIGILE_BACKUP_KEEP: "30" }), "backup"), false);
+    assert.equal(saidNothingOf(loadConfig(path, {}, { "backup.every_hours": "24" }), "backup"), false);
+    assert.equal(saidNothingOf(loadConfig(path, { VIGILE_LISTEN_PORT: "1" }), "backup"), true, "another part of the settings is another matter");
+    // Written with the value it has by default, it is said; left out again, it is not.
+    for (const [key, value] of [["backup.enabled", "true"], ["backup.every_hours", "24"], ["backup.folder", "backups"], ["backup.keep", "30"]] as const) {
+      setValue(path, key, value);
+      assert.deepEqual(loadConfig(path, {}).config.backup, { enabled: true, every_hours: 24, folder: "backups", keep: 30 });
+      assert.equal(saidNothingOf(loadConfig(path, {}), "backup"), false, key);
+      unsetValue(path, key);
+      assert.equal(saidNothingOf(loadConfig(path, {}), "backup"), true, key);
+    }
+    // A part that has one setting only, by its name.
+    assert.equal(saidNothingOf(loadConfig(path, {}), "data_dir"), false);
+    unsetValue(path, "data_dir");
+    assert.equal(saidNothingOf(loadConfig(path, {}), "data_dir"), true);
   });
 
   it("sets and unsets one value, and leaves the file untouched when the value is refused", () => {

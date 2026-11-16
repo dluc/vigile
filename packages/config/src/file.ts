@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { whereTo } from "./paths.js";
 import { flushFolder, holdFile, holdFileAsync, type AsyncRelease } from "@vigile/storage-sqlite";
 import { parse, stringify } from "smol-toml";
 import { ConfigError, KEY_PREFIX, SETTINGS, findSetting, validateConfig, type Config } from "./schema.js";
@@ -11,8 +12,10 @@ export interface LoadedConfig {
   /** The absolute path of the config file. */
   path: string;
   config: Config;
-  /** `data_dir` as an absolute path. */
+  /** `data_dir` as the one name of the place it leads to: see `placeOf`. */
   dataDir: string;
+  /** `backup.folder`, likewise. */
+  backupDir: string;
   /** Where each setting's value came from. */
   sources: Record<string, Source>;
 }
@@ -222,7 +225,7 @@ const pause = () => 10 + Math.floor(Math.random() * 20);
  * line and the running service both change this file: without this, each would write back what it had read,
  * and a key issued in between would be gone.
  */
-function change(given: string, edit: (raw: Raw) => void): Config {
+function change(given: string, edit: (raw: Raw) => void, check?: (resulting: ResultingConfig) => void): Config {
   const path = whereItIs(given);
   thereIsOne(path);
   const end = Date.now() + LOCK_WAIT_MS;
@@ -237,6 +240,10 @@ function change(given: string, edit: (raw: Raw) => void): Config {
   try {
     const raw = readRaw(path);
     edit(raw);
+    // What the file would say once this is written, looked at as a whole before it is: a rule that spans
+    // several settings is asked of the config that results, whichever of them the change is to. Asked under
+    // the lock, so it is asked of what is then written.
+    if (check) check(folders(resolve(given), validateConfig(raw, path)));
     written = writeRaw(path, raw);
   } catch (error) {
     failed = error;
@@ -283,7 +290,33 @@ async function changeWhileServing(given: string, edit: (raw: Raw) => void): Prom
   return written!;
 }
 
-function parseValue(key: string, value: string): string | number {
+/**
+ * Whether a loaded config says nothing of a part of the settings: no setting of that part is written in the
+ * file, set in the environment or given as an option. This is asked of where each value came from, never of
+ * the value: a setting written out with the value it has by default is said, and one left out is not.
+ */
+export function saidNothingOf(loaded: Pick<LoadedConfig, "sources">, part: string): boolean {
+  return SETTINGS.filter((setting) => setting.key === part || setting.key.startsWith(`${part}.`)).every((setting) => loaded.sources[setting.key] === "default");
+}
+
+/** A config with its folders worked out: relative ones start at the config file's folder. */
+export type ResultingConfig = Pick<LoadedConfig, "path" | "config" | "dataDir" | "backupDir">;
+
+function folders(absolute: string, config: Config): ResultingConfig {
+  // Each folder as the one name of the place it leads to (`placeOf`), from here on and for everyone: whoever
+  // shows it, checks it, makes it, locks it, writes to it or looks into it uses this name as it is. A relative
+  // one starts at the config file's folder, and is walked from there as it is written, `..` and links included.
+  // A path that leads nowhere, as one whose links go round in a circle, is no folder a config can have: it is
+  // refused here, by its setting, and never made into some other path that could be written to.
+  const fromConfig = (key: string, folder: string): string => {
+    const led = whereTo(isAbsolute(folder) ? folder : `${dirname(absolute)}${sep}${folder}`);
+    if (!led.ok) throw new ConfigError([`${key}: ${JSON.stringify(folder)} leads nowhere: ${led.cause}. Name a folder that the path leads to`], absolute);
+    return led.place;
+  };
+  return { path: absolute, config, dataDir: fromConfig("data_dir", config.data_dir), backupDir: fromConfig("backup.folder", config.backup.folder) };
+}
+
+function parseValue(key: string, value: string): string | number | boolean {
   const setting = findSetting(key);
   if (!setting) {
     const hint = key.startsWith("auth.keys") ? ' API keys are managed with "vigile user".' : "";
@@ -292,6 +325,14 @@ function parseValue(key: string, value: string): string | number {
   if (setting.type === "number") {
     if (!/^-?\d+$/.test(value.trim())) throw new ConfigError([`${key}: must be a whole number`]);
     return Number(value);
+  }
+  if (setting.type === "decimal") {
+    if (!/^\d+(\.\d+)?$/.test(value.trim())) throw new ConfigError([`${key}: must be a number, such as 4 or 0.5`]);
+    return Number(value);
+  }
+  if (setting.type === "boolean") {
+    if (value !== "true" && value !== "false") throw new ConfigError([`${key}: must be true or false`]);
+    return value === "true";
   }
   return value;
 }
@@ -317,9 +358,7 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv = process.env, o
       sources[setting.key] = "option";
     }
   }
-  const config = validateConfig(raw, absolute);
-  const dataDir = isAbsolute(config.data_dir) ? config.data_dir : resolve(dirname(absolute), config.data_dir);
-  return { path: absolute, config, dataDir, sources };
+  return { ...folders(absolute, validateConfig(raw, absolute)), sources };
 }
 
 /** `VIGILE_` variables that match no setting, which usually means a typo. */
@@ -363,14 +402,19 @@ export function initConfig(path: string, options: InitOptions = {}): { config: C
   }
 }
 
-export function setValue(path: string, key: string, value: string): Config {
+/**
+ * Sets one value. `check` is given the config as it would be with the value set, before it is written, and
+ * refuses it by throwing: nothing is written then.
+ */
+export function setValue(path: string, key: string, value: string, check?: (resulting: ResultingConfig) => void): Config {
   const parsed = parseValue(key, value);
-  return change(path, (raw) => setPath(raw, key, parsed));
+  return change(path, (raw) => setPath(raw, key, parsed), check);
 }
 
-export function unsetValue(path: string, key: string): Config {
+/** Removes one value, so that its default applies. `check` as for `setValue`: the config as it would be without the value. */
+export function unsetValue(path: string, key: string, check?: (resulting: ResultingConfig) => void): Config {
   if (!findSetting(key)) parseValue(key, "");
-  return change(path, (raw) => deletePath(raw, key));
+  return change(path, (raw) => deletePath(raw, key), check);
 }
 
 const putKey = (username: string, key: string) => (raw: Raw) => setPath(raw, `auth.keys.${username}`, key);

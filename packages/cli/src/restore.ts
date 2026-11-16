@@ -3,7 +3,7 @@ import { basename, join } from "node:path";
 import { Engine, areKeyMarks, readAll, storedAs } from "@vigile/core";
 import { assertTenantName, type StorageAdapter } from "@vigile/storage";
 import { flushFolder, historyOwners, holdTenantFiles, readTenantFile } from "@vigile/storage-sqlite";
-import { samePlace } from "./paths.js";
+import { samePlace } from "@vigile/config";
 
 /**
  * A note in the data folder that a restore is under way: which tenant, and the folder that takes what was there.

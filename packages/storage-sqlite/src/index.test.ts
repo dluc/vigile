@@ -1,13 +1,36 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { runStorageContractTests } from "@vigile/storage/contract-tests";
-import { SqliteStorage, flushFolder, folderIsHeld, holdFile, holdFolder, needSqlite } from "./index.js";
+import { SqliteStorage, backupTenantFile, flushFolder, folderIsHeld, holdFile, holdFolder, holdTenantFiles, needSqlite } from "./index.js";
 import { stopProcess } from "./stop-process.js";
+
+it("does not follow a replacement link when SQLite opens a prepared backup destination", { skip: process.platform === "win32" }, () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-backup-destination-"));
+  try {
+    const source = join(directory, "source.sqlite");
+    const database = new DatabaseSync(source);
+    database.exec("CREATE TABLE sample (value TEXT); INSERT INTO sample VALUES ('tenant data')");
+    database.close();
+    const working = join(directory, "copy.partial");
+    writeFileSync(working, "", { mode: 0o600 });
+    const prepared = lstatSync(working);
+    const target = join(directory, "someone-elses-file");
+    writeFileSync(target, "untouched");
+    rmSync(working);
+    symlinkSync(target, working);
+
+    assert.throws(() => backupTenantFile(source, working, { device: prepared.dev, inode: prepared.ino }));
+    assert.equal(readFileSync(target, "utf8"), "untouched");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 it("stops the lock owner if its holder dies unexpectedly", async () => {
   const directory = mkdtempSync(join(tmpdir(), "vigile-lost-holder-"));
@@ -40,7 +63,7 @@ it("keeps an async worker's lock while its live owner is synchronously busy", as
   const ready = join(directory, "ready");
   const lock = join(directory, "lock");
   const module = new URL("./index.js", import.meta.url).href;
-  const workerCode = `const { parentPort } = require('node:worker_threads'); parentPort.once('message', async (message) => { if (message !== 'start') return; const { holdFile } = await import(${JSON.stringify(module)}); const release = holdFile(${JSON.stringify(lock)}); parentPort.postMessage({ held: Boolean(release) }); setTimeout(() => process.exit(0), 100); });`;
+  const workerCode = `const { parentPort } = require('node:worker_threads'); parentPort.once('message', async (message) => { if (message !== 'start') return; const { holdFile } = await import(${JSON.stringify(module)}); const release = holdFile(${JSON.stringify(lock)}, true); parentPort.postMessage({ held: Boolean(release) }); setTimeout(() => process.exit(0), 100); });`;
   const script = `import { writeFileSync } from 'node:fs'; import { Worker } from 'node:worker_threads'; import { holdFileAsync } from ${JSON.stringify(module)}; const worker = new Worker(${JSON.stringify(workerCode)}, { eval: true, execArgv: [] }); const release = await holdFileAsync(process.argv[1], Date.now() + 5000, () => worker); if (!release) process.exit(2); writeFileSync(process.argv[2], ''); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);`;
   const owner = spawn(process.execPath, ["--no-warnings", "--input-type=module", "--eval", script, lock, ready], { stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
@@ -217,6 +240,59 @@ it("says so when a folder cannot be flushed although the system offers it, and s
     // A system that has no way to flush a folder at all: nothing more can be done there.
     for (const code of ["EINVAL", "ENOTSUP", "EISDIR", "EPERM"]) assert.doesNotThrow(() => flushFolder(directory, failing(code)), code);
     assert.throws(() => flushFolder(join(directory, "not-there")), /could not confirm/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("takes nothing but a plain file for a lock: a folder, a link, or a pipe under a lock's name is said to be none, and is not opened", () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-lock-kind-"));
+  const NONE = /is not a lock file of Vigile\. Remove it while no vigile command and no service is running\.$/;
+  try {
+    const kept = join(directory, "someone's");
+    writeFileSync(kept, "as it was");
+    const plant: Array<[what: string, make: (file: string) => void]> = [
+      ["a folder", (file) => mkdirSync(file)],
+      ["a link to a file of someone's", (file) => symlinkSync(kept, file)],
+      ["a link to nothing", (file) => symlinkSync(join(directory, "nothing-there"), file)],
+    ];
+    try {
+      if (process.platform === "win32") throw new Error("Windows named pipes do not have POSIX FIFO cleanup semantics");
+      execFileSync("mkfifo", [join(directory, "probe")]);
+      plant.push(["a pipe", (file) => void execFileSync("mkfifo", [file])], ["a link to a pipe", (file) => symlinkSync(join(directory, "probe"), file)]);
+    } catch {
+      // A machine that cannot make a pipe with a name has none to find.
+    }
+    for (const [what, make] of plant) {
+      const file = join(directory, `lock for ${what}`);
+      make(file);
+      assert.throws(() => holdFile(file), NONE, what);
+      // The lock on the tenants' files and the lock on a data folder are taken the same way.
+      const data = join(directory, `data for ${what}`);
+      mkdirSync(data);
+      make(join(data, "vigile.files"));
+      assert.throws(() => holdTenantFiles(data), NONE, what);
+      make(join(data, "vigile.hold"));
+      assert.throws(() => holdFolder(data), NONE, what);
+      if (what !== "a link to nothing") assert.throws(() => folderIsHeld(data), NONE, what);
+    }
+    assert.equal(readFileSync(kept, "utf8"), "as it was");
+    assert.deepEqual(readdirSync(directory).filter((name) => name === "nothing-there"), [], "nothing was made where a link leads");
+    // A plain file, or nothing yet, is a lock.
+    const release = holdFile(join(directory, "a lock"));
+    assert.notEqual(release, null);
+    assert.equal(holdFile(join(directory, "a lock")), null);
+    execFileSync(process.execPath, [
+      "--input-type=module",
+      "--eval",
+      `import { DatabaseSync } from "node:sqlite";
+       const db = new DatabaseSync(process.argv[1]);
+       try { db.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE"); process.exitCode = 1; }
+       catch (error) { if (!/database is locked/.test(error.message)) throw error; }
+       finally { db.close(); }`,
+      join(directory, "a lock"),
+    ]);
+    release!();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

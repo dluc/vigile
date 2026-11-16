@@ -12,7 +12,9 @@ parentPort.once("message", (start) => {
     return;
   }
   try {
-    const release = holdFile(file);
+    // This worker can disappear while its owner process is still synchronously changing protected state. Its
+    // holder therefore keeps the lock until the owner stops instead of releasing on this thread's disconnect.
+    const release = holdFile(file, true);
     if (!release) {
       parentPort!.postMessage({ held: false });
     } else if (Date.now() >= deadline) {

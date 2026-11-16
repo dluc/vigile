@@ -1,16 +1,17 @@
 import { accessSync, constants, existsSync, readFileSync, statfsSync } from "node:fs";
 import { isIP } from "node:net";
-import { networkInterfaces } from "node:os";
+import { networkInterfaces, uptime } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ConfigError, checkUsers, isTooOpen, loadConfig, masked, unknownEnvironment, type LoadedConfig } from "@vigile/config";
+import { ConfigError, checkUsers, isTooOpen, loadConfig, masked, samePlace as sameAs, unknownEnvironment, type LoadedConfig } from "@vigile/config";
 import { OPERATIONS, VERSION } from "@vigile/core";
 import { folderIsHeld, inspectTenantFile, tenantFiles } from "@vigile/storage-sqlite";
 import { UsageError, configPath, flag, type Args } from "../args.js";
 import { allUsers, areTexts, isCount, isRecord, keyRefused, oneLine, refusalOf } from "../answers.js";
 import { ANSWER_WITHIN_MS, NoAnswerError, NotRunningError, baseUrl, clientFor, type ServiceClient } from "../client.js";
-import { realPath } from "../paths.js";
+import { BACKUP_TIMES, everyHours, isRemembered, rememberedWait, standing, type Standing } from "../backup-schedule.js";
+import { backupMemory, backupPlaceRefused, refusedPlace, tenantsIn, unknownRefusal, wholeMoments } from "../backup.js";
 import { whoAnswers } from "../reach.js";
 import { redirectOf } from "../redirect.js";
 import { restoreInterrupted } from "../restore.js";
@@ -61,6 +62,19 @@ interface Status {
   auth: { keyless_user: string; users_with_keys: string[]; keys_of_someone_else: string[] } | undefined;
   /** Absent from a service from before it said what it is bound to. */
   loopback_only: boolean | undefined;
+  /** Absent from a service from before it took backups by itself. */
+  backups:
+    | {
+        enabled: boolean;
+        last_at: string | null;
+        next_due: string | null;
+        failure: { at: string; reason: string; actions: string[]; retry_at: string } | null;
+        /** How the last backup of the service's run ended, and what the service said of it. */
+        outcome: { at: string; kind: string; said: string | null } | null;
+        /** Why the service could not look at the backups there are, when it could not. */
+        unread: string | null;
+      }
+    | undefined;
 }
 
 /**
@@ -84,6 +98,10 @@ function readStatus(answer: unknown): Status {
   const count = (kind: string): number => (!counts || absent(counts[kind]) ? 0 : number(counts, kind, `engine.counts.${kind}`));
   const auth = part(answer, "auth");
   const listen = part(answer, "listen");
+  const backups = part(answer, "backups");
+  const failure = backups ? part(backups, "failure", "backups.failure") : undefined;
+  const outcome = backups ? part(backups, "outcome", "backups.outcome") : undefined;
+  const moment = (from: Record<string, unknown>, field: string, name: string): string | null => (absent(from[field]) ? null : text(from, field, name));
   return {
     pid: number(answer, "pid"),
     uptime_s: number(answer, "uptime_s"),
@@ -100,6 +118,21 @@ function readStatus(answer: unknown): Status {
       keys_of_someone_else: absent(auth.keys_of_someone_else) ? [] : texts(auth, "keys_of_someone_else", "auth.keys_of_someone_else"),
     },
     loopback_only: !listen || absent(listen.loopback_only) ? undefined : typeof listen.loopback_only === "boolean" ? listen.loopback_only : wrong("listen.loopback_only", "yes or no"),
+    backups: backups && {
+      enabled: typeof backups.enabled === "boolean" ? backups.enabled : wrong("backups.enabled", "yes or no"),
+      last_at: moment(backups, "last_at", "backups.last_at"),
+      next_due: moment(backups, "next_due", "backups.next_due"),
+      failure: failure
+        ? {
+            at: text(failure, "at", "backups.failure.at"),
+            reason: text(failure, "reason", "backups.failure.reason"),
+            actions: absent(failure.actions) ? [] : texts(failure, "actions", "backups.failure.actions"),
+            retry_at: text(failure, "retry_at", "backups.failure.retry_at"),
+          }
+        : null,
+      outcome: outcome ? { at: text(outcome, "at", "backups.outcome.at"), kind: text(outcome, "kind", "backups.outcome.kind"), said: moment(outcome, "said", "backups.outcome.said") } : null,
+      unread: moment(backups, "unread", "backups.unread"),
+    },
   };
 }
 
@@ -257,6 +290,81 @@ export async function doctor(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
       }
     }
 
+    // What the folder of the automatic backups says, which is what the service goes by when it starts.
+    const misplaced = backupPlaceRefused(loaded);
+    let rememberedFailure: { at: number; said: string | null; actions: string[]; retryAt: number } | null = null;
+    let rememberedWarning: { at: number; said: string | null; actions: string[] } | null = null;
+    if (!config.backup.enabled) {
+      add({ section: "Data", level: "ok", title: "automatic backups", detail: "off: backup.enabled is false; take backups with vigile backup <folder>" });
+    } else if (misplaced) {
+      // Which reason it is decides what is said and what is to be done.
+      let why: string;
+      let fix: string;
+      switch (misplaced.code) {
+        case "same_data_folder_of_this_instance":
+          why = `backup.folder leads to ${misplaced.backups}, which is the data folder (data_dir): ${refusedPlace(misplaced).message}`;
+          fix = "Give the backups a folder of their own: vigile config set backup.folder <folder>. Or turn them off: vigile config set backup.enabled false. Then restart the service.";
+          break;
+        case "data_folder_of_another_instance":
+          why = `backup.folder leads to the data folder of another instance: ${refusedPlace(misplaced).message}`;
+          fix = "Name a folder that is no instance's data folder: vigile config set backup.folder <folder>. Or turn them off: vigile config set backup.enabled false. Then restart the service.";
+          break;
+        default:
+          unknownRefusal(misplaced);
+      }
+      add({ section: "Data", level: "fail", title: "automatic backups have their own folder", detail: `${why} No automatic backup is taken.`, fix });
+    } else {
+      // As the service reckons at its start, from the backups in the folder and the clock: a backup is one that
+      // has a copy of every tenant, and the next is due when the newest that counts by then is an interval old.
+      let stands: Standing | null = null;
+      let remembered = null;
+      let unreadable = "";
+      let memoryUnreadable = "";
+      const wall = Date.now();
+      const everyMs = Math.ceil(config.backup.every_hours * 3_600_000);
+      const pause = Math.min(BACKUP_TIMES.retryMs, everyMs);
+      try {
+        const read = backupMemory(dataDir).read();
+        remembered = isRemembered(read) ? read : null;
+        if (read !== null && !remembered) memoryUnreadable = typeof (read as { unreadable?: unknown }).unreadable === "string" ? (read as { unreadable: string }).unreadable : "it is not what the service writes";
+      } catch (error) {
+        memoryUnreadable = (error as Error).message;
+      }
+      let moments: number[] = [];
+      try {
+        moments = wholeMoments(loaded.backupDir, tenantsIn(dataDir));
+      } catch (error) {
+        unreadable = (error as Error).message;
+      }
+      const wait = memoryUnreadable ? pause : rememberedWait(remembered, loaded.backupDir, wall, uptime() * 1000, pause);
+      stands = standing({ wall, mono: 0, moments, notBefore: wait, everyMs });
+      const last = stands?.last ?? null;
+      add({
+        section: "Data",
+        level: unreadable ? "fail" : "ok",
+        title: "automatic backups are on",
+        detail: unreadable
+          ? `${loaded.backupDir} cannot be read: ${unreadable}`
+          : `${everyHours(config.backup.every_hours)} into ${loaded.backupDir}, the newest ${config.backup.keep} of a tenant are kept; ${
+              last === null
+                ? `none taken yet, the first is due ${stands!.mayAttempt ? "when the service runs" : new Date(stands!.startWall).toISOString()}`
+                : `last ${new Date(last).toISOString()}, next due ${stands!.mayAttempt ? "when the service runs" : new Date(stands!.startWall).toISOString()}`
+            }`,
+        fix: "Give this account, and the one the service runs as, read and write access to the folder, or choose another: vigile config set backup.folder <folder>, then restart the service.",
+      });
+      if (memoryUnreadable) {
+        add({
+          section: "Data",
+          level: "fail",
+          title: "automatic backup state is readable",
+          detail: `What the service kept of its last automatic backup cannot be read: ${said(memoryUnreadable)}`,
+          fix: `Remove ${join(dataDir, "vigile-backups.json")} to reset this state. That also removes the retry pause: if a backup is due, the service can try after its initial startup delay and writes the state anew.`,
+        });
+      }
+      if (remembered?.kind === "incomplete" && remembered.folder === loaded.backupDir && stands) rememberedFailure = { at: remembered.at, said: remembered.said, actions: remembered.actions, retryAt: stands.startWall };
+      if (remembered && remembered.folder === loaded.backupDir && ["complete_unconfirmed", "complete_retention_failed", "complete_unreported"].includes(remembered.kind)) rememberedWarning = { at: remembered.at, said: remembered.said, actions: remembered.actions };
+    }
+
     // Service
     const base = baseUrl(loaded);
     const lockFile = join(dataDir, LOCK_FILE);
@@ -272,6 +380,24 @@ export async function doctor(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
     // Who answers is asked without a key, and the admin key goes out only to the service of this config.
     const answer = await whoAnswers(loaded, answerWithinMs);
     if (!answer.ok) {
+      if (rememberedFailure) {
+        add({
+          section: "Data",
+          level: "fail",
+          title: "last automatic backup worked",
+          detail: `failed at ${new Date(rememberedFailure.at).toISOString()}: ${said(rememberedFailure.said ?? "It failed.")}`,
+          fix: `${rememberedFailure.actions.map(said).join(" ")} The service tries again at ${new Date(rememberedFailure.retryAt).toISOString()}.`,
+        });
+      }
+      if (rememberedWarning) {
+        add({
+          section: "Data",
+          level: "warn",
+          title: "last automatic backup has a warning",
+          detail: `${new Date(rememberedWarning.at).toISOString()}: ${said(rememberedWarning.said ?? "The backup is in place, but its final housekeeping was not confirmed.")}`,
+          fix: rememberedWarning.actions.map(said).join(" ") || "Start the service and check automatic backup status again.",
+        });
+      }
       // Something that takes the connection and says nothing is there, which is not the same as nothing. With
       // nothing holding the data folder on this machine, it is another program.
       const silent = answer.why === "silent";
@@ -331,7 +457,7 @@ export async function doctor(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
 
       if (status && client) {
         // The same config and the same data, by whatever names each side reaches them.
-        const samePlace = realPath(status.config_path) === realPath(path) && realPath(status.data_dir) === realPath(dataDir);
+        const samePlace = sameAs(status.config_path, path) && sameAs(status.data_dir, dataDir);
         add({
           section: "Service",
           level: samePlace ? "ok" : "fail",
@@ -366,6 +492,26 @@ export async function doctor(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
           detail: differences.length ? differences.join("; ") : "no restart needed",
           fix: "Restart the service to apply the change.",
         });
+        // A service from before automatic backups says nothing of them, and the check above says it needs a restart.
+        const backups = status.backups;
+        if (backups?.enabled) {
+          const failure = backups.failure;
+          // How the last backup ended is what the service made of it when it settled the backup's files: one
+          // that is whole and in place is not called failed, whatever else there is to say of it.
+          const remark = !failure && backups.outcome && backups.outcome.kind !== "complete" && backups.outcome.kind !== "incomplete" ? backups.outcome : null;
+          const when = backups.last_at
+            ? `taken ${said(backups.last_at)}; the next is due ${said(backups.next_due ?? "at a time the service does not say")}`
+            : `none taken yet; the first is due ${said(backups.next_due ?? "at a time the service does not say")}`;
+          // What the service could not look at, it does not vouch for: the times are by the one backup it took itself.
+          const unread = !failure && backups.unread ? ` The service could not look at the backups there are (${oneLine(backups.unread, 300).replace(/[.!?]$/, "")}): this goes by the last one it took itself.` : "";
+          add({
+            section: "Service",
+            level: failure ? "fail" : remark || unread ? "warn" : "ok",
+            title: "last automatic backup worked",
+            detail: failure ? `failed at ${said(failure.at)}: ${said(failure.reason)}` : remark ? `${when}. ${oneLine(remark.said ?? remark.kind, 500)}${unread}` : `${when}${unread ? `.${unread}` : ""}`,
+            fix: failure ? `${failure.actions.map(said).join(" ")} The service tries again at ${said(failure.retry_at)}.` : remark ? "The backup itself is in place. If this is said again of the next one, look at the service's log." : unread ? "Check that the backup folder is there and that the account the service runs as can read it." : undefined,
+          });
+        }
         const broken = status.inconsistencies;
         add({
           section: "Service",

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { processIdentity, processIsAlive, stopProcess } from "./stop-process.js";
 
-const [file, answer, released, accepted, disarm, disarmed, heartbeat] = process.argv.slice(2);
+const [file, answer, released, accepted, disarm, disarmed, heartbeat, disconnectMode] = process.argv.slice(2);
 const busy = (error: unknown): boolean => (error as { errcode?: number }).errcode === 5 || /database is locked/.test((error as Error).message);
 let database: DatabaseSync | null = null;
 let watchdog: ChildProcess | null = null;
@@ -102,7 +102,7 @@ try {
       finish(false);
     }
   });
-  process.on("disconnect", finishAfterOwnerStops);
+  process.on("disconnect", disconnectMode === "owner" ? finishAfterOwnerStops : () => finish(false));
 } catch (error) {
   if (database) {
     try {
