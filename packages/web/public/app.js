@@ -462,10 +462,9 @@ function renderProjects() {
         { class: "project-chip-wrap" },
           el(
             "button",
-            { class: `project-chip${pressed ? " selected" : ""}${dimmed}`, type: "button", "aria-pressed": String(pressed), title: `${project.title}: ${finished} of ${total} finished. ${pressed ? "Show all projects" : "Show only this project"}`, onclick: choose },
+            { class: `project-chip${pressed ? " selected" : ""}${dimmed}`, type: "button", "aria-pressed": String(pressed), title: `${project.title}: ${pressed ? "Show all projects" : "Show only this project"}`, onclick: choose },
             el("span", { class: "project-id" }, project.id),
             el("span", { class: "bar", role: "img", "aria-label": `${percent}% finished` }, el("i", { style: `width:${percent}%` })),
-            el("span", {}, `${finished}/${total}`),
             project.has_problems && el("span", { class: "warn", title: "Has problems" }, "⚠"),
           ),
         zoomButton("project-chip-zoom"),
@@ -490,7 +489,6 @@ function renderProjects() {
       el(
         "div",
         { class: "project-foot" },
-        el("span", {}, `${finished} of ${total} finished`),
         el("span", { class: "project-actions" },
           zoomButton(),
           project.has_problems && el("span", { class: "tag warn" }, "⚠ problems"),
