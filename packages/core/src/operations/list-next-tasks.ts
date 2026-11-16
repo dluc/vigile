@@ -31,7 +31,7 @@ export const nextTasksCursor = (input: Record<string, unknown>, who: string): Cu
 export const listNextTasks = defineRead({
   name: "list_next_tasks",
   description:
-    "List the tasks you can start now: open, with nothing unfinished in the way, inside an active path of projects and groups, and either assigned to you or to nobody. Grouping directs execution: compare priority from the top-level group through each nested group to the task, at the first difference; a group comes before what it contains, and a task in several groups uses its highest active path. Ungrouped tasks use their own priority. Tasks of the same path come in no meaningful order, so choose among them using value and size. This starts nothing: read the chosen task with get, then call set_task_status with in_progress only when work actually starts.",
+    "List the tasks you can start now: open, with nothing unfinished in the way, inside an active path of projects and groups, and either assigned to you or to nobody. Grouping directs execution: compare priority from the top-level group through each nested group to the task, at the first difference; a group comes before what it contains, and a task in several groups uses its highest active path. Ungrouped tasks use their own priority. Tasks on the same priority path are listed by ID for a stable order; ID is not a priority. Use value and size to choose among them; neither sorts the list. This starts nothing: read the chosen task with get, then call set_task_status with in_progress only when work actually starts.",
   access: "all",
   input: z.strictObject({
     project: z.string().optional().describe("Only tasks inside this project, at any depth."),
