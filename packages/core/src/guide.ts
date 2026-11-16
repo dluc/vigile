@@ -168,8 +168,8 @@ const TOPICS: Record<GuideTopic, Topic> = {
 - A project is open, in_preview, ready, broken or cancelled.
 
 ## Calculated for you, never stored
-- next: an open task with nothing unfinished in front of it. list_next_tasks lists these.
-- waiting: an open task that depends on something unfinished. waiting_for says on what.
+- next: an open task with nothing unfinished in front of it, reached through an active path of projects and groups. list_next_tasks lists these.
+- waiting: an open task that depends on something unfinished, or for which every path through its containers is inactive. waiting_for says on what.
 - progress: for a task that contains tasks, and for a project, how many of the tasks inside are finished.
 - problems: contradictions in the plan, such as a finished task whose dependency was reopened.
 
@@ -198,7 +198,9 @@ get_guide with topic "organising" shows the ways to structure work. "working" is
 ## Order
 - "depends on" says one task must be finished before another can start. Give depends_on when creating a task, or add_link later.
 - Depend on a group to wait for a whole feature, or on a project to wait for a whole project, with one link.
-- Order is not stored in any other way. Among tasks that can start, priority decides first, then value and size.
+- Containment directs execution as well as presentation. list_next_tasks compares the priority of the outermost group first, then each nested group, then the task. A group comes before what it contains. A task in several groups uses its highest active path; one with no group uses its own priority.
+- A group is active while open or in progress. A project is active until ready or cancelled. Where every path is inactive, the task waits and has a problem that names the containers to reopen. Dependencies and assignments still decide whether it can start.
+- Among tasks on the same priority path, value and size help the caller choose; they do not sort the list.
 
 ## What a task says
 - Title: say the outcome, not only the area. "Checkout: a customer can pay for a basket" tells a reader what will exist; "Checkout" or "Web page" does not. A group's title matters most, because it is what the high-level view shows.
@@ -231,7 +233,7 @@ get_guide with topic "examples" shows complete sequences of calls for these shap
 - Do not invent work, rearrange priorities or broaden the task because the guide suggests a possible structure. Record changes that the instructed work actually reveals.
 
 ## The routine
-1. list_next_tasks lists what can start now, most important first. Give project or parent to stay inside one area.
+1. list_next_tasks lists what can start now, following priorities from the outermost group to the task. Give project or parent to stay inside one area.
 2. get shows the task in full: its description, its reason, its links and its version.
 3. set_task_status with in_progress when implementation really starts, and only while implementation is actively under way. Asking a question or proposing a plan does not start a task. Starting an unassigned task assigns it to you. Only an assignee may start assigned work; change the assigned-to link first to record a takeover.
 4. Do the work.

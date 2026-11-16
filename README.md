@@ -142,8 +142,10 @@ vigile create-task --project WEB --parent WEB-001 \
 vigile list-next-tasks
 ```
 
-`list-next-tasks` shows the group and the cart page: the payment form waits for
-the cart page. Open `http://127.0.0.1:8710/` to see the same on the board and in
+`list-next-tasks` shows the group first and the cart page after it: an open
+container comes before what is inside it, but its open children are available
+too. Once the group is in progress it leaves the list; the cart page stays. The
+payment form waits for the cart page. Open `http://127.0.0.1:8710/` to see the same on the board and in
 the graph. When you are done, stop the service and delete `/tmp/vigile-demo`;
 nothing else was written.
 
@@ -153,7 +155,8 @@ nothing else was written.
 
 An agent that connects is told the routine, and can read more with `get_guide`:
 
-1. `list_next_tasks` lists what can start now, most important first.
+1. `list_next_tasks` lists what can start now, following the priority path from
+   the outermost group to the task. Give `parent` to stay inside one area.
 2. `get` shows a task in full: description, reason, links and version.
 3. `set_task_status` with `in_progress` when it really starts. This assigns an
    unassigned task to the agent. Work assigned to someone else is refused until
@@ -972,8 +975,10 @@ No answer holds more than 100 entries of anything:
   place of its furthest entry. It reads at most 1,000 pages and 100,000
   entries: a plan with more users than that does not start, and one with more
   tasks or projects is not shown by the page. A task whose priority changes
-  while `list_next_tasks` is read moves in that list; whoever reads the list
-  to its end finds the same task twice and reads it again from the start.
+  while `list_next_tasks` is read moves in that list; each entry therefore
+  carries the `priority_path` that places it, from its outermost active group
+  to the task. Whoever reads the list to its end finds the same task twice and
+  reads it again from the start.
 - **`get`** returns at most 100 entries of each list of the item: its links of
   each kind, in the order of their IDs; the latest entries of its status
   timeline and of its history, oldest first; and `contained_in`, `depends_on`,

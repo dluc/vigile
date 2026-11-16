@@ -57,12 +57,12 @@ export function adversary(paging: any, target: Target): Case[] {
     if (target.list === "links") return { kind: "task", id: `ZZZ-${1000 + n}`, title: `Made up ${n}`, status: "open" };
     if (target.list === "timeline") return { status: "open", at: "2026-01-01T00:00:00.000Z", by: "admin", place: 1_000_000_000 - n };
     if (target.list === "history") return { at: "2026-01-01T00:00:00.000Z", by: "admin", action: "updated", data: {}, place: [0, 1_000_000 - n] };
-    return { kind: "task", id: `ZZZ-${1000 + n}`, title: `Made up ${n}`, type: "task", status: "open", priority: target.list === "next_tasks" ? -1e300 : 0 };
+    return { kind: "task", id: `ZZZ-${1000 + n}`, title: `Made up ${n}`, type: "task", status: "open", priority: target.list === "next_tasks" ? -1e300 : 0, ...(target.list === "next_tasks" ? { priority_path: [-1e300] } : {}) };
   };
   /** The sort key of the nth new entry: what the service would put into the token after it. */
   const key = (n: number): unknown => {
     if (target.list === "links") return `task:ZZZ-${1000 + n}`;
-    if (target.list === "next_tasks") return [-1e300, `ZZZ-${1000 + n}`];
+    if (target.list === "next_tasks") return [[-1e300], `ZZZ-${1000 + n}`];
     if (target.list === "timeline" || target.list === "history") return entry(n).place;
     return entry(n).id;
   };
@@ -90,14 +90,14 @@ export function adversary(paging: any, target: Target): Case[] {
   const identity = (e: any): string => (target.list === "links" ? `${e.kind}:${e.kind === "project" && /^project:\d+$/.test(e.id) ? e.id.slice(8) : e.id}` : target.list === "timeline" ? String(e.place) : target.list === "history" ? e.place.join(".") : e.id);
   const before = (e: any): string => `it holds ${shown(identity(e))}, which a page before held`;
   /** The key of an entry the reader holds, as the list has it. */
-  const keyOfSeen = (e: any): unknown => (target.list === "links" ? `${e.kind}:${e.kind === "project" && /^project:\d+$/.test(e.id) ? e.id.slice(8) : e.id}` : target.list === "next_tasks" ? [e.priority, e.id] : target.list === "timeline" || target.list === "history" ? e.place : e.id);
+  const keyOfSeen = (e: any): unknown => (target.list === "links" ? `${e.kind}:${e.kind === "project" && /^project:\d+$/.test(e.id) ? e.id.slice(8) : e.id}` : target.list === "next_tasks" ? [e.priority_path, e.id] : target.list === "timeline" || target.list === "history" ? e.place : e.id);
   /**
    * What is no sort key of this list: nothing that is one, a key of the wrong sort, a list or fields where one
    * value is, and what is a key of another list and looks like one.
    */
   const noKeys: unknown[] =
     target.list === "next_tasks"
-      ? [{}, null, 5, "ZZZ-1", [0], [0, "ZZZ-1", 3], ["0", "ZZZ-1"], [null, "ZZZ-1"], [0, 5], { priority: 0, id: "ZZZ-1" }]
+      ? [{}, null, 5, "ZZZ-1", [0], [[0]], [[0], "ZZZ-1", 3], [["0"], "ZZZ-1"], [[], "ZZZ-1"], [null, "ZZZ-1"], [[0], 5], { priority_path: [0], id: "ZZZ-1" }]
       : target.list === "links"
         ? [{}, null, 5, "ZZZ-1", "thing:ZZZ-1", ":ZZZ-1", ["task:ZZZ-1"], [0, "ZZZ-1"], { kind: "task", id: "ZZZ-1" }]
         : target.list === "timeline"
@@ -162,14 +162,14 @@ export function adversary(paging: any, target: Target): Case[] {
     // priority it is there twice all the same, in one page or in a later one.
     ...(target.list === "next_tasks"
       ? [
-          { name: "a task twice in one page, under two priorities", page: () => ({ entries: [entry(1), { ...entry(1), priority: -2e300 }] }), why: `it holds ${entry(1).id} twice`, requests: 1 },
+           { name: "a task twice in one page, under two priorities", page: () => ({ entries: [entry(1), { ...entry(1), priority: -2e300, priority_path: [-2e300] }] }), why: `it holds ${entry(1).id} twice`, requests: 1 },
           {
             name: "a task of a page before, further on under another priority",
-            page: (n: number) => (n === 1 ? one(1) : { entries: [{ ...entry(1), priority: -2e300 }] }),
+             page: (n: number) => (n === 1 ? one(1) : { entries: [{ ...entry(1), priority: -2e300, priority_path: [-2e300] }] }),
             // Looked at by itself, the later page is a page of the list: it is the reading of both that holds the task twice.
             ...(target.remembers ? { why: before(entry(1)), requests: 2 } : { why: null, requests: 2, holds: 2 }),
           },
-          { name: "a task of a page before, further on under another priority, in a page that goes on", page: (n: number) => (n === 1 ? one(1) : n === 2 ? { entries: [{ ...entry(1), priority: -2e300 }], continuation: seal([-2e300, entry(1).id]) } : { entries: [] }), ...(target.remembers ? { why: before(entry(1)), requests: 2 } : { why: null, requests: 3, holds: 2 }) },
+           { name: "a task of a page before, further on under another priority, in a page that goes on", page: (n: number) => (n === 1 ? one(1) : n === 2 ? { entries: [{ ...entry(1), priority: -2e300, priority_path: [-2e300] }], continuation: seal([[-2e300], entry(1).id]) } : { entries: [] }), ...(target.remembers ? { why: before(entry(1)), requests: 2 } : { why: null, requests: 3, holds: 2 }) },
         ]
       : []),
     // No progress, and too much of it.

@@ -31,14 +31,13 @@ const SHAPES_WORK = new Set(LINK_TYPES.filter((type) => type.effect === "groups"
  *    Moved by: an item being stored or removed, for every item it has a link with. This costs one step for
  *    each of the changed item's links: a handful for a task that changes status, 20,000 for a project of
  *    20,000 tasks that is renamed.
- * 5. What is worked out from items any number of links away. Only an item that contains others shows such:
- *    its `progress` counts the tasks inside it at any depth, and its problems ("done, but tasks inside are
- *    not", "ready, but tasks are not finished", "contains tasks that have problems") look at every task inside
- *    it and, for the last, at what each of those waits for. Which items a change reaches that way is not
- *    followed. Instead one number is kept for the whole plan, the revision at which a task or a project was
- *    last stored or removed or a link that shapes work ("contains", "depends on") last came or went, and it
- *    counts for every item that contains something. So the answer about a group or a project says a new
- *    revision after any change to any task: more often than needed, never too seldom.
+ * 5. What is worked out from items any number of links away. An item that contains others shows progress and
+ *    problems from every task below it. A contained task's `is_next`, `is_waiting`, `waiting_for` and problems
+ *    also depend on every group and project above it. Which items a change reaches that way is not followed.
+ *    Instead one number is kept for the whole plan, the revision at which a task or a project was last stored
+ *    or removed or a link that shapes work ("contains", "depends on") last came or went. It counts for every
+ *    item that contains something and every item that is contained. Their answers can therefore say a new
+ *    revision after an unrelated work change: more often than needed, never too seldom.
  * 6. The names of users, where an answer shows who did something: `created_by`, and `by` in the timeline and
  *    in the history. A name is shown as the user's ID once the user is gone for good; nothing else changes a
  *    name. Which answers show a user is not followed either: one number for the whole plan, the revision at
@@ -48,8 +47,8 @@ const SHAPES_WORK = new Set(LINK_TYPES.filter((type) => type.effect === "groups"
  * Everything here is one lookup to read and is kept up where a change is taken into memory; no list is gone
  * through to answer.
  *
- * What is kept is bounded by what the plan holds: a number for an item only while the item is in the graph, a
- * count only for an item that has something in it, and two numbers for the plan. An item that is removed for
+ * What is kept is bounded by what the plan holds: a number for an item only while the item is in the graph,
+ * counts only for items at either end of containment, and two numbers for the plan. An item that is removed for
  * good takes its number with it, and the end of a link that is no item never gets one. A reading that was
  * under way when an item went is thrown away because the plan's revision moved, not because of a number kept
  * for what is gone. An item that has no number is as it was read from the store: should an ID ever be given
@@ -60,6 +59,8 @@ export class Unchanged {
   private readonly touched = new Map<string, number>();
   /** How many items each item contains, for those that contain any (5). */
   private readonly holding = new Map<string, number>();
+  /** How many containers each item is in, for those whose calculated state depends on ancestors (5). */
+  private readonly contained = new Map<string, number>();
   /** The revision at which work was last changed or reshaped anywhere (5). */
   private workChanged = 0;
   /** The revision at which a user was last removed for good (6). */
@@ -70,17 +71,22 @@ export class Unchanged {
     private readonly graph: GraphView,
     private readonly readAt: number,
   ) {
-    for (const link of graph.links()) if (link.type === CONTAINS) this.holding.set(key(link.from), (this.holding.get(key(link.from)) ?? 0) + 1);
+    for (const link of graph.links()) {
+      if (link.type !== CONTAINS) continue;
+      this.holding.set(key(link.from), (this.holding.get(key(link.from)) ?? 0) + 1);
+      this.contained.set(key(link.to), (this.contained.get(key(link.to)) ?? 0) + 1);
+    }
   }
 
-  /** How many numbers and counts are kept for single items: never more than twice the items in the graph and the items that links start at. */
+  /** How many numbers and counts are kept for single items: bounded by three per item in the graph. */
   get size(): number {
-    return this.touched.size + this.holding.size;
+    return this.touched.size + this.holding.size + this.contained.size;
   }
 
   since(ref: Ref): number {
     const own = this.touched.get(key(ref)) ?? this.readAt;
-    return Math.max(own, this.userGone, this.holding.has(key(ref)) ? this.workChanged : 0);
+    const shaped = this.holding.has(key(ref)) || this.contained.has(key(ref));
+    return Math.max(own, this.userGone, shaped ? this.workChanged : 0);
   }
 
   /** Only an item that is in the graph has a number: what is no item, or no longer one, has none kept for it. */
@@ -126,6 +132,7 @@ export class Unchanged {
     this.neighbours(ref, revision);
     this.touched.delete(key(ref));
     this.holding.delete(key(ref));
+    this.contained.delete(key(ref));
     if (ref.kind === "user") this.userGone = revision;
     else this.workChanged = revision;
   }
@@ -140,6 +147,9 @@ export class Unchanged {
     const holds = (this.holding.get(key(link.from)) ?? 0) + by;
     if (holds > 0) this.holding.set(key(link.from), holds);
     else this.holding.delete(key(link.from));
+    const inside = (this.contained.get(key(link.to)) ?? 0) + by;
+    if (inside > 0) this.contained.set(key(link.to), inside);
+    else this.contained.delete(key(link.to));
   }
 
   /** A line is added to an item's history. */

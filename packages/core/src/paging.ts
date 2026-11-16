@@ -111,12 +111,20 @@ export const whoMark = (who: string): string => questionMark(["who", who]);
  * and the SHA-256 of that. It is the same few dozen characters for a key of any length, and no two keys of a
  * list have the same.
  */
-export type PlaceMark = readonly [length: number, digest: string];
-export function placeMark(key: unknown): PlaceMark {
+export type PlaceMark = readonly [length: number, digest: string, identity?: string];
+export function placeMark(key: unknown, identity?: string): PlaceMark {
   const text = JSON.stringify(key);
-  return [text.length, written(sha256(asBytes.encode(text)))];
+  const digest = written(sha256(asBytes.encode(text)));
+  return identity === undefined ? [text.length, digest] : [text.length, digest, identity];
 }
-const isPlaceMark = (value: unknown): value is PlaceMark => Array.isArray(value) && value.length === 2 && Number.isSafeInteger(value[0]) && value[0] > 0 && typeof value[1] === "string" && /^[A-Za-z0-9_-]{43}$/.test(value[1]);
+const isPlaceMark = (value: unknown): value is PlaceMark =>
+  Array.isArray(value) &&
+  (value.length === 2 || value.length === 3) &&
+  Number.isSafeInteger(value[0]) &&
+  value[0] > 0 &&
+  typeof value[1] === "string" &&
+  /^[A-Za-z0-9_-]{43}$/.test(value[1]) &&
+  (value[2] === undefined || (typeof value[2] === "string" && value[2].length > 0 && value[2].length <= 100));
 
 /**
  * What a token says: which question it continues, whose list it is where the list is a user's own, and the
@@ -156,11 +164,11 @@ export function openToken(token: unknown): OpenToken | null {
 export const isToken = (value: unknown): value is string => openToken(value) !== null;
 
 /** Whether a token names the place of a sort key: it carries that very key, or its mark. */
-export function namesPlace(says: OpenToken, key: unknown): boolean {
+export function namesPlace(says: OpenToken, key: unknown, identity?: string): boolean {
   const text = JSON.stringify(key);
   if (says.x === undefined) return JSON.stringify(says.k) === text;
   // The length first: among the keys of a list, few are as long as the one that is looked for.
-  return says.x[0] === text.length && says.x[1] === placeMark(key)[1];
+  return says.x[0] === text.length && says.x[1] === placeMark(key)[1] && (says.x[2] === undefined || says.x[2] === identity);
 }
 
 /* Which list a token belongs to. */
@@ -215,9 +223,11 @@ export interface ListDescriptor<Key = any> {
   keyOf(entry: any): unknown;
   /** What an entry is, whatever its place: it does not change while the list is read, and no two entries of a list have the same. A text, or nothing for what is no entry. */
   identityOf(entry: any): string | undefined;
+  /** A bounded identity carried only beside the digest of an overlong key, so that key can be found directly. */
+  markIdentity?(key: Key): string | undefined;
 }
 
-type Order<Key> = Pick<ListDescriptor<Key>, "entries" | "isKey" | "compare" | "keyOf" | "identityOf">;
+type Order<Key> = Pick<ListDescriptor<Key>, "entries" | "isKey" | "compare" | "keyOf" | "identityOf" | "markIdentity">;
 
 /** An ID as it is written, whatever it is: no ID is turned into a number, which cannot hold every one. */
 const isId = (key: unknown): key is string => typeof key === "string";
@@ -233,16 +243,22 @@ const ORDERS = {
   list_tasks: inOrderOfIds("tasks", compareTaskIds),
   list_users: inOrderOfIds("users", compareUserIds),
   /**
-   * Highest priority first, then by ID. The list is the asking user's own: its tokens name that user. A task's
-   * place in it moves with its priority; what the task is, is its ID.
+   * Containment priority path first, highest at the first difference, then by ID. A prefix comes before what it
+   * contains. The list is the asking user's own: its tokens name that user. A task's place moves with its active
+   * path; what the task is, is its ID.
    */
   list_next_tasks: {
     entries: "tasks",
-    isKey: (key: unknown): key is [number, string] => Array.isArray(key) && key.length === 2 && typeof key[0] === "number" && Number.isFinite(key[0]) && isId(key[1]),
-    compare: (a: [number, string], b: [number, string]) => b[0] - a[0] || compareTaskIds(a[1], b[1]),
-    keyOf: (entry: any): unknown => [entry?.priority, entry?.id],
+    isKey: (key: unknown): key is [number[], string] => Array.isArray(key) && key.length === 2 && Array.isArray(key[0]) && key[0].length > 0 && key[0].every((part) => typeof part === "number" && Number.isFinite(part)) && isId(key[1]),
+    compare: (a: [number[], string], b: [number[], string]) => {
+      const common = Math.min(a[0].length, b[0].length);
+      for (let at = 0; at < common; at++) if (a[0][at] !== b[0][at]) return b[0][at]! - a[0][at]!;
+      return a[0].length - b[0].length || compareTaskIds(a[1], b[1]);
+    },
+    keyOf: (entry: any): unknown => [entry?.priority_path, entry?.id],
     identityOf: idOf,
-  } satisfies Order<[number, string]>,
+    markIdentity: (key: [number[], string]) => (key[1].length > 0 && key[1].length <= 100 ? key[1] : undefined),
+  } satisfies Order<[number[], string]>,
   /** Quiet assigned work, oldest recorded task change first, then by ID. */
   list_stale_tasks: {
     entries: "claims",
@@ -346,7 +362,7 @@ export function tokenAfter(list: ListDescriptor, key: unknown): string | undefin
   const says = { q: questionMark(list.question), ...(typeof list.owner === "object" ? { w: whoMark(list.owner.who) } : {}) };
   if (list.owner === SOMEONE) return undefined;
   const carried = sealToken({ ...says, k: key });
-  return carried.length <= LONGEST_TOKEN ? carried : sealToken({ ...says, x: placeMark(key) });
+  return carried.length <= LONGEST_TOKEN ? carried : sealToken({ ...says, x: placeMark(key, list.markIdentity?.(key)) });
 }
 
 /* Reading a list to its end. */
@@ -412,7 +428,7 @@ export function resume(list: ListDescriptor, pages: number, held: unknown[], tok
     seen.add(identity);
   }
   const from = furthestOf(list, keys);
-  if (from === undefined || !namesPlace(says, from)) throw new NotAList("it goes on from another place than the furthest of its entries");
+  if (from === undefined || !namesPlace(says, from, list.markIdentity?.(from))) throw new NotAList("it goes on from another place than the furthest of its entries");
   return { pages, entries: held.length, seen, sent: token as string, from, ...(says.w === undefined ? {} : { owner: says.w }) };
 }
 
@@ -470,7 +486,7 @@ export function takePage(list: ListDescriptor, progress: Progress, entries: unkn
   if (from !== undefined) for (const key of keys) if (!(list.compare(from, key) < 0)) return no(`it holds ${shownKey(key)}, which is not after the place it was asked from`);
   // 7
   const furthest = furthestOf(list, keys);
-  if (says && !namesPlace(says, furthest)) return no("it goes on from another place than the furthest of its entries");
+  if (says && !namesPlace(says, furthest, list.markIdentity?.(furthest))) return no("it goes on from another place than the furthest of its entries");
   // Taken.
   progress.pages++;
   progress.entries += entries.length;
