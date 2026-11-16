@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { MemoryStorage, type Change } from "@vigile/storage";
+import { MemoryStorage, type Change, type CommitRequest, type Head, type TimelinePage, type TimelinePageRequest } from "@vigile/storage";
 import { comparePrioritySegments, executionBlockers, executionPriorityPath, executionPrioritySegments, executionRetained, executionRoute, priorityPathFrom, priorityPathNumbers, taskCalc, type BlockerRoute, type ExecutionKnown, type ExecutionStats, type PriorityPath } from "./calc.js";
 import { Graph } from "./graph.js";
 import { KINDS, compareNumerals, comparePlaces, compareProjectIds, compareTaskIds, compareUserIds, placeOf, refText } from "./ids.js";
@@ -27,7 +27,7 @@ async function setup(storage = new MemoryStorage()) {
   const log: OperationLog[] = [];
   const engine = await Engine.open({ storage, keys, clock: { now: () => new Date((tick += 1000)) }, onOperation: (e) => log.push(e) });
   const as = (username: string) => (operation: string, input: Record<string, unknown> = {}) => engine.execute(operation, username, input) as Promise<any>;
-  return { engine, storage, keys, log, agent: as("agent1"), admin: as("admin"), person: as("user"), as };
+  return { engine, storage, keys, log, agent: as("agent1"), admin: as("admin"), person: as("user"), as, setNow: (value: string) => { tick = Date.parse(value) - 1000; } };
 }
 
 async function refusal(promise: Promise<unknown>): Promise<ReturnType<VigileError["toJSON"]>> {
@@ -63,6 +63,8 @@ async function earlierOfTheName() {
       entry("deleted_permanently", first),
       { op: "put_object", record: objects.find((record) => record.kind === "project")!, text: "" },
       entry("created", second, { status: "open" }),
+      // The delete took the project's timeline with it, as it takes everything stored under the ID.
+      { op: "add_timeline", record: { kind: "project", id: "ABC", data: { status: "open", at: second, by: "3" } } },
     ],
   });
   await all.engine.reload();
@@ -238,6 +240,388 @@ describe("dates carried over from another tool", () => {
     // A deleted item is not changed.
     await agent("delete", { id: open.id, version: done.version });
     assert.equal((await refusal(agent("override_timestamp", { id: open.id, version: done.version + 1, name: "created_at", value: "2025-02-01T09:00:00Z" }))).code, "rule_violation");
+  });
+});
+
+/** A store that remembers what each commit was given to write, and how often a timeline was read from it. */
+class WatchedStorage extends MemoryStorage {
+  readonly commits: CommitRequest[] = [];
+  timelinesRead = 0;
+  /** Called before a timeline is read, when set: for a change that falls into a read. */
+  beforeTimeline?: () => Promise<void>;
+
+  override async commit(tenant: string, request: CommitRequest): Promise<Head> {
+    this.commits.push(request);
+    return super.commit(tenant, request);
+  }
+
+  override async readTimeline(tenant: string, kind: string, id: string, page?: TimelinePageRequest): Promise<TimelinePage> {
+    this.timelinesRead++;
+    const before = this.beforeTimeline;
+    this.beforeTimeline = undefined;
+    await before?.();
+    return super.readTimeline(tenant, kind, id, page);
+  }
+}
+
+describe("the timeline of an item's statuses", () => {
+  it("costs a change of status one entry and a record that does not grow, however many changes came before, for a task and for a project", async () => {
+    const storage = new WatchedStorage();
+    const { agent } = await setup(storage);
+    const made = await agent("create_task", task("Back and forth"));
+    await agent("create_project", { title: "Up and down", prefix: "upd" });
+    const changes = 300;
+    for (const [operation, id, statuses] of [["set_task_status", made.id, ["draft", "open"]], ["set_project_status", "UPD", ["broken", "open"]]] as const) {
+      const first = storage.commits.length;
+      for (let n = 0; n < changes; n++) await agent(operation, { id, version: n + 1, status: statuses[n % 2] });
+      const written = storage.commits.slice(first).map((commit) => ({ records: commit.changes.map((change) => change.op), bytes: JSON.stringify(commit.changes).length }));
+      // The item, one entry of its timeline and one of its history: three records, the 300th time as the 2nd.
+      for (const commit of written) assert.deepEqual(commit.records, ["put_object", "add_timeline", "add_history"], operation);
+      // What is written gains the digits the version gains, and nothing else. With the timeline inside the
+      // record, each change wrote some sixty bytes more than the one before.
+      assert.ok(written.at(-1)!.bytes <= written[1]!.bytes + 4, `${operation}: ${written[1]!.bytes} bytes for the 2nd change, ${written.at(-1)!.bytes} for the ${changes}th`);
+    }
+    // What is loaded into memory at the start is the record, which holds no timeline: the same few hundred bytes
+    // after 300 changes as a task that never changed, and no timeline is read to start.
+    const still = await agent("create_task", task("Never changed"));
+    const records = (await storage.load("default"))!.objects;
+    const bytes = (id: string) => JSON.stringify(records.find((record) => record.id === id)!.data).length;
+    assert.ok(bytes(made.id) <= bytes(still.id) + 4 && bytes(made.id) < 300, `${bytes(made.id)} bytes after ${changes} changes, ${bytes(still.id)} after none`);
+    assert.ok(bytes("UPD") < 200, `the project: ${bytes("UPD")} bytes`);
+    assert.equal(JSON.stringify(records).includes("timeline"), false);
+    storage.timelinesRead = 0;
+    const again = await setup(storage);
+    await again.agent("list_tasks");
+    await again.agent("list_projects");
+    assert.equal(storage.timelinesRead, 0, "neither the start nor a list reads a timeline");
+    // The timeline is all there, read a page at a time, the latest first.
+    for (const id of [made.id, "UPD"]) {
+      const read = await again.agent("get", { id });
+      assert.deepEqual([read.timeline.length, read.more.timeline.total, read.timeline.at(-1).status, read.status], [100, changes + 1, "open", "open"]);
+      const earliest = await again.agent("get", { id, continuation: (await again.agent("get", { id, continuation: (await again.agent("get", { id, continuation: read.more.timeline.continuation })).more.timeline.continuation })).more.timeline.continuation });
+      assert.deepEqual([earliest.timeline.length, earliest.timeline[0].status, earliest.timeline[0].at, "more" in earliest], [1, "open", read.created_at, false]);
+    }
+    assert.deepEqual([again.engine.checkConsistency(), await again.engine.checkTimelines()], [[], []]);
+  });
+
+  it("answers get with the item and the timeline of one moment, also when a change of status is stored while the timeline is read", async () => {
+    const storage = new WatchedStorage();
+    const { agent, person, admin } = await setup(storage);
+    const made = await agent("create_task", task("Read while it changes"));
+    // The change is stored after get has looked the task up and before it has its timeline.
+    storage.beforeTimeline = async () => void (await person("set_task_status", { id: made.id, version: 1, status: "in_progress" }));
+    const read = await agent("get", { id: made.id });
+    assert.deepEqual([read.version, read.status, read.assigned_to, read.timeline.map((entry: any) => entry.status)], [2, "in_progress", ["user"], ["open", "in_progress"]], "the task as it is after the change, with the timeline that ends with its status");
+    // A task that is deleted for good while it is read is not returned with a timeline that is gone: there is no such task.
+    const other = await agent("create_task", task("Gone while it is read"));
+    storage.beforeTimeline = async () => void (await admin("delete", { id: other.id, version: 1, permanent: true }));
+    assert.equal((await refusal(agent("get", { id: other.id }))).code, "not_found");
+  });
+
+  it("moves any number of changes back with a completion in one step", async () => {
+    const storage = new WatchedStorage();
+    const { agent } = await setup(storage);
+    const made = await agent("create_task", task("Imported with a long past"));
+    let version = 1;
+    // More changes on the way to the completion than one commit holds records.
+    for (let n = 0; n < 150; n++) ({ version } = await agent("set_task_status", { id: made.id, version, status: n % 2 ? "open" : "draft" }));
+    ({ version } = await agent("set_task_status", { id: made.id, version, status: "done" }));
+    const before = await agent("get", { id: made.id });
+    const at = new Date(Date.parse(before.created_at) + 20_500).toISOString();
+    const moved = await agent("override_timestamp", { id: made.id, version, name: "completed_at", value: at });
+    assert.equal(moved.completed_at, at);
+    // The task, one conditional patch for changed intermediate entries, the final completion, and its history.
+    assert.deepEqual(storage.commits.at(-1)!.changes.map((change) => change.op), ["put_object", "patch_timeline", "patch_timeline", "add_history"]);
+    const whole = (await storage.readTimeline("default", "task", made.id)).records.map((record) => record.data.at as string);
+    assert.equal(whole.length, 152);
+    // Twenty changes had happened by then and stay where they were; the 130 after them and the completion move.
+    assert.deepEqual(whole.slice(0, 21), Array.from({ length: 21 }, (_, n) => new Date(Date.parse(before.created_at) + n * 1000).toISOString()));
+    assert.deepEqual([...new Set(whole.slice(21))], [at]);
+    const after = await agent("get", { id: made.id, history: true });
+    assert.deepEqual(after.history.at(-1).data, { changes: { completed_at: [before.completed_at, at] }, earlier_changes_moved: 130 });
+    assert.deepEqual([after.timeline.length, after.more.timeline.total, after.timeline.at(-1)], [100, 152, { status: "done", at, by: "agent1", place: 151 }]);
+  });
+
+  it("does not move the dates of an item whose stored timeline does not end with the status it has, and says so in the log", async () => {
+    const all = await setup();
+    const made = await all.agent("create_task", task("Damaged beside the record"));
+    await all.agent("set_task_status", { id: made.id, version: 1, status: "done" });
+    // The last entry is taken away in the store, as by hand: the task is done and its timeline does not say so.
+    const { head } = (await all.storage.load("default"))!;
+    const record = (await all.storage.load("default"))!.objects.find((o) => o.kind === "task")!;
+    await all.storage.commit("default", {
+      expectedRevision: head.revision,
+      counters: head.counters,
+      changes: [{ op: "delete_object", kind: "task", id: record.id }, { op: "put_object", record, text: "d" }, { op: "add_timeline", record: { kind: "task", id: record.id, data: { status: "open", at: "2026-01-01T00:00:00.000Z", by: "3" } } }],
+    });
+    await all.engine.reload();
+    assert.deepEqual(await all.engine.checkTimelines(), [`The task ${made.id} is damaged: has the status done, and its timeline ends with open`]);
+    for (const name of ["completed_at", "created_at"]) {
+      const failed = await refusal(all.agent("override_timestamp", { id: made.id, version: 2, name, value: "2025-04-15T16:30:00Z" }));
+      assert.equal(failed.code, "internal");
+      assert.match(String((all.log.at(-1)!.cause as Error).message), /^Task \S+ is damaged: has the status done, and its timeline ends with open$/);
+    }
+    assert.equal((await all.agent("get", { id: made.id })).version, 2, "nothing was changed");
+  });
+
+  it("does not move the dates of an item whose stored timeline has an entry missing", async () => {
+    // A store that has lost the second of three entries: the two it has are not at the places 0 and 1.
+    class Gapped extends MemoryStorage {
+      override async readTimeline(tenant: string, kind: string, id: string, page?: TimelinePageRequest): Promise<TimelinePage> {
+        const { records, total } = await super.readTimeline(tenant, kind, id, page);
+        return { records: records.filter((record) => record.place !== 1), total };
+      }
+    }
+    const all = await setup(new Gapped());
+    const made = await all.agent("create_task", task("With a gap"));
+    await all.agent("set_task_status", { id: made.id, version: 1, status: "in_progress" });
+    await all.agent("set_task_status", { id: made.id, version: 2, status: "done" });
+    const failed = await refusal(all.agent("override_timestamp", { id: made.id, version: 3, name: "completed_at", value: "2026-01-01T00:00:00.500Z" }));
+    assert.equal(failed.code, "internal");
+    assert.equal((all.log.at(-1)!.cause as Error).message, `The timeline of task ${made.id} is damaged: the entry after place 0 is at place 2`);
+    assert.equal((await all.agent("get", { id: made.id })).version, 3, "nothing was changed");
+  });
+
+  it("refuses timestamp overrides when a full timeline read finds a malformed entry", async () => {
+    class MalformedTimeline extends WatchedStorage {
+      damaged?: string;
+      override async readTimeline(tenant: string, kind: string, id: string, page?: TimelinePageRequest): Promise<TimelinePage> {
+        const found = await super.readTimeline(tenant, kind, id, page);
+        return id !== this.damaged ? found : {
+          ...found,
+          records: found.records.map((record) => record.place === 1 ? { ...record, data: null as unknown as typeof record.data } : record),
+        };
+      }
+    }
+    const storage = new MalformedTimeline();
+    const { engine, agent, setNow, log } = await setup(storage);
+    setNow("2026-01-04T00:00:00.000Z");
+    const made = await agent("create_task", task("Malformed imported timeline"));
+    setNow("2026-01-02T00:00:00.000Z");
+    await agent("set_task_status", { id: made.id, version: 1, status: "in_progress" });
+    setNow("2026-01-04T00:00:00.000Z");
+    await agent("set_task_status", { id: made.id, version: 2, status: "open" });
+    storage.damaged = made.id;
+    setNow("2026-01-05T00:00:00.000Z");
+
+    const failed = await refusal(agent("override_timestamp", { id: made.id, version: 3, name: "created_at", value: "2026-01-03T00:00:00.000Z" }));
+    assert.equal(failed.code, "internal");
+    assert.match((log.at(-1)!.cause as Error).message, /timeline\.1\.status is not what it has to be/);
+    const after = await storage.load("default");
+    assert.equal(after!.objects.find((item) => item.id === made.id)!.version, 3, "nothing was changed");
+    await engine.close();
+  });
+
+  it("ends get paging when the first row of a timeline is missing", async () => {
+    class MissingFirst extends MemoryStorage {
+      damaged = false;
+      override async readTimeline(tenant: string, kind: string, id: string, page?: TimelinePageRequest): Promise<TimelinePage> {
+        const found = await super.readTimeline(tenant, kind, id, page);
+        return this.damaged && kind === "task" ? { ...found, records: found.records.filter((record) => record.place !== 0) } : found;
+      }
+    }
+    const storage = new MissingFirst();
+    const { agent } = await setup(storage);
+    const made = await agent("create_task", task("Timeline whose first row is gone"));
+    let version = 1;
+    for (let n = 0; n < 100; n++) ({ version } = await agent("set_task_status", { id: made.id, version, status: n % 2 ? "open" : "draft" }));
+    storage.damaged = true;
+
+    const latest = await agent("get", { id: made.id });
+    assert.deepEqual([latest.timeline.length, latest.more.timeline.total], [100, 101]);
+    assert.deepEqual([latest.timeline[0].place, latest.timeline.at(-1).place], [1, 100], "surviving entries retain their stored places");
+    const before = await agent("get", { id: made.id, continuation: latest.more.timeline.continuation });
+    assert.deepEqual([before.timeline, "more" in before], [[], false], "an empty page ends even when the missing place was the first one");
+  });
+
+  it("diagnoses missing entries across timeline pages, including before the first surviving row", async () => {
+    class Gapped extends MemoryStorage {
+      missing = new Map<string, number>();
+      override async readTimeline(tenant: string, kind: string, id: string, page?: TimelinePageRequest): Promise<TimelinePage> {
+        const found = await super.readTimeline(tenant, kind, id, page);
+        const place = this.missing.get(id);
+        return place === undefined ? found : { ...found, records: found.records.filter((record) => record.place !== place) };
+      }
+    }
+    const storage = new Gapped();
+    const all = await setup(storage);
+    const middle = await all.agent("create_task", task("Timeline with a middle gap"));
+    await all.agent("set_task_status", { id: middle.id, version: 1, status: "in_progress" });
+    await all.agent("set_task_status", { id: middle.id, version: 2, status: "done" });
+    storage.missing.set(middle.id, 1);
+    assert.deepEqual((await all.agent("get", { id: middle.id })).timeline.map((item: { place: number }) => item.place), [0, 2], "get preserves actual places for surviving entries");
+    assert.deepEqual(await all.engine.checkTimelines(), [`The task ${middle.id} is damaged: timeline has entries missing between places 0 and 2`]);
+
+    storage.missing.delete(middle.id);
+    const first = await all.agent("create_task", task("Timeline missing its first row"));
+    await all.agent("set_task_status", { id: first.id, version: 1, status: "in_progress" });
+    storage.missing.set(first.id, 0);
+    assert.deepEqual(await all.engine.checkTimelines(), [`The task ${first.id} is damaged: timeline has entries missing before place 1`]);
+  });
+
+  it("yields between bounded pages while checking a long timeline", async () => {
+    class LongTimeline extends MemoryStorage {
+      long = false;
+      pageReads = 0;
+      onPage?: () => void;
+      override async readTimeline(tenant: string, kind: string, id: string, page?: TimelinePageRequest): Promise<TimelinePage> {
+        if (!this.long || kind !== "task") return super.readTimeline(tenant, kind, id, page);
+        this.pageReads++;
+        const total = 1001;
+        const before = page?.before ?? total;
+        const limit = page?.limit ?? total;
+        const start = Math.max(0, before - limit);
+        const source = (await super.readTimeline(tenant, kind, id)).records[0]!;
+        this.onPage?.();
+        this.onPage = undefined;
+        return { total, records: Array.from({ length: before - start }, (_, offset) => ({ ...source, place: start + offset })) };
+      }
+    }
+    const storage = new LongTimeline();
+    const { agent, engine } = await setup(storage);
+    await agent("create_task", task("Long diagnostic timeline"));
+    storage.long = true;
+
+    const checking = engine.checkTimelines();
+    let pagesWhenEventLoopRan = 0;
+    await new Promise<void>((resolve) => setImmediate(() => {
+      pagesWhenEventLoopRan = storage.pageReads;
+      resolve();
+    }));
+    assert.equal(pagesWhenEventLoopRan, 1, "the event loop ran after the first page, before the scan finished");
+    assert.deepEqual(await checking, []);
+    assert.equal(storage.pageReads, 3);
+
+    storage.pageReads = 0;
+    const controller = new AbortController();
+    storage.onPage = () => controller.abort();
+    await assert.rejects(engine.checkTimelines(3, controller.signal), { name: "AbortError" });
+    assert.equal(storage.pageReads, 1, "a disconnected diagnostic stops after its current bounded page");
+  });
+
+  it("reports a null timeline row instead of failing while reading or diagnosing it", async () => {
+    class NullEntry extends MemoryStorage {
+      damaged = false;
+      override async readTimeline(tenant: string, kind: string, id: string, page?: TimelinePageRequest): Promise<TimelinePage> {
+        const found = await super.readTimeline(tenant, kind, id, page);
+        return this.damaged && kind === "task" ? { records: [{ kind, id, place: 0, data: null } as any], total: 1 } : found;
+      }
+    }
+    const storage = new NullEntry();
+    const { agent, engine } = await setup(storage);
+    const made = await agent("create_task", task("Null timeline row"));
+    storage.damaged = true;
+    assert.equal((await agent("get", { id: made.id })).timeline[0].by, undefined);
+    assert.match((await engine.checkTimelines())[0]!, /timeline\.0\.status is not what it has to be/);
+  });
+
+  it("retries timestamp overrides and diagnostics after another engine changes the timeline", async () => {
+    const storage = new WatchedStorage();
+    const { agent, engine } = await setup(storage);
+    const made = await agent("create_task", task("Changed during timeline read"));
+    await agent("set_task_status", { id: made.id, version: 1, status: "done" });
+    const other = await Engine.open({ storage });
+    storage.beforeTimeline = async () => void (await other.execute("set_task_status", "user", { id: made.id, version: 2, status: "open" }));
+    const stale = await refusal(agent("override_timestamp", { id: made.id, version: 2, name: "created_at", value: "2025-04-15T16:30:00Z" }));
+    assert.deepEqual([stale.code, (stale.current as any).version], ["version_conflict", 3]);
+
+    await other.execute("set_task_status", "user", { id: made.id, version: 3, status: "in_progress" });
+    storage.beforeTimeline = async () => void (await other.execute("set_task_status", "user", { id: made.id, version: 4, status: "open" }));
+    assert.deepEqual(await engine.checkTimelines(), []);
+    await other.close();
+  });
+
+  it("keeps a completed task's single timeline entry aligned when its creation time moves", async () => {
+    const all = await setup();
+    const made = await all.agent("create_task", task("Imported already completed"));
+    const initial = await all.agent("get", { id: made.id });
+    const snapshot = (await all.storage.load("default"))!;
+    const record = snapshot.objects.find((object) => object.kind === "task" && object.id === made.id)!;
+    const data = { ...record.data, status: "done", completed_at: initial.created_at };
+    await all.storage.commit("default", {
+      expectedRevision: snapshot.head.revision,
+      counters: snapshot.head.counters,
+      changes: [
+        { op: "delete_object", kind: "task", id: made.id },
+        { op: "put_object", record: { ...record, version: 2, data }, text: "" },
+        { op: "add_timeline", record: { kind: "task", id: made.id, data: { status: "done", at: initial.created_at, by: "3" } } },
+      ],
+    });
+    await all.engine.reload();
+    await all.agent("override_timestamp", { id: made.id, version: 2, name: "created_at", value: "2025-04-15T16:30:00Z" });
+    const afterCreation = await all.agent("get", { id: made.id });
+    const stored = (await all.storage.load("default"))!.objects.find((object) => object.kind === "task" && object.id === made.id)!;
+    assert.deepEqual([stored.data.created_at, afterCreation.completed_at, afterCreation.timeline[0].at, await all.engine.checkTimelines()], ["2025-04-15T16:30:00.000Z", "2025-04-15T16:30:00.000Z", "2025-04-15T16:30:00.000Z", []]);
+    const completion = await all.agent("override_timestamp", { id: made.id, version: 3, name: "completed_at", value: "2025-04-16T16:30:00Z" });
+    assert.equal(completion.completed_at, "2025-04-16T16:30:00.000Z");
+  });
+
+  it("moves non-monotonic completion timestamps in one bounded conditional patch", async () => {
+    const storage = new WatchedStorage();
+    const { engine, agent, setNow } = await setup(storage);
+    setNow("2026-01-01T00:00:00.000Z");
+    const made = await agent("create_task", task("Imported with non-monotonic status times"));
+    const threshold = "2026-01-02T00:00:00.000Z";
+    for (let n = 0; n < 200; n++) {
+      setNow(n % 2 === 0 ? "2026-01-03T00:00:00.000Z" : "2026-01-01T12:00:00.000Z");
+      await agent("set_task_status", { id: made.id, version: n + 1, status: n % 2 === 0 ? "in_progress" : "open" });
+    }
+    setNow("2026-01-04T00:00:00.000Z");
+    await agent("set_task_status", { id: made.id, version: 201, status: "done" });
+    setNow("2026-02-01T00:00:00.000Z");
+    const before = storage.commits.length;
+    await agent("override_timestamp", { id: made.id, version: 202, name: "completed_at", value: threshold });
+
+    const commit = storage.commits[before]!;
+    assert.deepEqual(commit.changes.map((change) => change.op), ["put_object", "patch_timeline", "patch_timeline", "add_history"]);
+    assert.equal(commit.changes.length + 1, 5, "the history/head fit in one bounded commit regardless of separated matches");
+    const conditional = commit.changes.find((change) => change.op === "patch_timeline" && change.when);
+    assert.ok(conditional && conditional.op === "patch_timeline");
+    assert.deepEqual(conditional.when, { at_after: threshold });
+
+    const timeline = (await storage.readTimeline("default", "task", made.id)).records;
+    assert.equal(timeline.length, 202);
+    assert.equal(timeline[0]!.data.at, "2026-01-01T00:00:00.000Z", "the creation entry does not move");
+    for (let n = 0; n < 200; n++) {
+      assert.equal(timeline[n + 1]!.data.at, n % 2 === 0 ? threshold : "2026-01-01T12:00:00.000Z", `timeline place ${n + 1}`);
+    }
+    assert.equal(timeline.at(-1)!.data.at, threshold, "the final completion moves even though it is outside the conditional range");
+    const history = (await storage.readHistory("default", "task", made.id)).at(-1)!;
+    assert.equal(history.data.earlier_changes_moved, 100);
+    assert.deepEqual(await engine.checkTimelines(), []);
+    await engine.close();
+  });
+
+  it("has room for its first entry in the one step that creates a task with as many links as a call takes", async () => {
+    const storage = new WatchedStorage();
+    const { agent, admin } = await setup(storage);
+    await agent("create_project", { title: "Full", prefix: "full" });
+    const parent = await agent("create_task", task("Parent", { project: "FULL" }));
+    const waited: string[] = [];
+    for (let n = 0; n < 30; n++) waited.push((await agent("create_task", task(`Waited for ${n}`))).id);
+    for (let n = 0; n < 30; n++) await admin("create_user", { username: `hand${n}`, type: "agent" });
+    const made = await agent("create_task", task("Everything at once", { project: "FULL", parent: parent.id, depends_on: waited, assigned_to: Array.from({ length: 30 }, (_, n) => `hand${n}`) }));
+    // The task, its first status, 62 links and what the history says of them, and the head: within the 100 of one commit.
+    assert.equal(storage.commits.at(-1)!.changes.length + 1, 98);
+    assert.deepEqual((await agent("get", { id: made.id })).timeline.map((entry: any) => entry.status), ["open"]);
+  });
+
+  it("is deleted for good with its item, and kept while the item is only hidden", async () => {
+    const { agent, admin, storage, engine } = await setup();
+    await agent("create_project", { title: "Short-lived", prefix: "gone" });
+    const made = await agent("create_task", task("Short-lived"));
+    await agent("set_task_status", { id: made.id, version: 1, status: "in_progress" });
+    const entries = async (kind: string, id: string) => (await storage.readTimeline("default", kind, id)).total;
+    const hidden = await agent("delete", { id: made.id, version: 2 });
+    assert.deepEqual([hidden.deleted, await entries("task", made.id), (await agent("get", { id: made.id })).timeline.length], [true, 2, 2]);
+    await admin("delete", { id: made.id, version: 3, permanent: true });
+    await admin("delete", { id: "GONE", version: 1, permanent: true });
+    assert.deepEqual([await entries("task", made.id), await entries("project", "GONE")], [0, 0]);
+    // The prefix stays used up, and the next task has a number, and a timeline, of its own.
+    assert.equal((await refusal(agent("create_project", { title: "Again", prefix: "gone" }))).rule, "prefix_taken");
+    const next = await agent("create_task", task("Next"));
+    assert.deepEqual([next.id === made.id, (await agent("get", { id: next.id })).timeline.map((entry: any) => entry.status)], [false, ["open"]]);
+    assert.deepEqual([engine.checkConsistency(), await engine.checkTimelines()], [[], []]);
   });
 });
 
@@ -861,7 +1245,7 @@ describe("next", () => {
         value: null,
         size: null,
         why: null,
-        timeline: [{ status: n === 6_000 ? "open" : "in_progress", at: now, by: "USER-003" }],
+        completed_at: null,
       };
       graph.putNode(current);
       if (before) graph.addLink({ from: before, type: "contains", to: current, created_at: now, created_by: "USER-003" });
@@ -897,7 +1281,7 @@ describe("next", () => {
         value: null,
         size: null,
         why: null,
-        timeline: [{ status: n === 300 ? "open" : "in_progress", at: now, by: "USER-003" }],
+        completed_at: null,
       };
       graph.putNode(current);
       root ??= current;
@@ -941,7 +1325,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const depth = 200;
     const leaves = 200;
@@ -1000,7 +1384,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const size = 300;
     const root = node("ROOT-9", 9);
@@ -1037,7 +1421,7 @@ describe("next", () => {
     const now = "2026-01-01T00:00:00.000Z";
     const node = (id: string, priority: number, status: TaskNode["status"] = "in_progress"): TaskNode => ({
       kind: "task", id, version: 1, created_at: now, created_by: "USER-003", updated_at: now, deleted_at: null,
-      title: id, type: "task", status, priority, value: null, size: null, why: null, timeline: [{ status, at: now, by: "USER-003" }],
+      title: id, type: "task", status, priority, value: null, size: null, why: null, completed_at: status === "done" ? now : null,
     });
     const size = 300;
     const low = node("LOW-ROOT", 9);
@@ -1086,7 +1470,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     let before = [node("ROOT-A", "paused"), node("ROOT-B", "paused")];
     for (const root of before) graph.putNode(root);
@@ -1129,7 +1513,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const root = node("ROOT", "in_progress");
     const child = node("CHILD", "in_progress");
@@ -1178,7 +1562,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const depth = 200;
     const root = node("ROOT", "in_progress", 9);
@@ -1225,7 +1609,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     for (const period of [2, 17]) {
       const graph = new Graph();
@@ -1263,7 +1647,7 @@ describe("next", () => {
     const now = "2026-01-01T00:00:00.000Z";
     const node = (id: string, status: TaskNode["status"] = "in_progress"): TaskNode => ({
       kind: "task", id, version: 1, created_at: now, created_by: "USER-003", updated_at: now, deleted_at: null,
-      title: id, type: "task", status, priority: 1, value: null, size: null, why: null, timeline: [{ status, at: now, by: "USER-003" }],
+      title: id, type: "task", status, priority: 1, value: null, size: null, why: null, completed_at: status === "done" ? now : null,
     });
     const size = 200;
     const chain = [node("ROOT")];
@@ -1311,7 +1695,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const depth = 200;
     const root = node("ROOT", "in_progress");
@@ -1363,7 +1747,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const depth = 200;
     const root = node("ROOT", "in_progress");
@@ -1413,7 +1797,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status: "open", at: now, by: "USER-003" }],
+      completed_at: null,
     };
     graph.putNode(task);
     const blockers = {
@@ -1431,7 +1815,7 @@ describe("next", () => {
       ["cancelled", null],
       ["open", now],
     ] as const) {
-      const stopped: TaskNode = { ...task, id: `STOPPED-${status}`, status, deleted_at, timeline: [{ status, at: now, by: "USER-003" }] };
+      const stopped: TaskNode = { ...task, id: `STOPPED-${status}`, status, deleted_at, completed_at: status === "done" ? now : null };
       graph.putNode(stopped);
       const stoppedCalc = taskCalc(graph, stopped, new Map(), new Map([[stopped.id, { paths: null, blockers }]]));
       assert.equal(stoppedCalc.is_waiting, false, status);
@@ -1457,7 +1841,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const depth = 300;
     const root = node("ROOT", "in_progress");
@@ -1502,7 +1886,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const depth = 800;
     const root = node("ROOT", "in_progress");
@@ -1543,7 +1927,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const depth = 200;
     const root = node("ROOT", "in_progress");
@@ -1595,7 +1979,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const depth = 300;
     const hub = node("HUB", "in_progress");
@@ -1638,7 +2022,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const size = 300;
     const hub = node("HUB-A", "in_progress");
@@ -1687,7 +2071,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const depth = 300;
     let before: TaskNode | null = null;
@@ -1732,7 +2116,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const depth = 300;
     let previous: [TaskNode | null, TaskNode | null] = [null, null];
@@ -1775,7 +2159,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const size = 100;
     const hubs = Array.from({ length: 6 }, (_, at) => node(`HUB-${at}`, "in_progress"));
@@ -1819,7 +2203,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const size = 300;
     const hub = node("HUB", "in_progress");
@@ -1874,7 +2258,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const size = 300;
     const groups: TaskNode[] = [];
@@ -1928,7 +2312,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const size = 300;
     const hub = node("HUB", "in_progress");
@@ -1992,7 +2376,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const size = 300;
     const left = node("HUB-A", "in_progress");
@@ -2046,7 +2430,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const size = 300;
     const ends: TaskNode[] = [];
@@ -2092,7 +2476,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const size = 300;
     const roots = [node("ROOT-A", "paused"), node("ROOT-B", "paused")] as const;
@@ -2140,7 +2524,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const size = 300;
     const blockers = Array.from({ length: size }, (_, at) => node(`BLOCK-${String(at + 1).padStart(3, "0")}`, "paused"));
@@ -2195,7 +2579,7 @@ describe("next", () => {
       value: null,
       size: null,
       why: null,
-      timeline: [{ status, at: now, by: "USER-003" }],
+      completed_at: status === "done" ? now : null,
     });
     const [a, b, c, d] = ["A", "B", "C", "D"].map((id) => node(id, "paused")) as [TaskNode, TaskNode, TaskNode, TaskNode];
     const predecessor = node("PREDECESSOR", "in_progress");
@@ -3808,6 +4192,48 @@ describe("at most a page of anything", () => {
     }
     // One entry after its creation: that page is the creation alone.
     assert.deepEqual((await agent("get", { id: "ABC", continuation: token({ q, k: [last.revision + 1, 0] }) })).history.map((h: any) => h.action), ["created"]);
+  });
+
+  it("finds out that a prefix left a history behind without reading the history, however long it is", async () => {
+    /** Says how often an item's history was read whole. */
+    class Watched extends MemoryStorage {
+      whole = 0;
+      override async readHistory(tenant: string, kind: string, id: string) {
+        this.whole++;
+        return super.readHistory(tenant, kind, id);
+      }
+    }
+    const storage = new Watched();
+    const { agent, engine } = await setup(storage);
+    // A project that was deleted for good before prefixes were remembered, and 150 entries it left.
+    const entry = (action: string) => ({ op: "add_history" as const, record: { kind: "project", id: "OLD", at: "2025-06-01T00:00:00.000Z", actor: "1", action, data: {} } });
+    const { head } = (await storage.load("default"))!;
+    const first = await storage.commit("default", { expectedRevision: head.revision, counters: head.counters, changes: [entry("created"), ...Array.from({ length: 98 }, () => entry("status_changed"))] });
+    await storage.commit("default", { expectedRevision: first.revision, counters: first.counters, changes: [...Array.from({ length: 50 }, () => entry("status_changed")), entry("deleted_permanently")] });
+    await engine.reload();
+    assert.equal((await refusal(agent("create_project", { title: "New", prefix: "old" }))).rule, "prefix_taken");
+    assert.equal((await agent("create_project", { title: "New", prefix: "new" })).id, "NEW");
+    assert.equal(storage.whole, 0, "neither the refusal nor the project that was made read a history whole");
+    // A history without a creation in it, as damage or another tool may leave it, uses the prefix up as well.
+    const { head: now } = (await storage.load("default"))!;
+    await storage.commit("default", { expectedRevision: now.revision, counters: now.counters, changes: [{ op: "add_history", record: { kind: "project", id: "ODD", at: "t", actor: "1", action: "status_changed", data: {} } }] });
+    await engine.reload();
+    assert.equal((await refusal(agent("create_project", { title: "New", prefix: "odd" }))).rule, "prefix_taken");
+  });
+
+  it("names 20 of the deleted tasks that keep a project from going for good, and says how many there are", async () => {
+    const { agent, admin } = await setup();
+    await agent("create_project", { title: "Alpha", prefix: "ABC" });
+    const ids: string[] = [];
+    for (let n = 0; n < 21; n++) ids.push((await agent("create_task", task(`T${n}`, { project: "ABC" }))).id);
+    for (const id of ids) await agent("delete", { id, version: 1 });
+    const many = await refusal(admin("delete", { id: "ABC", version: 1, permanent: true }));
+    assert.deepEqual([many.rule, many.blocking!.map((item) => item.id), many.blocking_total], ["contains_deleted_tasks", ids.slice(0, 20), 21]);
+    assert.match(many.message, /still contains 21 deleted tasks/);
+    // With 20 of them, all are named and nothing more is said.
+    await admin("delete", { id: ids[20], version: 2, permanent: true });
+    const twenty = await refusal(admin("delete", { id: "ABC", version: 1, permanent: true }));
+    assert.deepEqual([twenty.blocking!.length, "blocking_total" in twenty], [20, false]);
   });
 
   it("finds out that a prefix left a history behind without reading the history, however long it is", async () => {

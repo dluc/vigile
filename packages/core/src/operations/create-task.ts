@@ -73,7 +73,7 @@ export const createTask = defineWrite({
       value: input.value ?? null,
       size: input.size ?? null,
       why: input.why ?? null,
-      timeline: [statusEntry(status, ctx)],
+      completed_at: null,
       version: 1,
       created_at: ctx.now,
       created_by: ctx.caller.id,
@@ -81,6 +81,7 @@ export const createTask = defineWrite({
       deleted_at: null,
     };
     ctx.plan.put(task, input.description);
+    ctx.plan.status(task, statusEntry(status, ctx));
     for (const holder of holders) ctx.plan.link(newLink(ctx, holder, CONTAINS, task));
     for (const dependency of dependencies) ctx.plan.link(newLink(ctx, task, DEPENDS_ON, dependency));
     for (const user of users) ctx.plan.link(newLink(ctx, task, ASSIGNED_TO, user));

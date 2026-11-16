@@ -2,7 +2,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { basename, join } from "node:path";
 import { Engine, areKeyMarks, readAll, storedAs } from "@vigile/core";
 import { assertTenantName, type StorageAdapter } from "@vigile/storage";
-import { flushFolder, historyOwners, holdTenantFiles, readTenantFile } from "@vigile/storage-sqlite";
+import { flushFolder, historyOwners, holdTenantFiles, openTenantFile, timelineOwners } from "@vigile/storage-sqlite";
 import { samePlace } from "@vigile/config";
 
 /**
@@ -189,8 +189,10 @@ export function putInPlace(dataDir: string, tenant: string, incoming: string, fl
  * start on it, in words, or who the users of the plan are when it would.
  */
 export async function openAsPlan(tenant: string, file: string): Promise<{ why: string } | { users: string[] }> {
+  let reader: ReturnType<typeof openTenantFile> | undefined;
   try {
-    const snapshot = readTenantFile(file);
+    const opened = (reader = openTenantFile(file));
+    const snapshot = opened.snapshot();
     if (!snapshot) return { why: "there is no plan in it" };
     const storage: StorageAdapter = {
       load: async () => snapshot,
@@ -201,6 +203,8 @@ export async function openAsPlan(tenant: string, file: string): Promise<{ why: s
       readText: async () => null,
       readHistory: async () => [],
       readHistoryPage: async () => ({ records: [], total: 0 }),
+      // The timelines are read from the file itself: each is checked against the item it belongs to.
+      readTimeline: async (_tenant, kind, id, page) => opened.timeline(kind, id, page),
       close: async () => {},
     };
     const engine = await Engine.open({ storage, tenant });
@@ -215,11 +219,21 @@ export async function openAsPlan(tenant: string, file: string): Promise<{ why: s
     // never be found again.
     const lost = historyOwners(file).find((owner) => storedAs(owner.kind, owner.id) !== owner.id);
     if (lost) return { why: `the history of ${lost.kind} "${lost.id}" is stored under an ID the store would not write` };
+    // The items first, then the timeline of each, which is stored beside it: a timeline that does not end with
+    // the status its item has would have the next change of status, or of a date, build on what is not there.
     const damage = engine.checkConsistency();
+    if (!damage.length) damage.push(...(await engine.checkTimelines()));
     if (damage.length) return { why: `the plan in it is damaged: ${damage.slice(0, 3).join("; ")}${damage.length > 3 ? `; and ${damage.length - 3} more` : ""}` };
+    // And a timeline of an item that is not there: a later item that got that ID would have it for the start of
+    // its own. A delete for good takes the timeline with it, so one that stayed was put there by something else.
+    const there = new Set(snapshot.objects.map((record) => `${record.kind}\u0000${record.id}`));
+    const left = timelineOwners(file).find((owner) => !there.has(`${owner.kind}\u0000${owner.id}`));
+    if (left) return { why: `it holds the timeline of ${left.kind} "${left.id}", and no such item` };
     return { users: users.map((user) => user.username) };
   } catch (error) {
     return { why: `the service would not start on it (${(error as Error).message})` };
+  } finally {
+    reader?.close();
   }
 }
 

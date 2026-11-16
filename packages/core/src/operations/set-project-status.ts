@@ -21,8 +21,8 @@ export const setProjectStatus = defineWrite({
     requireLive(project);
     requireVersion(project, input.version, () => projectSummary(ctx.graph, project));
     if (project.status === input.status) throw refused("same_status", `${describe(project)} is already ${input.status}.`);
-    const changed = touch(project, ctx, { status: input.status, timeline: [...project.timeline, statusEntry(input.status, ctx)] });
-    ctx.plan.put(changed);
+    ctx.plan.put(touch(project, ctx, { status: input.status }));
+    ctx.plan.status(project, statusEntry(input.status, ctx));
     ctx.plan.history(project, "status_changed", { from: project.status, to: input.status });
     return () => projectSummary(ctx.graph, ctx.graph.get("project", project.id)!);
   },

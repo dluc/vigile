@@ -317,7 +317,12 @@ export async function startService(options: ServiceOptions): Promise<Service> {
     releaseLock();
     throw new StartupError((error as Error).message);
   }
-  const storage = new SqliteStorage({ directory: dataDir });
+  const storage = new SqliteStorage({
+    directory: dataDir,
+    // Said once, when it happens: from here on a version from before cannot open the data.
+    onUpgrade: (tenant, from, to) =>
+      warn(`The data of "${tenant}" was written by an earlier version of the service and has been brought from format ${from} to format ${to}. A version from before this one will refuse to open it; backups taken before still restore.`),
+  });
   // What this run was started with, in the environment or as an option, holds for the whole run: the file is read
   // again when it changes, and must not undo it.
   const fixed = loaded.sources["auth.keyless_user"] === "environment" || loaded.sources["auth.keyless_user"] === "option" ? { keyless_user: config.auth.keyless_user } : {};

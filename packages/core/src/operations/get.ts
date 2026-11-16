@@ -134,10 +134,10 @@ function recordLists(ctx: ReadContext, graph: GraphView, node: Node): ItemList[]
     at: ["timeline"],
     cursor: counts,
     keys: () => [],
-    async page(before) {
-      const { entries, total, from } = await timelinePage(ctx, node, before);
-      // Each entry says its place, counted from the item's first status: the token after a page names the place of its earliest entry.
-      return { items: entries.map((entry, n) => ({ ...entry, by: username(graph, entry.by), place: from + n })), total, ...(from > 0 ? { next: tokenAfter(counts, from) } : {}) };
+      async page(before) {
+        const { entries, total, from } = await timelinePage(ctx, node, before);
+        // Each entry says its place, counted from the item's first status: the token after a page names the place of its earliest entry.
+        return { items: entries.map((entry) => ({ ...entry, by: username(graph, entry.by) })), total, ...(from > 0 ? { next: tokenAfter(counts, from) } : {}) };
     },
   };
   return [timeline, history];
@@ -186,9 +186,8 @@ export const get = defineRead({
         const reading = list.page(list.cursor.place(token, () => list.keys()));
         const read = reading instanceof Promise ? await reading : reading;
         return {
-          // A page of links is read from the plan in memory, and so is a page of a timeline: only a page of
-          // history comes from the store.
-          stored: list.at[0] === "history",
+          // A page of links is read from the plan in memory; history and timeline pages come from the store.
+          stored: list.at[0] === "history" || list.at[0] === "timeline",
           finish: () => {
             const page: Partial<Lists> = {};
             put(page, list, read, true);

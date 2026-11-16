@@ -69,6 +69,11 @@ export interface Ref {
   id: string;
 }
 
+/**
+ * One of the statuses an item has had: which, since when, and who gave it. Together they are the item's
+ * timeline, the status it was created with first. The timeline is stored beside the item, an entry for each
+ * change, and is not part of the item as the plan in memory has it: it is read when it is asked for.
+ */
 export interface StatusEntry {
   status: string;
   at: string;
@@ -89,7 +94,6 @@ export interface ProjectNode extends BaseNode {
   prefix: string | null;
   title: string;
   status: ProjectStatus;
-  timeline: StatusEntry[];
 }
 
 export interface TaskNode extends BaseNode {
@@ -102,7 +106,12 @@ export interface TaskNode extends BaseNode {
   size: number | null;
   /** Why the work matters: at least one reason, more if there are several. Optional. */
   why: string | null;
-  timeline: StatusEntry[];
+  /**
+   * When the task was completed, for a task that is done: the moment of the last entry of its timeline. Null
+   * for every other task. It is kept with the task because every list of tasks shows it, and the timeline is
+   * not read for a list.
+   */
+  completed_at: string | null;
 }
 
 export interface UserNode extends BaseNode {

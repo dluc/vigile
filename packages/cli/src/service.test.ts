@@ -14,6 +14,7 @@ import { compareTaskIds } from "@vigile/core/ids.js";
 import type { StorageAdapter } from "@vigile/storage";
 import { SqliteStorage, backupTenantFile, folderIsHeld, historyOwners, inspectTenantFile } from "@vigile/storage-sqlite";
 import { webRoot } from "@vigile/web";
+import { FORMAT_1_ANSWERS, FORMAT_1_SQL, FORMAT_1_THEN, FORMAT_1_THEN_FROM } from "./format-1-data.js";
 import { openAsPlan } from "./restore.js";
 import { StartupError, isLoopback, namedFromOutside, startService, type Service, type ServiceOptions } from "./service.js";
 
@@ -165,6 +166,42 @@ describe("service over HTTP", () => {
     assert.equal(body.pid, process.pid);
     assert.deepEqual(body.inconsistencies, []);
     assert.equal(JSON.stringify(body).includes(running.adminKey), false, "keys are masked");
+  });
+
+  it("reports a missing status timeline in the admin diagnostic used by doctor", async () => {
+    const isolated = await start();
+    const file = join(isolated.directory, "data", "default.sqlite");
+    let db: DatabaseSync | undefined;
+    let row: { kind: string; id: string; place: number; data: string } | undefined;
+    let removed = false;
+    try {
+      const made = await isolated.call("/api/create-task", { title: "Timeline checked by doctor", description: "d" });
+      assert.equal(made.status, 200, JSON.stringify(made.body));
+      db = new DatabaseSync(file);
+      row = db.prepare("SELECT kind, id, place, data FROM timeline WHERE kind = 'task' AND id = ?").get(made.body.id) as typeof row;
+      assert.ok(row);
+      db.prepare("DELETE FROM timeline WHERE kind = 'task' AND id = ?").run(made.body.id);
+      removed = true;
+      db.close();
+      db = undefined;
+      const status = await isolated.call("/api/admin/status", undefined, isolated.adminKey);
+      assert.equal(status.status, 200);
+      assert.equal(Object.hasOwn(status.body, "timeline_inconsistencies"), false, "ordinary admin status does not scan every timeline");
+      const diagnostic = await isolated.call("/api/admin/status?check_timelines=true", undefined, isolated.adminKey);
+      assert.equal(diagnostic.status, 200);
+      assert.ok(diagnostic.body.timeline_inconsistencies.some((problem: string) => problem.includes(`The task ${made.body.id} is damaged`) && problem.includes("empty")));
+    } finally {
+      db?.close();
+      if (removed && row) {
+        const restore = new DatabaseSync(file);
+        try {
+          restore.prepare("INSERT INTO timeline (kind, id, place, data) VALUES (?, ?, ?, ?)").run(row.kind, row.id, row.place, row.data);
+        } finally {
+          restore.close();
+        }
+      }
+      await isolated.stop();
+    }
   });
 
   it("serves the web page and nothing outside it", async () => {
@@ -1141,6 +1178,7 @@ describe("two engines on one data file", () => {
       readText: async (tenant, kind, id) => (await once("text"), file.readText(tenant, kind, id)),
       readHistory: (tenant, kind, id) => file.readHistory(tenant, kind, id),
       readHistoryPage: async (tenant, kind, id, page) => (during.histories++, await during.history.shift()?.(), file.readHistoryPage(tenant, kind, id, page)),
+      readTimeline: (tenant, kind, id, page) => file.readTimeline(tenant, kind, id, page),
       close: async () => {},
     };
     try {
@@ -1221,6 +1259,7 @@ describe("links across an SQLite reload", () => {
         readText: (tenant, kind, id) => backing.readText(tenant, kind, id),
         readHistory: (tenant, kind, id) => backing.readHistory(tenant, kind, id),
         readHistoryPage: (tenant, kind, id, page) => backing.readHistoryPage(tenant, kind, id, page),
+        readTimeline: (tenant, kind, id, page) => backing.readTimeline(tenant, kind, id, page),
         close: () => backing.close(),
       };
       engine = await Engine.open({ storage });
@@ -1644,6 +1683,269 @@ describe("starting the service", () => {
     } finally {
       await again.stop();
       rmSync(running.directory, { recursive: true, force: true });
+    }
+  });
+});
+
+/** Makes the data file of format 1 that the version before this one left: see format-1-data.ts. */
+function writeFormat1(file: string): void {
+  const db = new DatabaseSync(file);
+  for (const statement of FORMAT_1_SQL) db.exec(statement);
+  db.close();
+}
+
+/**
+ * An item in full with every list read to its end, as the version before returned it in one answer: the pages
+ * of its timeline and of its history put one before the other, those of its links one after the other.
+ */
+async function whole(engine: Engine, input: Record<string, unknown>): Promise<any> {
+  const get = (more: Record<string, unknown> = {}) => engine.execute("get", "agent1", { ...input, ...more }) as Promise<any>;
+  const item = await get();
+  for (const list of ["timeline", "history"] as const) {
+    for (let more = item.more?.[list]; more; ) {
+      const page = await get({ history: undefined, continuation: more.continuation });
+      item[list].unshift(...page[list]);
+      assert.equal(more.total, page.more?.[list]?.total ?? more.total);
+      more = page.more?.[list];
+      if (!more) assert.equal(item[list].length, item.more[list].total, `${list}: as many as the answer counted`);
+    }
+  }
+  for (const [name, first] of Object.entries((item.more?.links ?? {}) as Record<string, { continuation: string }>)) {
+    for (let more: { continuation: string } | undefined = first; more; ) {
+      const page = await get({ history: undefined, continuation: more.continuation });
+      item.links[name].push(...page.links[name]);
+      more = page.more?.links?.[name];
+    }
+  }
+  delete item.more;
+  return item;
+}
+
+/**
+ * An answer with the links of an item in the order of the IDs at their other end, which is the order `get`
+ * returns them in now. The version before returned them in the order they were stored in.
+ */
+function linksInOrder<T>(answer: T): T {
+  const detail = answer as {
+    links?: Record<string, Array<{ kind: string; id: string }>>;
+    timeline?: Array<Record<string, unknown>>;
+    history?: Array<Record<string, unknown>>;
+    problems?: unknown;
+    unchanged_since?: number;
+    progress?: unknown;
+    has_problems?: boolean;
+    is_assigned?: boolean;
+    is_next?: boolean;
+    is_waiting?: boolean;
+    waiting_for?: unknown;
+    live_containers?: unknown;
+    tasks?: Array<Record<string, unknown>>;
+    projects?: Array<Record<string, unknown>>;
+    users?: Array<Record<string, unknown>>;
+  } | undefined;
+  if (!detail) return answer;
+  const key = (item: { kind: string; id: string }) => `${item.kind} ${item.id}`;
+  const withoutPlace = (items: Array<Record<string, unknown>>) => items.map(({ place: _place, ...item }) => item);
+  const summaryOnly = (items: Array<Record<string, unknown>>) => items.map(({ is_assigned: _isAssigned, is_next: _isNext, is_waiting: _isWaiting, waiting_for: _waitingFor, live_containers: _liveContainers, has_problems: _hasProblems, problems: _problems, progress: _progress, ...item }) => item);
+  const { unchanged_since: _unchangedSince, progress: _progress, has_problems: _hasProblems, is_assigned: _isAssigned, is_next: _isNext, is_waiting: _isWaiting, waiting_for: _waitingFor, live_containers: _liveContainers, problems: _problems, ...withoutDerived } = detail;
+  return {
+    ...withoutDerived,
+    ...(detail.tasks ? { tasks: summaryOnly(detail.tasks) } : {}),
+    ...(detail.projects ? { projects: summaryOnly(detail.projects) } : {}),
+    ...(detail.users ? { users: summaryOnly(detail.users) } : {}),
+    ...(detail.links ? { links: Object.fromEntries(Object.entries(detail.links).map(([name, items]) => [name, [...items].sort((a, b) => (key(a) < key(b) ? -1 : 1))])) } : {}),
+    ...(detail.timeline ? { timeline: withoutPlace(detail.timeline) } : {}),
+    ...(detail.history ? { history: withoutPlace(detail.history) } : {}),
+  } as T;
+}
+
+describe("an item that has changed status 20,000 times, in the data file", () => {
+  it("costs the next change what the second cost: the same time, the same record, one row more, and nothing more to load at the start", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "vigile-busy-"));
+    const changes = 20_000;
+    const median = (durations: number[]) => [...durations].sort((a, b) => a - b)[Math.floor(durations.length / 2)]!;
+    try {
+      const storage = new SqliteStorage({ directory });
+      const engine = await Engine.open({ storage });
+      const call = (operation: string, input: Record<string, unknown>) => engine.execute(operation, "agent1", input) as Promise<any>;
+      await call("create_project", { title: "Busy", prefix: "busy" });
+      const task = await call("create_task", { title: "Busy", description: "Switched between draft and open, over and over." });
+      const db = new DatabaseSync(join(directory, "default.sqlite"), { readOnly: true });
+      const stored = (kind: string, id: string) => ({
+        record: Number((db.prepare("SELECT length(data) AS bytes FROM objects WHERE kind = ? AND id = ?").get(kind, id) as { bytes: number }).bytes),
+        timeline: Number((db.prepare("SELECT count(*) AS entries FROM timeline WHERE kind = ? AND id = ?").get(kind, id) as { entries: number }).entries),
+        history: Number((db.prepare("SELECT count(*) AS entries FROM history WHERE kind = ? AND id = ?").get(kind, id) as { entries: number }).entries),
+      });
+      for (const [kind, id, operation, statuses] of [["task", task.id as string, "set_task_status", ["draft", "open"]], ["project", "BUSY", "set_project_status", ["broken", "open"]]] as const) {
+        const took: number[] = [];
+        let early: { stored: ReturnType<typeof stored>; loaded: number } | undefined;
+        for (let n = 1; n <= changes; n++) {
+          const began = performance.now();
+          await call(operation, { id, version: n, status: statuses[(n - 1) % 2] });
+          took.push(performance.now() - began);
+          if (n === 2) early = { stored: stored(kind, id), loaded: JSON.stringify(await storage.load("default")).length };
+        }
+        const late = { stored: stored(kind, id), loaded: JSON.stringify(await storage.load("default")).length };
+        // The record is what it was after the second change, but for the digits its version gained: with the
+        // timeline inside it, it had grown to more than a megabyte by now.
+        assert.ok(late.stored.record <= early!.stored.record + 4 && late.stored.record < 400, `${kind}: the record had ${early!.stored.record} bytes after 2 changes and has ${late.stored.record} after ${changes}`);
+        // Each change added one row to the timeline and one to the history, and rewrote none.
+        assert.deepEqual([late.stored.timeline - early!.stored.timeline, late.stored.history - early!.stored.history], [changes - 2, changes - 2], kind);
+        // What the service loads into memory when it starts is as much as after the second change.
+        assert.ok(late.loaded <= early!.loaded + 16, `${kind}: ${early!.loaded} bytes were loaded at the start after 2 changes, ${late.loaded} after ${changes}`);
+        // And a change takes as long as one did early on. Half of the last thousand took no longer than this
+        // many times what half of the second thousand took; with the timeline inside the record it was twenty times.
+        const [then, now] = [median(took.slice(1000, 2000)), median(took.slice(-1000))];
+        assert.ok(now <= 3 * then + 0.05, `${kind}: a change took ${then.toFixed(3)} ms around the 1,500th and ${now.toFixed(3)} ms around the ${changes - 500}th`);
+        // The item is read with the latest page of its timeline, and says how long the timeline is.
+        const read = await call("get", { id });
+        assert.deepEqual([read.timeline.length, read.more.timeline.total, read.timeline.at(-1).status, read.status], [100, changes + 1, "open", "open"], kind);
+        assert.ok(JSON.stringify(read).length < 10_000, `${kind}: get answers with ${JSON.stringify(read).length} bytes`);
+      }
+      db.close();
+      await engine.close();
+      // Started again, the plan in memory is small, and no timeline was read to build it.
+      const again = await Engine.open({ storage: new SqliteStorage({ directory }) });
+      assert.deepEqual([again.checkConsistency(), (await again.checkTimelines()).length], [[], 0]);
+      await again.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a data file that the version before wrote, with each item's timeline inside its record", () => {
+  const pick = ({ ok, format, revision, messages }: ReturnType<typeof inspectTenantFile>) => ({ ok, format, revision, messages });
+  const revision = Number(/VALUES \(1, 1, (\d+),/.exec(FORMAT_1_SQL.find((statement) => statement.startsWith("INSERT INTO head"))!)![1]);
+
+  it("is taken over by the service at its start, which says so once, and by no start after that", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "vigile-format-1-"));
+    const config = join(directory, "config.toml");
+    initConfig(config, { name: "taken-over", port: await freePort() });
+    mkdirSync(join(directory, "data"));
+    writeFormat1(join(directory, "data", "default.sqlite"));
+    let running: Service | undefined;
+    const begin = async () => {
+      const warnings: string[] = [];
+      running = await startService({ loaded: loadConfig(config, {}), log: () => {}, warn: (line) => warnings.push(line) });
+      return { service: running, warnings };
+    };
+    try {
+      const first = await begin();
+      assert.deepEqual(
+        first.warnings.filter((line) => line.includes("format")),
+        ['The data of "default" was written by an earlier version of the service and has been brought from format 1 to format 2. A version from before this one will refuse to open it; backups taken before still restore.'],
+      );
+      const read = (await (await fetch(`${first.service.urls.base}/api/get`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "ABC-002" }) })).json()) as any;
+      const before = FORMAT_1_ANSWERS.get["task ABC-002"];
+      assert.deepEqual([read.timeline.map(({ place: _place, ...entry }: Record<string, unknown>) => entry), read.completed_at, read.status], [before.timeline, before.completed_at, "done"]);
+      await first.service.stop();
+      await first.service.backups.over();
+      const second = await begin();
+      assert.deepEqual(second.warnings.filter((line) => line.includes("format")), []);
+    } finally {
+      // Also when something above did not hold: a service left running would keep the tests from ending.
+      const ending = running;
+      await ending?.stop().catch(() => {});
+      await ending?.backups.over().catch(() => {});
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("is brought to the present format when the store opens it, and then answers and changes as the version that wrote it did", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "vigile-format-1-"));
+    const file = join(directory, "default.sqlite");
+    writeFormat1(file);
+    let tick = Date.parse(FORMAT_1_THEN_FROM);
+    const open = async () => {
+      const upgrades: unknown[] = [];
+      const storage = new SqliteStorage({ directory, onUpgrade: (...told) => upgrades.push(told) });
+      return { engine: await Engine.open({ storage, clock: { now: () => new Date(tick) } }), upgrades };
+    };
+    const look = (sql: string, ...values: string[]) => {
+      const db = new DatabaseSync(file, { readOnly: true });
+      try {
+        return Number(Object.values(db.prepare(sql).get(...values) as Record<string, unknown>)[0]);
+      } finally {
+        db.close();
+      }
+    };
+    try {
+      // Before the service has started on it, the file is what the doctor finds sound: of format 1, as it is.
+      assert.deepEqual(pick(inspectTenantFile("default", file)), { ok: true, format: 1, revision, messages: ["ok"] });
+      assert.equal(look("SELECT length(data) FROM objects WHERE id = 'ABC-003'") > 6000, true, "the task that changed status 105 times carries them all in its record");
+
+      const { engine, upgrades } = await open();
+      assert.deepEqual(upgrades, [["default", 1, 2]]);
+      assert.deepEqual(pick(inspectTenantFile("default", file)), { ok: true, format: 2, revision: revision + 1, messages: ["ok"] }, "migration advances the revision so a writer holding format-1 state must reload");
+      assert.deepEqual([engine.checkConsistency(), await engine.checkTimelines()], [[], []]);
+      // The timelines are beside the records now, entry for entry, and no record holds one.
+      assert.equal(look("SELECT count(*) FROM objects WHERE json_type(data, '$.timeline') IS NOT NULL"), 0);
+      assert.equal(look("SELECT count(*) FROM timeline WHERE kind = 'task' AND id = 'ABC-003'"), 106);
+      assert.equal(look("SELECT length(data) FROM objects WHERE id = 'ABC-003'") < 400, true);
+
+      // Every item in full, and every list to its end, as the version that wrote the file answered.
+      for (const [key, before] of Object.entries(FORMAT_1_ANSWERS.get)) {
+        const [kind, id] = key.split(" ");
+        const answer = await whole(engine, { kind, id, history: true });
+        const normalized = linksInOrder(answer);
+        assert.deepEqual(normalized, linksInOrder(before), key);
+        if (key === "project ABC") assert.ok(answer.problems.some((problem: { code: string }) => problem.code === "contains_task_with_problems"), "current calculations also flag problems in contained tasks");
+      }
+      const all = async (operation: string, field: string, input: Record<string, unknown> = {}) => {
+        const found: unknown[] = [];
+        for (let continuation: string | undefined, first = true; first || continuation; first = false) {
+          const page = (await engine.execute(operation, "agent1", { ...input, ...(continuation ? { continuation } : {}) })) as any;
+          found.push(...page[field]);
+          continuation = page.continuation;
+        }
+        return found;
+      };
+      // The service's calculated fields have evolved since format 1 was written. Compare the stored task and
+      // project fields and their links here; timeline and history pages are compared above through `get`.
+      const storedSummary = (items: any[]) => items.map((item) => {
+        const fields = ["kind", "id", "title", "type", "status", "priority", "value", "size", "version", "completed_at", "contained_in", "depends_on", "assigned_to", "username", "built_in", "deleted_at"];
+        return Object.fromEntries(fields.filter((field) => Object.hasOwn(item, field)).map((field) => [field, item[field]]));
+      });
+      assert.deepEqual(
+        {
+          tasks: storedSummary(await all("list_tasks", "tasks")),
+          done: storedSummary(await all("list_tasks", "tasks", { status: "done" })),
+          projects: storedSummary(await all("list_projects", "projects")),
+          users: storedSummary(await all("list_users", "users")),
+        },
+        {
+          tasks: storedSummary(FORMAT_1_ANSWERS.lists.tasks!),
+          done: storedSummary(FORMAT_1_ANSWERS.lists.done!),
+          projects: storedSummary(FORMAT_1_ANSWERS.lists.projects!),
+          users: storedSummary(FORMAT_1_ANSWERS.lists.users!),
+        },
+      );
+
+      // Then the same calls that version went on to make, a minute apart: changes of status, dates carried over
+      // and each of the refusals of that, a delete for good. Each is answered, or refused, as it was then.
+      for (const [index, call] of FORMAT_1_THEN.entries()) {
+        tick += 60_000;
+        const what = `call ${index + 1}: ${call.operation} ${JSON.stringify(call.input)}`;
+        const outcome = await (call.operation === "get" ? whole(engine, call.input) : engine.execute(call.operation, call.as, call.input)).then(
+          (answer) => ({ answer }),
+          (error: unknown) => ({ refusal: (error as { toJSON(): unknown }).toJSON() }),
+        );
+        assert.deepEqual("answer" in outcome ? { answer: linksInOrder(outcome.answer) } : outcome, "refusal" in call ? { refusal: call.refusal } : { answer: linksInOrder(call.answer) }, what);
+      }
+      assert.deepEqual([engine.checkConsistency(), await engine.checkTimelines()], [[], []]);
+      // The task that was deleted for good took its timeline with it.
+      assert.equal(look("SELECT count(*) FROM timeline WHERE id = 'ABC-004'"), 0);
+      await engine.close();
+
+      // Opened again, the file is of the present format already: nothing is brought anywhere, and it reads the same.
+      const again = await open();
+      assert.deepEqual(again.upgrades, []);
+      const last = FORMAT_1_THEN.findLast((call) => call.operation === "get" && call.answer?.id === "ABC-002")!;
+      assert.deepEqual(linksInOrder(await whole(again.engine, last.input)), linksInOrder(last.answer));
+      await again.engine.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 });
