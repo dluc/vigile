@@ -227,7 +227,7 @@ main { padding: 18px clamp(14px, 3vw, 28px) 76px; display: grid; grid-template-c
 .project-chip-wrap { display: inline-flex; align-items: center; gap: 4px; flex: none; max-width: 100%; }
 .project-chip-zoom, .project-zoom { display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 2px 8px; min-height: 24px; border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--surface); color: var(--muted); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
 .project-chip-zoom[aria-pressed="true"], .project-zoom[aria-pressed="true"] { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); color: var(--text); }
-.project-actions { display: inline-flex; align-items: center; gap: 5px; }
+.project-actions { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
 .project-chip:hover { box-shadow: var(--shadow); }
 .project-chip:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
 .project-chip-zoom:focus-visible, .project-zoom:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
@@ -250,7 +250,7 @@ main { padding: 18px clamp(14px, 3vw, 28px) 76px; display: grid; grid-template-c
 .project-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .project-id { font: 600 13px var(--mono); white-space: nowrap; }
 .project-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.project-foot { display: flex; align-items: center; gap: 8px; }
 .bar { height: 5px; border-radius: 999px; background: var(--idle-soft); overflow: hidden; }
 .bar i { display: block; height: 100%; border-radius: 999px; background: var(--go); transition: width 0.4s ease; }
 
