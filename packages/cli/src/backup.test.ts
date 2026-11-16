@@ -7,7 +7,7 @@ import { basename, join, relative } from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { NoPlace, createPlainFile, initConfig, loadConfig, placeOf, samePlace, setValue, unsetValue, whereTo } from "@vigile/config";
-import { backupTenantFile, holdFile, holdFolder, holdTenantFiles, inspectTenantFile, readTenantFile } from "@vigile/storage-sqlite";
+import { backupTenantFile, folderIsHeld, holdFile, holdFolder, holdTenantFiles, inspectTenantFile, readTenantFile } from "@vigile/storage-sqlite";
 import { UsageError, parseArgs } from "./args.js";
 import { BACKUP_TIMES, REMEMBERED_MOST, decodeRemembered, encodeRemembered, isRemembered, rememberedWait, shortened, standing, startBackups, type BackupMemory, type BackupOutcome, type BackupSource, type Remembered } from "./backup-schedule.js";
 
@@ -137,6 +137,15 @@ async function instance(settings: Record<string, string> = {}): Promise<Instance
   };
   instances.push(made);
   return made;
+}
+
+/** A bounded service stop may return while its final backup is still settling the data-folder lock. */
+async function waitForFolderRelease(directory: string): Promise<void> {
+  const until = Date.now() + 30_000;
+  while (folderIsHeld(directory)) {
+    if (Date.now() >= until) assert.fail(`the service did not release its data folder: ${directory}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 /** The name an automatic backup of the tenant has when it is taken at the moment. */
@@ -655,6 +664,7 @@ describe("an automatic backup of a large plan", () => {
   });
   beforeEach(async () => {
     await one.service.stop();
+    await waitForFolderRelease(one.data);
     rmSync(one.backups, { recursive: true, force: true });
     rmSync(join(one.data, MEMORY_FILE), { force: true });
     one.clock.now = START;
