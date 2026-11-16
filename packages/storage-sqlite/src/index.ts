@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { closeSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { DatabaseSync as Database } from "node:sqlite";
@@ -388,8 +388,15 @@ interface HeldLock {
   release(): void;
 }
 
-function tryHoldFile(file: string): HeldLock | null {
+/** Refuses anything but an ordinary lock file without opening a descriptor in this process. */
+function mustBePlain(file: string): void {
+  const stats = lstatSync(file, { throwIfNoEntry: false });
+  if (stats && !stats.isFile()) throw new Error(`${file} is not a lock file of Vigile. Remove it while no vigile command and no service is running.`);
+}
+
+function tryHoldFile(file: string, keepUntilOwnerStops = false): HeldLock | null {
   needSqlite();
+  mustBePlain(file);
   const exchange = mkdtempSync(join(tmpdir(), "vigile-lock-"));
   const answer = join(exchange, "answer.json");
   const released = join(exchange, "released");
@@ -397,7 +404,7 @@ function tryHoldFile(file: string): HeldLock | null {
   const disarm = join(exchange, "disarm");
   const disarmed = join(exchange, "disarmed");
   const heartbeat = join(exchange, "heartbeat");
-  const child = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./lock-holder.js", import.meta.url)), file, answer, released, accepted, disarm, disarmed, heartbeat], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  const child = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./lock-holder.js", import.meta.url)), file, answer, released, accepted, disarm, disarmed, heartbeat, keepUntilOwnerStops ? "owner" : "disconnect"], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
   let spawnError: Error | null = null;
   child.on("error", (error) => {
     spawnError = error;
@@ -524,10 +531,10 @@ const notFlushed = (folder: string, error: unknown): Error =>
  * the process however the process ends, and nobody has to decide whether a lock was left behind by someone who
  * died. The file itself stays; it holds nothing.
  */
-export function holdFile(file: string): (() => void) | null {
+export function holdFile(file: string, keepUntilOwnerStops = false): (() => void) | null {
   let holder: HeldLock | null;
   try {
-    holder = tryHoldFile(file);
+    holder = tryHoldFile(file, keepUntilOwnerStops);
   } catch (error) {
     // Something else stands under that name. It is not put out of the way here: two who did that at the same
     // moment could each end up holding a file of their own. Whoever runs this removes it, with nothing running.
@@ -666,6 +673,34 @@ export function holdFolder(directory: string): (() => void) | null {
   return null;
 }
 
+/** Asynchronously takes the same current and legacy folder locks as `holdFolder`. */
+export async function holdFolderAsync(directory: string, deadline: number): Promise<AsyncRelease | null> {
+  needSqlite();
+  const owner = await holdFileAsync(join(directory, OWNER_FILE), deadline);
+  if (!owner) return null;
+  let legacy: AsyncRelease | null = null;
+  try {
+    legacy = await holdFileAsync(join(directory, HOLD_FILE), deadline);
+    if (!legacy) {
+      await owner();
+      return null;
+    }
+    let released = false;
+    return async (releaseDeadline = Date.now() + 10_000): Promise<void> => {
+      if (released) return;
+      released = true;
+      const failures: unknown[] = [];
+      await legacy!(releaseDeadline).catch((error) => failures.push(error));
+      await owner(releaseDeadline).catch((error) => failures.push(error));
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) throw new AggregateError(failures, "The folder locks could not both be confirmed released.");
+    };
+  } catch (error) {
+    if (!legacy) await owner().catch(() => {});
+    throw error;
+  }
+}
+
 const FILES_HOLD = "vigile.files";
 
 /**
@@ -694,7 +729,10 @@ export const everHeld = (directory: string): boolean => existsSync(join(director
 /** Whether a process has the data folder right now. Only looks: it takes nothing and creates nothing. */
 export function folderIsHeld(directory: string): boolean {
   needSqlite();
-  const checked = spawnSync(process.execPath, ["--no-warnings", fileURLToPath(new URL("./lock-checker.js", import.meta.url)), join(directory, OWNER_FILE), join(directory, HOLD_FILE)], { encoding: "utf8" });
+  const [owner, legacy] = [join(directory, OWNER_FILE), join(directory, HOLD_FILE)];
+  mustBePlain(owner);
+  mustBePlain(legacy);
+  const checked = spawnSync(process.execPath, ["--no-warnings", fileURLToPath(new URL("./lock-checker.js", import.meta.url)), owner, legacy], { encoding: "utf8" });
   if (checked.error) throw checked.error;
   if (checked.status !== 0) throw new Error(checked.stderr.trim() || "The process that inspected the data-folder locks failed.");
   const answer = JSON.parse(checked.stdout) as { held: boolean };
@@ -929,11 +967,77 @@ export function readTenantFile(file: string): Snapshot | null {
 }
 
 /** Writes a consistent copy of a tenant file, through a read-only connection, while a service may be using it. */
-export function backupTenantFile(file: string, destination: string): void {
+export function backupTenantFile(file: string, destination: string, expected?: { device: number; inode: number; staging?: { directory: string; file: string; device: number; inode: number; fileDevice: number; fileInode: number } }): void {
   const db = openDatabase(file, { readOnly: true });
+  let handle: number | null = null;
+  let staged: number | null = null;
+  let staging: string | null = null;
+  let stagedPath: string | null = null;
+  let stagingIdentity: { device: number; inode: number } | null = null;
+  let stagedIdentity: { device: number; inode: number } | null = null;
+  let cleanupError: unknown;
   try {
-    db.prepare("VACUUM INTO ?").run(destination);
+    if (expected) {
+      handle = openSync(destination, constants.O_RDWR | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
+      const actual = fstatSync(handle);
+      if (actual.dev !== expected.device || actual.ino !== expected.inode) throw new Error(`${destination} is not the file prepared for this backup`);
+      // SQLite needs a name that does not exist for VACUUM INTO. Keep the private transient copy on the chosen
+      // backup volume, then copy through the already-open destination descriptor. This avoids requiring a
+      // second database-sized allocation on the system temporary volume.
+      staging = expected.staging?.directory ?? mkdtempSync(join(dirname(destination), ".vigile-backup-copy-"));
+      const madeStaging = lstatSync(staging, { throwIfNoEntry: false });
+      stagingIdentity = expected.staging ? { device: expected.staging.device, inode: expected.staging.inode } : madeStaging ? { device: madeStaging.dev, inode: madeStaging.ino } : null;
+      if (!madeStaging?.isDirectory() || !stagingIdentity || madeStaging.dev !== stagingIdentity.device || madeStaging.ino !== stagingIdentity.inode) throw new Error(`${staging} is not the private staging directory made for this backup`);
+      stagedPath = expected.staging?.file ?? join(staging, "copy.sqlite");
+      if (!expected.staging) {
+        const reserved = openSync(stagedPath, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | (constants.O_NOFOLLOW ?? 0), 0o600);
+        const identity = fstatSync(reserved);
+        stagedIdentity = { device: identity.dev, inode: identity.ino };
+        closeSync(reserved);
+      }
+      const preparedStaging = lstatSync(stagedPath, { throwIfNoEntry: false });
+      if (expected.staging && (!preparedStaging?.isFile() || preparedStaging.size !== 0 || preparedStaging.dev !== expected.staging.fileDevice || preparedStaging.ino !== expected.staging.fileInode)) throw new Error(`${stagedPath} is not the empty staging file prepared for this backup`);
+      if (!expected.staging && (!preparedStaging?.isFile() || preparedStaging.size !== 0 || preparedStaging.dev !== stagedIdentity?.device || preparedStaging.ino !== stagedIdentity.inode)) throw new Error(`${stagedPath} is not the empty staging file reserved for this backup`);
+      db.prepare("VACUUM INTO ?").run(stagedPath);
+      staged = openSync(stagedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const stillStaging = lstatSync(staging, { throwIfNoEntry: false });
+      const stagedFile = fstatSync(staged);
+      const recordedStaging = expected.staging ? { device: expected.staging.fileDevice, inode: expected.staging.fileInode } : stagedIdentity;
+      if (!stillStaging?.isDirectory() || stillStaging.dev !== stagingIdentity.device || stillStaging.ino !== stagingIdentity.inode || !stagedFile.isFile() || !recordedStaging || stagedFile.dev !== recordedStaging.device || stagedFile.ino !== recordedStaging.inode) throw new Error(`${stagedPath} is not the staging file prepared for this backup`);
+      stagedIdentity = recordedStaging;
+      ftruncateSync(handle, 0);
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      for (;;) {
+        const read = readSync(staged, buffer, 0, buffer.length, null);
+        if (!read) break;
+        let written = 0;
+        while (written < read) written += writeSync(handle, buffer, written, read - written);
+      }
+      fsyncSync(handle);
+    } else db.prepare("VACUUM INTO ?").run(destination);
   } finally {
-    db.close();
+    try {
+      if (staged !== null) closeSync(staged);
+      if (handle !== null) closeSync(handle);
+      if (staging !== null && stagingIdentity !== null) {
+        const directory = lstatSync(staging, { throwIfNoEntry: false });
+        // Never recursively remove a name that now belongs to another directory. Inside the same private
+        // directory, remove only the one staging file this backup created; foreign entries keep the directory.
+        if (directory?.isDirectory() && directory.dev === stagingIdentity.device && directory.ino === stagingIdentity.inode) {
+          if (stagedPath !== null) {
+            const file = lstatSync(stagedPath, { throwIfNoEntry: false });
+            const expectedFile = expected?.staging;
+            if (file?.isFile() && (expectedFile ? file.dev === expectedFile.fileDevice && file.ino === expectedFile.fileInode : stagedIdentity !== null && file.dev === stagedIdentity.device && file.ino === stagedIdentity.inode)) rmSync(stagedPath);
+          }
+          try { rmdirSync(staging); } catch (error) {
+            if (expected?.staging) cleanupError = error;
+            // A foreign entry appeared in the private directory; leave it and the directory alone.
+          }
+        }
+      }
+    } finally {
+      db.close();
+    }
+    if (cleanupError) throw cleanupError;
   }
 }

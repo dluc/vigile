@@ -520,17 +520,19 @@ admin = "vig_..."
 ### Applying a change
 
 - **Users and keys** (`[auth]`) apply at once, without a restart.
-- **Everything else** (`name`, `data_dir`, `log_level`, `[listen]`) applies when
-  the service starts. Stop it and run `vigile serve` again. Until then, after a
-  change of `name`, `data_dir` or `[listen]`, the commands that call the
-  service do not: it is still what it was started as, and no longer what the
-  config describes.
+- **Everything else** (`name`, `data_dir`, `log_level`, `[listen]`, `[backup]`)
+  applies when the service starts. Stop it and run `vigile serve` again. Until
+  then, after a change of `name`, `data_dir` or `[listen]`, the commands that
+  call the service do not: it is still what it was started as, and no longer
+  what the config describes.
 
 A value that fails the check is never written, and a config that fails the check
 never starts the service. For one run, a setting can be overridden by an
 environment variable (`VIGILE_LISTEN_PORT`, `VIGILE_LISTEN_ADDRESS`,
 `VIGILE_NAME`, `VIGILE_DATA_DIR`, `VIGILE_LOG_LEVEL`,
-`VIGILE_AUTH_KEYLESS_USER`) or an option to `serve`, such as
+`VIGILE_AUTH_KEYLESS_USER`, `VIGILE_BACKUP_ENABLED`,
+`VIGILE_BACKUP_EVERY_HOURS`, `VIGILE_BACKUP_FOLDER`, `VIGILE_BACKUP_KEEP`) or an
+option to `serve`, such as
 `--listen.port 8701`. `vigile config show` prints the values in effect and where
 each came from.
 
@@ -544,7 +546,10 @@ from happening at once; leave it where it is.
 
 `vigile serve` runs in the foreground. Vigile does not install itself as a
 service: run it under whatever keeps processes alive on your machine. Ctrl-C, or
-a `SIGTERM`, finishes the write in flight and stops. A second `serve` on the
+a `SIGTERM`, finishes the write in flight and stops. An automatic backup that
+is being written at that moment is ended; the process stays until its files
+are settled, which is an instant unless the disk does not answer, and a second
+signal ends it at once. A second `serve` on the
 same data folder refuses to start.
 
 ### Checking and backing up
@@ -560,7 +565,8 @@ whether the service runs the code that is on disk, and says when something that
 is not this config's service answers on its port. It changes nothing, and exits
 with an error when a check fails. `backup` writes a consistent copy of the data
 while the service runs. The config file, which holds the API keys, is not
-included.
+included. The service also takes backups by itself: see
+[Automatic backups](#automatic-backups).
 
 `restore-backup` puts a backup in the place of the data. Stop the service
 first; it refuses while one runs. What was there is not deleted: it is moved to
@@ -570,6 +576,135 @@ order by the next start of the service, or the next restore: finished if the
 backup was already in place, undone if not. Do not restore by copying a backup over the
 data file yourself: after a crash, SQLite keeps files beside the data that
 would be replayed onto the copy and break it.
+
+### Automatic backups
+
+The running service takes a backup of the data by itself, every 24 hours, with
+nothing to set up. It is the same backup that `vigile backup` takes: a
+consistent copy of each tenant while changes go on, readable by your account
+only, without the config file. Requests are answered while it is written.
+
+The backups go into `backups/` next to `config.toml`, one file for each tenant,
+named after the tenant and the moment in UTC with `-auto` at the end:
+`default-20260112-091403-120-auto.sqlite`. A directory for the same moment, such
+as `20260112-091403-120-auto.set`, contains the small `complete.json` marker
+that says which tenant files make up that backup. The newest 30 complete sets
+are kept and older sets are removed once a new one is written. A backup taken
+with `vigile backup`, or any other file in the folder, is left alone. For the
+same reason a backup taken by hand does not put the next automatic one off.
+
+A backup is every tenant's copy or none. Each copy is written and flushed to
+its reserved final file, but none is a discoverable backup until every copy is
+whole and the durable `complete.json` marker identifies their exact files. The
+marker is the one publication boundary; this does not depend on hard links. A
+backup that fails, or that a stop cuts short, removes the work it recorded as
+its own and leaves no discoverable partial set. The backup folder is a private,
+dedicated Vigile folder: protect it with the same account and filesystem care as
+the data folder, and do not edit, replace or move its files while Vigile runs.
+Vigile recovers its own interrupted work; it does not defend these files from
+another process running as the same account or from manual filesystem changes.
+Temporary files use a reserved `.vigile-` prefix, which is sufficient for
+recovery to recognize and remove them. Recovery also removes files recorded by
+Vigile whose filesystem identity still matches. An old unprefixed partial name
+without such a record is left alone.
+
+| Setting | Default | What it is |
+|---|---|---|
+| `backup.enabled` | `true` | Whether the service takes backups by itself. |
+| `backup.every_hours` | `24` | How many hours lie between two backups. Fractions are allowed, down to `0.25`, a quarter of an hour. |
+| `backup.folder` | `"backups"` | Where they go. A relative path starts at the config file's folder. It must remain dedicated to this instance and can never be used as a data folder. |
+| `backup.keep` | `30` | How many complete automatic backup sets are kept. |
+
+```bash
+vigile config set backup.every_hours 4     # every four hours
+vigile config set backup.enabled false     # no automatic backups
+```
+
+Like most settings, these apply when the service starts. A config file without
+them gets the defaults.
+
+Where the backups may go is asked of the config as a whole. A change to
+`backup.enabled`, `backup.folder` or `data_dir`, with `config set` or
+`config unset`, is refused when backups would then be on and go into the data
+folder, and nothing is written: so is turning backups on when their folder was
+made the data folder while they were off. The service does not start on such a
+config either, whether it comes from the file, the environment or an option to
+`serve`. Two paths are the same folder when they lead to the same place, by
+whatever names: through `..`, through a link, or through a link in a folder
+above one that is not there yet. One config is let through: one that says
+nothing of backups, from before the service took any, whose data folder is
+called `backups`. "Says nothing" means that none of the four backup settings is
+written in the file, set in the environment or given to `serve`, whatever its
+value; a setting written out with its default value is said. Such a config
+starts, takes no backup, and says so in its log and to the doctor. It is let
+through for that one reason only, that the backups would go into its own data
+folder: a backup folder that is the data folder of another instance is refused
+whatever the config says or leaves out. A folder is named throughout, by the
+config, the log, the doctor and what is written, as the place its path leads
+to when the system walks it, links and `..` included. A path that the system
+would not walk, because its links go round in a circle, it goes through a file,
+or through a folder the account may not enter, leads nowhere: the config does
+not load with such a folder, and `backup` and `restore-backup` refuse it, with
+the path and the reason. It is never taken for some other folder. A separator
+after a file, as in `file/`, leads nowhere too, as it does for the system.
+
+Where the service reads or writes a file of its own, the lock of a folder, what
+it keeps of its last backup, a copy it is writing, it takes a plain file and
+nothing else. A pipe, a socket, a device, a folder or a link under such a name
+is said to be what it is, is not opened and not written through, and the
+service goes on answering; `restore-backup` refuses anything but a plain file
+as the backup to restore from.
+
+When a backup is due is decided by the newest complete automatic backup set in
+the folder, by the moment in its name, so restarts neither take a backup each
+time nor put the next one off. A start with no backup in the folder, or with
+one that is older than the interval, takes one about ten seconds after the
+service is up.
+A backup dated after the present moment was taken by a clock that has since
+been set back: it does not count as the last one, so a backup is taken now and
+the schedule goes on from that one, and when room is made for new backups,
+those dated ahead are the first to go. A clock moved forward, by any length,
+makes one backup due. No wait of the schedule hangs on a date: how long until a
+failed backup is tried again is counted in time that passes, whatever the clock
+is set to meanwhile, and no two backups are begun within ten minutes of each
+other. The times the service and the doctor give, for when the next backup is
+due and for when a failed one is tried again, are the instant at which the
+service would begin one: not before the wait is over, and not while a backup
+that is there, or one dated ahead that counts by then, is less than an interval
+old. What backups there are is what is in the folder at that instant: a set
+without its valid marker or any one of its recorded tenant files is no backup;
+one that was removed, by a later one making room or by hand, is no backup for
+the schedule either, and one that was put there counts. If the folder cannot be
+looked at, the service goes by the last backup it took itself, and says so. That holds over a restart: the service keeps how the last backup it
+began ended in `vigile-backups.json` in the data folder, so a service that is
+started again and again does not try a failing backup at every start, and the
+doctor still knows of the failure. The file is no backup and no data; removed,
+the next start begins as if no backup had been tried. A file there that is not
+what the service writes never keeps the service from starting: it is said once,
+no backup is begun for ten minutes, and the next backup writes it anew. What the
+service writes there it can always read again: a long message is kept in the
+log in full, and in the file by its beginning with how much was left out.
+A backup that fails, because the folder cannot be written, the disk is full or
+another service uses the same folder, does not stop the service: the reason is
+written to the log with what to do, the backup is tried again every ten
+minutes, and `vigile doctor` reports the failure until one works. Only a backup
+of which nothing remains has failed. One that is whole and in place counts as
+taken, with a warning in the log and from the doctor when there is more to say
+of it: older backups could not be removed, the system could not confirm that it
+will survive a power cut, or what wrote it ended without reporting. Each instance
+needs a backup folder of its own, which it has by default: the empty file
+`vigile-backups.hold` in the folder is what keeps a second running service out
+of it, until the first has stopped and any backup it was writing has ended;
+leave the file where it is. `serve` says at its start, and `doctor` whenever
+asked, how often backups are taken, where they go, when the last one was taken
+and when the next is due.
+
+To restore an automatic backup, stop the service and give the file to
+`restore-backup`, as with any other backup:
+
+```bash
+vigile restore-backup backups/default-20260112-091403-120-auto.sqlite
+```
 
 ### Logs
 
@@ -715,6 +850,8 @@ Create a second one with `vigile config init --config <other file> --port 8701`.
 In the folder named by `data_dir`, which is relative to the config file's
 folder: by default, `data/` next to `config.toml`. Stop the service and move the
 instance folder as one unit. To copy a running instance, use `vigile backup`.
+The automatic backups are in `backups/` beside it, unless `backup.folder` says
+otherwise.
 
 ### Why doesn't the page update by itself?
 
@@ -770,10 +907,10 @@ it prints while it runs is the service's log.
 
 | Command | What it does |
 |---|---|
-| `vigile serve [--name <text>] [--data_dir <text>] [--log_level <text>] [--listen.address <text>] [--listen.port <number>] [--auth.keyless_user <text>]` | Runs the service in the foreground: MCP, HTTP API and web page on one port. Each setting can be given for this run, as in `--listen.port 8701`, and is not written to the config. |
+| `vigile serve [--name <text>] [--data_dir <text>] [--log_level <text>] [--listen.address <text>] [--listen.port <number>] [--auth.keyless_user <text>] [--backup.enabled <true\|false>] [--backup.every_hours <number>] [--backup.folder <text>] [--backup.keep <number>]` | Runs the service in the foreground: MCP, HTTP API and web page on one port. Each setting can be given for this run, as in `--listen.port 8701`, and is not written to the config. |
 | `vigile doctor` | Checks the config, the data and the running service. Changes nothing; exits with an error when a check fails. |
-| `vigile backup <folder>` | Writes a consistent copy of the data into the folder, while the service runs. |
-| `vigile restore-backup <backup file> [--tenant <name>]` | Puts a backup in the place of the data, while the service is stopped. What was there is set aside, not deleted. `--tenant` says which tenant the file is a backup of, when its name does not. |
+| `vigile backup <folder>` | Writes a consistent copy of the data into the folder, while the service runs. The service also takes backups by itself: see [Automatic backups](#automatic-backups). |
+| `vigile restore-backup <backup file> [--tenant <name>]` | Puts a backup in the place of the data, while the service is stopped. The file is one that `vigile backup` or the service itself wrote. What was there is set aside, not deleted. `--tenant` says which tenant the file is a backup of, when its name does not. |
 | `vigile config init [--name <name>] [--listen.address <address>] [--listen.port <port>]` | Writes a new config file with a new admin key. Refuses to replace an existing one. `--address` and `--port` are short for the two listen options. |
 | `vigile config show` | Prints the values in effect and where each came from. Keys are masked. |
 | `vigile config set <setting> <value>` | Changes one setting, after checking it. For `auth.keyless_user` the running service is asked whether there is such a user; when no service runs on the config's data, so that nothing was sent to anyone and nothing holds the data folder, the setting is written unchecked, with a warning; the command holds the data folder while it writes, so that no service starts meanwhile. In every other case in which the service cannot be asked, nothing is written: it does not answer, something else answers at its address while a process holds the data folder, the folder cannot be looked into, or the config names another machine's address. |

@@ -19,13 +19,19 @@ jobs:
   test-shard:
     name: Test / ${{ matrix.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 18
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: non-browser
             shard: non-browser
+            browser: false
+          - name: non-browser backup
+            shard: non-browser-backup
+            browser: false
+          - name: non-browser resilience
+            shard: non-browser-resilience
             browser: false
           - name: browser refreshing
             shard: browser-refreshing

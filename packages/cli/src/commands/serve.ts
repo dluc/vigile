@@ -1,9 +1,17 @@
 import { SETTINGS, loadConfig } from "@vigile/config";
 import { VERSION } from "@vigile/core";
 import { configPath, flag, type Args } from "../args.js";
-import { startService } from "../service.js";
+import { everyHours, type BackupStatus } from "../backup-schedule.js";
+import { startService, type Service } from "../service.js";
 import { accent, bold, dim, fields, note, withWarnings, type Ui } from "../ui.js";
 import { builtin, given } from "./builtin.js";
+
+/** What the first lines say of the automatic backups: whether, how often, where, when the last was and when the next is. */
+function backupsLine(status: BackupStatus): string {
+  if (!status.enabled) return "off (backup.enabled is false)";
+  const due = Date.parse(status.next_due!) <= Date.now() ? "now" : status.next_due;
+  return `${everyHours(status.every_hours)} into ${status.folder}; ${status.last_at ? `last ${status.last_at}` : "none taken yet"}, next due ${due}`;
+}
 
 export async function serve(args: Args, ui: Ui): Promise<void> {
   const path = configPath(args);
@@ -32,13 +40,41 @@ export async function serve(args: Args, ui: Ui): Promise<void> {
   // which is then all there is on the error output and can be read as JSON.
   const say = (line: string) => ui.err(`${ui.paint("yellow", "warning")} ${line}`);
   let held: string[] | null = json ? [] : null;
-  const service = await startService({
+  let service: Service | undefined;
+  let closing = false;
+  let pendingSignal: string | null = null;
+  const shutdown = (signal: string) => {
+    if (!service) {
+      if (pendingSignal) return void process.exit(0);
+      return void (pendingSignal = signal);
+    }
+    if (closing) return void process.exit(0);
+    closing = true;
+    ui.out(dim(ui, `${signal} received, finishing the write in flight and stopping`));
+    stopAndSettle(service, (line) => {
+      ui.out(dim(ui, line));
+    }).then(
+      () => process.exit(0),
+      () => process.exit(1),
+    );
+  };
+  const onInterrupt = () => shutdown("SIGINT");
+  const onTerminate = () => shutdown("SIGTERM");
+  // The server can answer while asynchronous backup-folder readiness is finishing. Handle signals before that
+  // window opens, remembering one until startService has returned its stoppable service object.
+  process.on("SIGINT", onInterrupt);
+  process.on("SIGTERM", onTerminate);
+
+  service = await startService({
     loaded,
     log: (line) => ui.out(line),
     warn: (line) => (held ? void held.push(line) : say(line)),
   }).catch((error: unknown) => {
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onTerminate);
     throw withWarnings(error, held ?? []);
   });
+  if (pendingSignal) return void shutdown(pendingSignal);
   for (const line of held ?? []) say(line);
   held = null;
 
@@ -51,6 +87,7 @@ export async function serve(args: Args, ui: Ui): Promise<void> {
     ["API", `${service.urls.base}/api`],
     ["Config", loaded.path],
     ["Data", loaded.dataDir],
+    ["Backups", backupsLine(service.backups.status())],
   ]);
   ui.out();
   const open = !service.loopbackOnly;
@@ -67,16 +104,22 @@ export async function serve(args: Args, ui: Ui): Promise<void> {
   }
   ui.out();
 
-  let closing = false;
-  const shutdown = (signal: string) => {
-    if (closing) return;
-    closing = true;
-    ui.out(dim(ui, `${signal} received, finishing the write in flight and stopping`));
-    service.stop().then(
-      () => process.exit(0),
-      () => process.exit(1),
-    );
-  };
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  // A first signal stops the service. A second one, when the service has stopped and the process only waits
+  // for a backup to end, ends the process at once: what that backup leaves is cleared by the next start.
+}
+
+/**
+ * Stops the service, and then waits until nothing of it is left at work. A stop does not wait long for a
+ * backup that is under way; the process must, since with the process goes the lock on the backup folder, and
+ * that may go only when the backup's files are settled. `say` is told when the service has stopped and the
+ * process stays for that.
+ */
+export async function stopAndSettle(service: Service, say: (line: string) => void): Promise<void> {
+  await service.stop();
+  let over = false;
+  const settled = service.backups.over().then(() => (over = true));
+  // Whether it is over already is known a moment later, not at once.
+  await new Promise((resolve) => setImmediate(resolve));
+  if (!over) say(`The service has stopped. Process ${process.pid} stays until the backup that was under way has ended and its files are settled, so that nobody else takes the backup folder before; send the signal again to end it now.`);
+  await settled;
 }

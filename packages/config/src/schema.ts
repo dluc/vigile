@@ -14,6 +14,15 @@ const apiKey = z
   .min(20, "must have at least 20 characters")
   .regex(/^[A-Za-z0-9_-]+$/, 'may hold only letters, digits, "_" and "-"');
 
+/**
+ * How often an automatic backup may be taken, in hours. The service looks at its clock twice a minute, and a
+ * backup of a large plan is tens of megabytes: more often than every quarter of an hour fills a disk and says
+ * little more.
+ */
+export const BACKUP_EVERY_HOURS = { least: 0.25, most: 8760 };
+/** The most automatic backups of a tenant that can be asked to be kept. */
+export const BACKUP_KEEP_MOST = 10_000;
+
 export const configSchema = z.strictObject({
   name: z.string().min(1).max(40).default("vigile"),
   data_dir: z.string().min(1).default("data"),
@@ -33,13 +42,26 @@ export const configSchema = z.strictObject({
       keys: z.record(z.string().regex(USERNAME, "must be a username"), apiKey).default({}),
     })
     .default({ keyless_user: "agent1", keys: {} }),
+  backup: z
+    .strictObject({
+      enabled: z.boolean().default(true),
+      every_hours: z
+        .number()
+        .min(BACKUP_EVERY_HOURS.least, `must be at least ${BACKUP_EVERY_HOURS.least}, which is a quarter of an hour`)
+        .max(BACKUP_EVERY_HOURS.most, `must be at most ${BACKUP_EVERY_HOURS.most}, which is a year`)
+        .default(24),
+      folder: z.string().min(1).default("backups"),
+      keep: z.number().int().min(1, "must be at least 1").max(BACKUP_KEEP_MOST, `must be at most ${BACKUP_KEEP_MOST}`).default(30),
+    })
+    .default({ enabled: true, every_hours: 24, folder: "backups", keep: 30 }),
 });
 
 export type Config = z.output<typeof configSchema>;
 
 export interface Setting {
   key: string;
-  type: "string" | "number";
+  /** A number is a whole number; a decimal may have a fraction; a boolean is `true` or `false`. */
+  type: "string" | "number" | "decimal" | "boolean";
   env: string;
   description: string;
 }
@@ -57,6 +79,10 @@ export const SETTINGS: readonly Setting[] = [
     env: "VIGILE_AUTH_KEYLESS_USER",
     description: "Who a connection without an API key acts as; empty refuses such connections",
   },
+  { key: "backup.enabled", type: "boolean", env: "VIGILE_BACKUP_ENABLED", description: "Whether the service takes backups of the data by itself: true or false" },
+  { key: "backup.every_hours", type: "decimal", env: "VIGILE_BACKUP_EVERY_HOURS", description: "How many hours lie between two automatic backups; 0.5 is half an hour" },
+  { key: "backup.folder", type: "string", env: "VIGILE_BACKUP_FOLDER", description: "Where automatic backups go; relative paths start at the config file's folder" },
+  { key: "backup.keep", type: "number", env: "VIGILE_BACKUP_KEEP", description: "How many automatic backups of each tenant are kept; older ones are removed" },
 ];
 
 export const findSetting = (key: string): Setting | undefined => SETTINGS.find((s) => s.key === key);
