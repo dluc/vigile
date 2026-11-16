@@ -10,6 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { initConfig, loadConfig, setKey, setValue } from "@vigile/config";
 import { Engine, VigileError, paging } from "@vigile/core";
+import { compareTaskIds } from "@vigile/core/ids.js";
 import type { StorageAdapter } from "@vigile/storage";
 import { SqliteStorage, backupTenantFile, folderIsHeld, historyOwners, inspectTenantFile } from "@vigile/storage-sqlite";
 import { webRoot } from "@vigile/web";
@@ -1179,6 +1180,95 @@ describe("two engines on one data file", () => {
       await other.close();
     } finally {
       await file.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("links across an SQLite reload", () => {
+  it("keeps summary arrays and link pages ordered after restart and after an uncertain commit", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "vigile-link-order-"));
+    let file: SqliteStorage | undefined;
+    let engine: Engine | undefined;
+    let failAfterCommit = false;
+    const open = async () => {
+      const backing = (file = new SqliteStorage({ directory }));
+      const storage: StorageAdapter = {
+        load: (tenant) => backing.load(tenant),
+        commit: async (tenant, request) => {
+          const head = await backing.commit(tenant, request);
+          if (failAfterCommit) {
+            failAfterCommit = false;
+            throw new Error("the commit succeeded but its acknowledgement was lost");
+          }
+          return head;
+        },
+        readRevision: (tenant) => backing.readRevision(tenant),
+        readText: (tenant, kind, id) => backing.readText(tenant, kind, id),
+        readHistory: (tenant, kind, id) => backing.readHistory(tenant, kind, id),
+        readHistoryPage: (tenant, kind, id, page) => backing.readHistoryPage(tenant, kind, id, page),
+        close: () => backing.close(),
+      };
+      engine = await Engine.open({ storage });
+    };
+    const agent = (operation: string, input: Record<string, unknown> = {}) => engine!.execute(operation, "agent1", input) as Promise<any>;
+    const orderedLists = (answer: any) => ({
+      contained_in: answer.contained_in,
+      live_containers: answer.live_containers,
+      depends_on: answer.depends_on,
+      assigned_to: answer.assigned_to,
+      waiting_for: answer.waiting_for,
+      links: Object.fromEntries(Object.entries(answer.links).map(([name, items]: [string, any]) => [name, items.map((item: any) => item.id)])),
+    });
+
+    try {
+      await open();
+      await agent("create_project", { title: "Second by name", prefix: "ZZ" });
+      await agent("create_project", { title: "First by name", prefix: "AB" });
+      const group = await agent("create_task", { title: "Deleted group", description: "d", project: "AB" });
+      const targets: string[] = [];
+      for (const project of ["ZZ", "AB", "ZZ", "AB"]) {
+        targets.push((await agent("create_task", { title: `Dependency ${targets.length}`, description: "d", project })).id);
+      }
+      const dependencyOrder = [...targets].reverse();
+      const task = await agent("create_task", {
+        title: "Shared task",
+        description: "d",
+        project: "ZZ",
+        depends_on: dependencyOrder,
+        assigned_to: ["agent1", "admin"],
+      });
+      await agent("add_link", { from: "AB", type: "contains", to: task.id });
+      await agent("add_link", { from: group.id, type: "contains", to: task.id });
+      await agent("delete", { id: group.id, version: group.version });
+
+      const beforeRestart = await agent("get", { id: task.id });
+      assert.deepEqual(beforeRestart.contained_in, ["AB", "ZZ", group.id]);
+      assert.deepEqual(beforeRestart.live_containers, ["AB", "ZZ"]);
+      assert.deepEqual(beforeRestart.depends_on, [...targets].sort(compareTaskIds));
+      assert.deepEqual(beforeRestart.assigned_to, ["admin", "agent1"]);
+      assert.notDeepEqual(beforeRestart.depends_on, dependencyOrder, "the answer is not the order links were inserted");
+      assert.notDeepEqual(beforeRestart.assigned_to, ["agent1", "admin"], "the answer is not the order assignees were given");
+      const expected = orderedLists(beforeRestart);
+
+      await engine!.close();
+      engine = undefined;
+      file = undefined;
+      await open();
+      const afterRestart = await agent("get", { id: task.id });
+      assert.deepEqual(orderedLists(afterRestart), expected, "SQLite key order does not change any answer list");
+
+      failAfterCommit = true;
+      await assert.rejects(
+        agent("update_task", { id: task.id, version: afterRestart.version, title: "Committed despite lost acknowledgement" }),
+        (error: unknown) => error instanceof VigileError && /change was not confirmed/.test(error.message),
+      );
+      const afterFailedCommitReload = await agent("get", { id: task.id });
+      assert.equal(afterFailedCommitReload.title, "Committed despite lost acknowledgement");
+      assert.deepEqual(orderedLists(afterFailedCommitReload), expected, "recovery after an uncertain commit keeps every list ordered");
+    } finally {
+      if (engine) await engine.close();
+      else await file?.close();
       rmSync(directory, { recursive: true, force: true });
     }
   });
