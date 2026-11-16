@@ -597,6 +597,11 @@ while the service runs. The config file, which holds the API keys, is not
 included. The service also takes backups by itself: see
 [Automatic backups](#automatic-backups).
 
+Read-only inspection ignores filenames that are not valid tenant names. On a
+cleanly stopped, initialized data folder, `doctor` and `backup` leave no `-wal`
+or `-shm` sidecars, and looking up text for a missing tenant does not create
+an empty store.
+
 `restore-backup` puts a backup in the place of the data. Stop the service
 first; it refuses while one runs. What was there is not deleted: it is moved to
 a folder `replaced-<date>` inside the data folder, for you to remove once the

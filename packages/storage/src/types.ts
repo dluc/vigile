@@ -142,6 +142,8 @@ export function assertCommitSize(request: CommitRequest): void {
   if (records > MAX_RECORDS_PER_COMMIT) throw new CommitTooLargeError(records);
 }
 
+export const isTenantName = (tenant: string): boolean => /^[a-z][a-z0-9-]{0,62}$/.test(tenant);
+
 export function assertTenantName(tenant: string): void {
-  if (!/^[a-z][a-z0-9-]{0,62}$/.test(tenant)) throw new Error(`Invalid tenant name: ${JSON.stringify(tenant)}`);
+  if (!isTenantName(tenant)) throw new Error(`Invalid tenant name: ${JSON.stringify(tenant)}`);
 }
