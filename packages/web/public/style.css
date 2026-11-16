@@ -214,7 +214,7 @@ body.lit { --muted: color-mix(in srgb, var(--muted-plain) 50%, var(--text)); }
 .notice input { flex: 1; min-width: 200px; padding: 6px 10px; border-radius: var(--r-s); border: 1px solid var(--line); background: var(--surface); }
 .notice button { padding: 6px 14px; border-radius: var(--r-s); border: 0; background: var(--text); color: var(--bg); cursor: pointer; }
 
-main { padding: 18px clamp(14px, 3vw, 28px) 60px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; }
+main { padding: 18px clamp(14px, 3vw, 28px) 76px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; }
 .fold { display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px 2px 0; border: 0; background: none; font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; cursor: pointer; border-radius: var(--r-s); }
 .fold:hover { color: var(--text); }
 .fold:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
@@ -286,7 +286,12 @@ main { padding: 18px clamp(14px, 3vw, 28px) 60px; display: grid; grid-template-c
 .clear-filter span::after { transform: rotate(-45deg); }
 .project-main:focus-visible, .tag-button:focus-visible, .link:focus-visible, .card:focus-visible, .close:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
 
-.summary { flex: 1 1 390px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; min-width: 0; padding: 6px 12px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; width: max-content; max-width: 100%; min-width: 0; padding: 6px 12px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* A fixed dock works while each column owns its scrolling. When the whole page scrolls, keeping this tool in
+ * normal flow avoids covering and intercepting cards partway down a long board. */
+body.summary-docked.column-scroll:not(.graph-view) .summary { position: fixed; z-index: 4; right: clamp(14px, 3vw, 28px); bottom: 12px; max-width: calc(100vw - 28px); }
+/* Counts describe the board's cards. Over the graph they would cover and intercept its lower-right canvas. */
+body.graph-view .summary { display: none; }
 .summary > span { display: inline-flex; align-items: center; gap: 0.25em; white-space: nowrap; }
 .summary > span:not(.tag) { min-height: 24px; }
 .summary > span + span::before { content: ""; width: 1px; height: 14px; margin: 0 10px; background: var(--line); }
@@ -336,7 +341,7 @@ main { padding: 18px clamp(14px, 3vw, 28px) 60px; display: grid; grid-template-c
  * columns are stacked and the page scrolls.
  */
 @media (min-width: 641px) {
-  body.column-scroll main { padding-bottom: 12px; }
+  body.column-scroll main { padding-bottom: var(--summary-room, 76px); }
   body.column-scroll .board { height: var(--board-height, auto); grid-template-rows: minmax(0, 1fr); overflow-y: hidden; }
   body.column-scroll .board > .column { display: flex; flex-direction: column; max-height: 100%; min-height: 0; }
   /* The room around the cards keeps their focus ring and shadow from being cut off at the edge of the scrolling area. */
@@ -413,8 +418,8 @@ main { padding: 18px clamp(14px, 3vw, 28px) 60px; display: grid; grid-template-c
 /* A magnifier with a plus: unlike the old rotated arrow, it reads as zoom before its label is read. */
 .zoom-into-icon { position: relative; flex: 0 0 24px; width: 24px; height: 24px; color: var(--busy); }
 .zoom-into-icon::before {
-  content: "+"; position: absolute; left: 1px; top: 1px; display: grid; place-items: center; width: 17px; height: 17px;
-  border: 2px solid currentColor; border-radius: 50%; font: 750 13px/1 var(--sans);
+  content: ""; position: absolute; left: 1px; top: 1px; width: 17px; height: 17px; border: 2px solid currentColor; border-radius: 50%;
+  background: linear-gradient(currentColor, currentColor) center / 8px 2px no-repeat, linear-gradient(currentColor, currentColor) center / 2px 8px no-repeat;
 }
 .zoom-into-icon::after { content: ""; position: absolute; left: 17px; top: 17px; width: 8px; height: 2px; border-radius: 2px; background: currentColor; transform: rotate(45deg); transform-origin: left center; }
 .zoom-into:hover { border-color: var(--busy); background: var(--busy-soft); box-shadow: 0 3px 8px color-mix(in srgb, var(--busy) 18%, transparent); transform: translateY(-1px); }
@@ -424,14 +429,14 @@ main { padding: 18px clamp(14px, 3vw, 28px) 60px; display: grid; grid-template-c
 
 .graph-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
 .zoom { display: inline-flex; align-items: center; gap: 4px; }
-.levels { flex: 2 1 430px; min-width: 0; padding: 3px; border-color: color-mix(in srgb, var(--busy) 32%, var(--line)); background: color-mix(in srgb, var(--busy-soft) 38%, var(--surface)); }
-.zoom > button { width: 40px; height: 40px; border: 1px solid color-mix(in srgb, var(--busy) 34%, var(--line)); border-radius: var(--r-s); background: var(--surface); color: var(--text); cursor: pointer; font-size: 18px; line-height: 1; transition-property: transform, background-color, border-color; transition-duration: 140ms; transition-timing-function: ease-out; }
+.levels { flex: 2 1 430px; min-width: 0; padding: 3px; border-color: color-mix(in srgb, var(--busy) 24%, var(--line)); border-radius: calc(var(--r-s) + 4px); background: var(--surface); box-shadow: 0 1px 3px color-mix(in srgb, var(--text) 7%, transparent); }
+.zoom > button { width: 40px; height: 40px; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--text); cursor: pointer; font-size: 18px; line-height: 1; transition-property: transform, background-color, color; transition-duration: 140ms; transition-timing-function: ease-out; }
 .zoom > button:hover:not(:disabled):not([aria-pressed="true"]) { border-color: var(--busy); background: var(--busy-soft); }
 .zoom > button:active:not(:disabled) { transform: scale(0.96); }
 .zoom > button:disabled, .zoom > button[aria-disabled="true"] { opacity: 0.4; cursor: default; }
 .zoom > button:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
 /* The board's zoom: out, the level in words, in. */
-.level { min-width: 9ch; padding: 0 4px; text-align: center; color: var(--text); font-weight: 600; white-space: nowrap; }
+.level { min-width: 9ch; padding: 0 8px; text-align: center; color: var(--muted); font-weight: 650; white-space: nowrap; }
 .zoom > button.wide { width: auto; min-width: 40px; padding: 0 12px; font-size: 13px; font-weight: 650; white-space: nowrap; }
 .zoom > button[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
 
@@ -444,9 +449,10 @@ body.focus #projects-section, body.focus .filters > .search, body.focus .filters
  * the full toolbar returns; this preserves the compact room the mode promises without splitting the surface. */
 body.focus:not(.scoped) .filters { display: none; }
 body.focus.scoped .filters { margin-bottom: 6px; }
-body.focus.scoped .levels { min-height: 0; padding: 0; border: 0; background: none; box-shadow: none; }
+body.focus.scoped .levels { width: fit-content; max-width: 100%; min-height: 40px; padding: 3px 10px 3px 4px; border: 1px solid color-mix(in srgb, var(--busy) 24%, var(--line)); border-radius: calc(var(--r-s) + 4px); background: var(--surface); box-shadow: 0 1px 3px color-mix(in srgb, var(--text) 7%, transparent); }
 body.focus.scoped .levels > :not(.scope) { display: none; }
-body.focus.scoped .scope { min-height: 24px; padding: 0; border: 0; }
+body.focus.scoped .levels::before { content: "⌖"; flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--busy-soft); color: var(--busy); font: 700 16px/1 var(--sans); }
+body.focus.scoped .scope { min-height: 32px; padding: 0 2px 0 6px; border: 0; }
 body.focus main { padding-top: 10px; gap: 8px; }
 body.focus .board-head { margin-bottom: 6px; }
 /* In the graph view the page ends just under the graph's box, which reaches the bottom of the window. */
@@ -612,6 +618,12 @@ button.link:hover { background: var(--idle-soft); }
 .history .change { overflow-wrap: anywhere; }
 .history time { grid-column: 1 / -1; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .panel .empty { background: var(--surface); }
+
+/* Below the width where all three board tools fit on one row, keep the primary controls compact and omit the
+ * redundant counts. Every column still carries its own count, and the complete summary returns with room. */
+@media (max-width: 1120px) {
+  body:not(.graph-view) .filters > .summary { display: none; }
+}
 
 @media (max-width: 640px) {
   /* Two rows: name and controls, then the view switch and who is connected. Long names shrink; controls never do. */
