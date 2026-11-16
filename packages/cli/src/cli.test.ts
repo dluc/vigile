@@ -23,6 +23,7 @@ import { optionsOf } from "./commands/operation.js";
 import { EXPECTED, judge } from "./expected.js";
 import { NotReachedError, inTheServicesPlace, onThisMachine, whoAnswers } from "./reach.js";
 import { isPrinted, printable, renderError, renderResult } from "./render.js";
+import { FORMAT_1_ANSWERS, FORMAT_1_SQL } from "./format-1-data.js";
 import { forgetRestore, noteRestore, openAsPlan, putBackOrder, putInPlace, recoverRestore, restoreInterrupted } from "./restore.js";
 import { LIMITS, startService, type Service } from "./service.js";
 import type { Ui } from "./ui.js";
@@ -952,7 +953,7 @@ describe("restoring a backup", () => {
         ["column", "ALTER TABLE objects DROP COLUMN text", /its table "objects" has no column "text"/],
         ["table", "DROP TABLE history", /it has no table "history"/],
         // Records that read as records and lack what the engine reads in them: every list of tasks would fail.
-        ["timeline", "UPDATE objects SET data = json_set(data, '$.timeline', json('null')) WHERE kind = 'task'", /the plan in it is damaged: The task \S+ is damaged: timeline is not what it has to be/],
+        ["undated", "UPDATE objects SET data = json_remove(data, '$.completed_at') WHERE kind = 'task'", /the plan in it is damaged: The task \S+ is damaged: completed_at is not what it has to be/],
         ["status", "UPDATE objects SET data = json_set(data, '$.status', 'sideways') WHERE kind = 'project'", /The project \S+ is damaged: status is not what it has to be/],
         ["title", "UPDATE objects SET data = json_remove(data, '$.title') WHERE kind = 'task'", /The task \S+ is damaged: title is not what it has to be/],
         ["kind", "UPDATE objects SET kind = 'gizmo' WHERE kind = 'project'", /is of a kind that is not known/],
@@ -965,9 +966,19 @@ describe("restoring a backup", () => {
         // A user stored under a number with a nought before it: shown the same, and every change would go past it.
         ["nought", "UPDATE objects SET id = '0' || id WHERE kind = 'user' AND json_extract(data, '$.username') = 'agent1'", /The user is stored under "0\d+", where the store writes "\d+"/],
         ["past", "UPDATE history SET id = '0' || id WHERE kind = 'user'", /the history of user "0\d+" is stored under an ID the store would not write/],
-        // A task that is done, with nothing in its timeline that says when: that moment could not be set either.
-        ["done", "UPDATE objects SET data = json_set(data, '$.status', 'done') WHERE kind = 'task'", /The task \S+ is damaged: has the status done, and its timeline ends with \w+/],
-        ["bare", "UPDATE objects SET data = json_set(data, '$.timeline', json('[]')) WHERE kind = 'task'", /The task \S+ is damaged: timeline is not what it has to be \(empty\)/],
+        // A task that is done, with nothing that says when: that moment could not be set either.
+        ["done", "UPDATE objects SET data = json_set(data, '$.status', 'done') WHERE kind = 'task'", /The task \S+ is damaged: has the status done, and nothing that says when it was completed/],
+        // The statuses an item has had are stored beside it, and are checked beside it: an item without any, one
+        // with a status its kind does not have, and one whose last is not the status the item has.
+        ["bare", "DELETE FROM timeline WHERE kind = 'task'", /the plan in it is damaged: The task \S+ is damaged: timeline is not what it has to be \(empty\)/],
+        ["sideways", "UPDATE timeline SET data = json_set(data, '$.status', 'sideways') WHERE kind = 'task'", /The task \S+ is damaged: timeline\.0\.status is not what it has to be/],
+        ["ending", "UPDATE timeline SET data = json_set(data, '$.status', 'broken') WHERE kind = 'project'", /The project \S+ is damaged: has the status open, and its timeline ends with broken/],
+        // An entry that is not a record, entries whose places leave a gap, the timeline of an item that is not
+        // there, and no table for them at all: reading or adding to a timeline would fail, or go wrong.
+        ["scrap", "UPDATE timeline SET data = '[1, 2]' WHERE kind = 'task'", /an entry in the timeline of task \S+, at place 0, is not a record/],
+        ["gap", "UPDATE timeline SET place = 4 WHERE kind = 'project'", /the timeline of project \S+ has entries missing/],
+        ["leftover", "INSERT INTO timeline VALUES ('task', 'KEP-999', 0, '{}')", /it holds the timeline of task "KEP-999", and no such item/],
+        ["timelines", "DROP TABLE timeline", /it has no table "timeline"/],
         // A project whose prefix could not be a prefix: the next task in it would get an ID nobody can ask for.
         ["prefix", "UPDATE objects SET data = json_set(data, '$.prefix', 'bad prefix') WHERE kind = 'project'", /The project \S+ is damaged: prefix is not what it has to be/],
         // An item that cannot be asked for by its ID, and one that no change could name the version of.
@@ -1055,6 +1066,106 @@ describe("restoring a backup", () => {
       const unheld = await run(["restore-backup", backup, "--config", config]);
       assert.equal(unheld.code, 1);
       assert.match(unheld.err, /The data folder .* cannot be taken for a restore/);
+    } finally {
+      child?.kill("SIGKILL");
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a backup that the version before took, with each item's timeline inside its record", () => {
+  it("is restored, brought to the present format on the way and left as it is itself; one whose timelines are damaged is refused", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "vigile-restore-format-1-"));
+    const config = join(directory, "config.toml");
+    const port = await freePort();
+    initConfig(config, { name: "restore-format-1", port });
+    const data = join(directory, "data");
+    // What `vigile backup` of that version wrote: one whole file of format 1. See format-1-data.ts.
+    const backup = join(directory, "default-20260201-090000-000.sqlite");
+    const written = new DatabaseSync(backup);
+    for (const statement of FORMAT_1_SQL) written.exec(statement);
+    written.close();
+    const asTaken = readFileSync(backup);
+    const head = (file: string) => {
+      const db = new DatabaseSync(file, { readOnly: true });
+      try {
+        return { ...(db.prepare("SELECT format, revision FROM head").get() as { format: number; revision: number }), tables: (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as Array<{ name: string }>).map((row) => row.name).join(" ") };
+      } finally {
+        db.close();
+      }
+    };
+    let child: ChildProcess | undefined;
+    try {
+      const restored = await run(["restore-backup", backup, "--json", "--config", config]);
+      assert.equal(restored.code, 0, restored.err);
+      const backupRevision = head(backup).revision;
+      const restoredRevision = backupRevision + 1;
+      assert.deepEqual([JSON.parse(restored.out).revision, JSON.parse(restored.out).set_aside], [restoredRevision, null]);
+      // Migration advances the copied head revision so an already-open format-1 writer must reload; the backup itself stays untouched.
+      assert.deepEqual(head(join(data, "default.sqlite")), { format: 2, revision: restoredRevision, tables: "head history links objects timeline" });
+      assert.equal(readFileSync(backup).equals(asTaken), true, "the backup itself is not touched");
+      assert.deepEqual(head(backup), { format: 1, revision: backupRevision, tables: "head history links objects" });
+      assert.deepEqual(readdirSync(data).filter((file) => file.includes("restor")), [], "nothing of the restore is left beside the data");
+
+      // The service starts on it, with nothing more to bring anywhere, and has every timeline as the backup had it.
+      const output: string[] = [];
+      child = spawn(process.execPath, [BIN, "serve", "--config", config], { stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH ?? "" } });
+      child.stdout!.on("data", (chunk) => output.push(String(chunk)));
+      child.stderr!.on("data", (chunk) => output.push(String(chunk)));
+      for (let attempt = 0; attempt < 100 && !(await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)); attempt++) await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.doesNotMatch(output.join(""), /brought from format/, "the service has nothing to say about the format of data that was restored");
+      for (const id of ["ABC-001", "ABC-002", "ABC"]) {
+        const read = JSON.parse((await run(["get", id, "--history", "--json", "--config", config])).out);
+        const before = FORMAT_1_ANSWERS.get[`${id === "ABC" ? "project" : "task"} ${id}`];
+        const withoutPlace = (items: Array<Record<string, unknown>>) => items.map(({ place: _place, ...item }) => item);
+        assert.deepEqual([withoutPlace(read.timeline), withoutPlace(read.history), read.completed_at, read.created_at], [before.timeline, before.history, before.completed_at, before.created_at], id);
+      }
+      const checked = await run(["doctor", "--config", config]);
+      assert.match(checked.out, /store "default" is intact\s+format 2, revision \d+/);
+      assert.match(checked.out, /graph is consistent/);
+      const stopped = new Promise((resolve) => child!.once("exit", resolve));
+      child.kill("SIGTERM");
+      await stopped;
+      child = undefined;
+
+      // The same backup with a timeline that is not what it has to be, as the file of that version had it: inside
+      // the record. Each is refused for what is wrong with it, and the data that works stays.
+      const working = readFileSync(join(data, "default.sqlite"));
+      for (const [name, damage, says] of [
+        ["none", "UPDATE objects SET data = json_set(data, '$.timeline', json('null')) WHERE id = 'ABC-001'", /the plan in it is damaged: The task ABC-001 is damaged: has the status done, and nothing that says when it was completed/],
+        ["empty", "UPDATE objects SET data = json_set(data, '$.timeline', json('[]')) WHERE id = 'ABC-003'", /The task ABC-003 is damaged: timeline is not what it has to be \(empty\)/],
+        ["project", "UPDATE objects SET data = json_remove(data, '$.timeline') WHERE kind = 'project' AND id = 'ABC'", /The project ABC is damaged: timeline is not what it has to be \(empty\)/],
+        // A task that is done, with nothing in its timeline that says when: that moment could not be set either.
+        ["done", "UPDATE objects SET data = json_set(data, '$.status', 'done') WHERE id = 'ABC-003'", /The task ABC-003 is damaged: has the status done, and nothing that says when it was completed/],
+        ["ending", "UPDATE objects SET data = json_set(data, '$.status', 'paused') WHERE id = 'ABC-003'", /The task ABC-003 is damaged: has the status paused, and its timeline ends with draft/],
+        ["sideways", "UPDATE objects SET data = json_set(data, '$.timeline[1].status', 'sideways') WHERE id = 'ABC-002'", /The task ABC-002 is damaged: timeline\.1\.status is not what it has to be/],
+        ["whenever", "UPDATE objects SET data = json_set(data, '$.timeline[0].at', 'at some point') WHERE kind = 'project' AND id = 'ABC'", /The project ABC is damaged: timeline\.0\.at is not what it has to be \(not a moment in time\)/],
+        ["scrap", "UPDATE objects SET data = json_set(data, '$.timeline[2]', 7) WHERE id = 'ABC-002'", /an entry in the timeline of task ABC-002, at place 2, is not a record/],
+        // A record that cannot be read at all, and a file that is not what a file of its format is.
+        ["unread", "UPDATE objects SET data = '{not a record' WHERE id = 'ABC-003'", /what is stored in it cannot be read/],
+        // A record that reads, and that the store cannot take apart to bring it to the present format: one nested deeper than it goes.
+        ["deep", `UPDATE objects SET data = '{"deep":' || replace(hex(zeroblob(1500)), '00', '[') || replace(hex(zeroblob(1500)), '00', ']') || ',' || substr(data, 2) WHERE id = 'ABC-003'`, /it is of an earlier data format, and the copy of it could not be brought to the present one \(.+\)\. Nothing was changed/],
+        ["both", "CREATE TABLE timeline (kind TEXT, id TEXT, place INTEGER, data TEXT)", /it has a table "timeline" that the store does not make/],
+        ["claims", "UPDATE head SET format = 2", /it has no table "timeline"/],
+        ["later", "UPDATE head SET format = 3", /data format 3 is newer than this version understands \(2\)/],
+      ] as const) {
+        const damaged = join(directory, `default-20260101-00${String(name.length).padStart(4, "0")}.sqlite`);
+        copyFileSync(backup, damaged);
+        const db = new DatabaseSync(damaged);
+        db.exec(damage);
+        db.close();
+        const refused = await run(["restore-backup", damaged, "--config", config]);
+        assert.equal(refused.code, 1, name);
+        assert.match(refused.err, /cannot be restored/, name);
+        assert.match(refused.err, says, name);
+        assert.equal(readFileSync(join(data, "default.sqlite")).equals(working), true, `${name}: the data that works is still in place`);
+        assert.deepEqual(readdirSync(data).filter((file) => file.includes("restor")), [], `${name}: and nothing of the attempt is left`);
+      }
+      // Over data that is there, the backup of the version before is restored as any other: what was there is set aside.
+      const over = await run(["restore-backup", backup, "--json", "--config", config]);
+      assert.equal(over.code, 0, over.err);
+      assert.deepEqual(JSON.parse(over.out).set_aside.files, ["default.sqlite"]);
+       assert.deepEqual(head(join(data, "default.sqlite")), { format: 2, revision: restoredRevision, tables: "head history links objects timeline" });
     } finally {
       child?.kill("SIGKILL");
       rmSync(directory, { recursive: true, force: true });
@@ -1405,7 +1516,7 @@ describe("something else on the service's port", () => {
         assert.equal(doctor.err, "", "the doctor does not crash");
         const checks = (JSON.parse(doctor.out) as { checks: Array<{ section: string; level: string; title: string; detail: string }> }).checks.filter((c) => c.section === "Service");
         assert.deepEqual(checks.map((c) => [c.title, c.level]), [["service is running", "fail"]]);
-        assert.match(checks[0]!.detail, /answered GET \/api\/admin\/status, but not as a Vigile service does/);
+        assert.match(checks[0]!.detail, /answered GET \/api\/admin\/status\?check_timelines=true, but not as a Vigile service does/);
       } finally {
         await shallow.close();
       }
@@ -1832,7 +1943,7 @@ describe("a service that answers in another shape than a Vigile service does", (
   /** Headers that a request is passed on with, in place of its own: the name it calls the service by, or where it says it is from. */
   let dress: Record<string, string> = {};
   const cli = (...args: string[]) => run([...args, "--config", config]);
-  const STATUS = "GET /api/admin/status";
+  const STATUS = "GET /api/admin/status?check_timelines=true";
   const USERS = "POST /api/list-users";
   const LAST = "auth is off for non-admin users";
   /** The doctor's checks of the service, as it reports them. */
@@ -1918,12 +2029,19 @@ describe("a service that answers in another shape than a Vigile service does", (
     assert.match(whole.checks.find((check) => check.title === "running settings match the config")!.detail!, /^listen\.port: running with \d+, config says \d+$/);
     assert.equal(titles(whole.checks).at(-1), LAST);
     assert.match(whole.checks.find((check) => check.title === "graph is consistent")!.detail!, /^1 project, 2 tasks, 3 users, \d+ links?$/);
+    assert.equal(whole.checks.find((check) => check.title === "status timelines are consistent")!.level, "ok");
+
+    answering(STATUS, { change: (status) => ({ ...status, timeline_inconsistencies: ["The task SHP-001 is damaged: timeline is empty"] }) });
+    const damagedTimeline = await examine();
+    assert.deepEqual([damagedTimeline.code, of(damagedTimeline.checks, "status timelines are consistent")?.level, of(damagedTimeline.checks, "status timelines are consistent")?.detail], [1, "fail", "The task SHP-001 is damaged: timeline is empty"]);
 
     // The status with one part of it of another kind: the doctor names the part, vouches for nothing, and asks
     // nothing further of what answered.
     const wrongStatus: Array<[what: string, change: (status: any) => unknown, says: RegExp]> = [
       ["inconsistencies as a text", (status) => ({ ...status, inconsistencies: "broken" }), /"inconsistencies" is not a list of texts/],
       ["inconsistencies of objects", (status) => ({ ...status, inconsistencies: [{ toString: 1 }] }), /"inconsistencies" is not a list of texts/],
+      ["timeline inconsistencies as a text", (status) => ({ ...status, timeline_inconsistencies: "broken" }), /"timeline_inconsistencies" is not a list of texts/],
+      ["timeline inconsistencies of objects", (status) => ({ ...status, timeline_inconsistencies: [{ toString: 1 }] }), /"timeline_inconsistencies" is not a list of texts/],
       ["auth with nothing in it", (status) => ({ ...status, auth: {} }), /"auth\.keyless_user" is not a text/],
       ["auth without its users", (status) => ({ ...status, auth: { keyless_user: "agent1" } }), /"auth\.users_with_keys" is not a list of texts/],
       ["auth with users that are numbers", (status) => ({ ...status, auth: { ...status.auth, users_with_keys: [1, 2] } }), /"auth\.users_with_keys" is not a list of texts/],
@@ -1978,7 +2096,7 @@ describe("a service that answers in another shape than a Vigile service does", (
       const { code, checks } = await examine();
       assert.equal(code, 1, what);
       assert.deepEqual(checks.map((check) => [check.title, check.level]), [["service is running", "fail"]], what);
-      assert.match(checks[0]!.detail!, /answered GET \/api\/admin\/status, but not as a Vigile service does: /, what);
+      assert.match(checks[0]!.detail!, /answered GET \/api\/admin\/status\?check_timelines=true, but not as a Vigile service does: /, what);
       assert.match(checks[0]!.detail!, says, what);
       assert.match(checks[0]!.fix!, /stop the service and start it again/, what);
     }
@@ -2085,7 +2203,7 @@ describe("a service that answers in another shape than a Vigile service does", (
     const inWords = await cli("doctor");
     assert.equal(inWords.code, 1);
     assert.equal(inWords.err, "");
-    assert.match(inWords.out, /service is running\s+shape-test 0\.1\.0 answers at http:\S+, and did not give its status: it answered GET \/api\/admin\/status, but not as a Vigile service does: "inconsistencies" is not a list of texts/);
+    assert.match(inWords.out, /service is running\s+shape-test 0\.1\.0 answers at http:\S+, and did not give its status: it answered GET \/api\/admin\/status\?check_timelines=true, but not as a Vigile service does: "inconsistencies" is not a list of texts/);
     assert.match(inWords.out, /\d+ passed .* 1 failed/);
     swap = () => undefined;
   });
@@ -2283,7 +2401,7 @@ describe("a service that answers in another shape than a Vigile service does", (
       reported(listed, says, `${what}: list-tasks`);
       assert.doesNotMatch(listed.err, HINT, what);
       // The list of users rests on the status too: that it could not be asked is not that no key is refused.
-      answering(STATUS, instead);
+      answering("GET /api/admin/status", instead);
       reported(await cli("user", "list"), says, `${what}: user list`);
     }
     // The users the doctor asks for, refused: the reason, and of what the answer says to do, the texts.
@@ -2322,7 +2440,8 @@ describe("a service that answers in another shape than a Vigile service does", (
       response.end(request.url === "/health" ? JSON.stringify({ status: "ok", name: "shape-test", version: "0.1.0" }) : JSON.stringify({ users: [], tasks: [], projects: [] }));
     });
     const sendsOn = (asked: string, status = 307): Swap => ({ status, body: "", headers: { location: `http://127.0.0.1:${elsewhere}${asked.slice(asked.indexOf(" ") + 1)}` } });
-    const redirect = (status: number, path: string) => new RegExp(`a redirect \\(${status}\\) to http://127\\.0\\.0\\.1:${elsewhere}${path.replace(/[/]/g, "\\/")}, which the command line does not follow`);
+    const quotedPath = (path: string) => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\//g, "\\/");
+    const redirect = (status: number, path: string) => new RegExp(`a redirect \\(${status}\\) to http://127\\.0\\.0\\.1:${elsewhere}${quotedPath(path)}, which the command line does not follow`);
     try {
       // Every request but the question of who is there.
       swap = (asked) => (asked === "GET /health" ? undefined : sendsOn(asked));
@@ -2343,7 +2462,7 @@ describe("a service that answers in another shape than a Vigile service does", (
       assert.equal(loadConfig(config, {}).config.auth.keys.admin, key, "a redirect is not a key that is refused");
       const sent = (await examine()).checks;
       assert.deepEqual(sent.map((check) => [check.title, check.level]), [["service is running", "fail"]]);
-      assert.match(sent[0]!.detail!, redirect(307, "/api/admin/status"));
+      assert.match(sent[0]!.detail!, redirect(307, "/api/admin/status?check_timelines=true"));
 
       // Each request the doctor makes after that, in turn; the others are passed on.
       const later: Array<[asked: string, status: number, title: string | null]> = [
@@ -3590,6 +3709,7 @@ describe("what the service can answer", () => {
     // The same plan with every field at an edge of what the engine takes for a sound record (shape.ts): what was
     // written by an earlier version, carried over from another tool, or repaired by hand.
     const stored = (kind: string) => snapshot.objects.filter((record) => record.kind === kind);
+    const timelines = new Map<string, Array<{ status: string; at: string; by: string }>>();
     const moments = ["2026-01-12", "2026-01-12T09:14+01:00", "2026-01-12T09:14Z", "12 Jan 2026 09:14:03 GMT", "2026-01-12 09:14", "2026-01-12T09:14:03.120Z"];
     const titles = ["", "   ", "\u200b", "A title"];
     const priorities = [0, -7, 1.5, 1e21, -0.001, 3];
@@ -3597,6 +3717,8 @@ describe("what the service can answer", () => {
     stored("task").forEach((record, n) => {
       const status = TASK_STATUSES[n % TASK_STATUSES.length]!;
       const at = moments[n % moments.length]!;
+      const timeline = n % 2 ? [{ status, at, by: who }] : [...TASK_STATUSES.map((earlier, index) => ({ status: earlier, at: moments[index % moments.length]!, by: index % 2 ? who : "9999" })), { status, at, by: who }];
+      timelines.set(`task:${record.id}`, timeline);
       Object.assign(record.data, {
         title: titles[n % titles.length],
         type: TASK_TYPES[n % TASK_TYPES.length],
@@ -3605,8 +3727,7 @@ describe("what the service can answer", () => {
         size: n % 3 === 1 ? null : 0.25,
         why: n % 2 ? null : "",
         status,
-        // A timeline of one entry, and one of many: the last is the status the item has.
-        timeline: n % 2 ? [{ status, at, by: who }] : [...TASK_STATUSES.map((earlier, index) => ({ status: earlier, at: moments[index % moments.length]!, by: index % 2 ? who : "9999" })), { status, at, by: who }],
+        completed_at: status === "done" ? timeline.at(-1)!.at : null,
         created_at: at,
         updated_at: moments[(n + 1) % moments.length],
         // Made by a user that is no longer found: what is stored of it is shown.
@@ -3616,7 +3737,9 @@ describe("what the service can answer", () => {
     });
     stored("project").forEach((record, n) => {
       const status = PROJECT_STATUSES[(n + 3) % PROJECT_STATUSES.length]!;
-      Object.assign(record.data, { title: titles[n % titles.length], status, timeline: [{ status, at: moments[n]!, by: who }], created_at: moments[n], updated_at: moments[n + 2] });
+      const timeline = [{ status, at: moments[n]!, by: who }];
+      timelines.set(`project:${record.id}`, timeline);
+      Object.assign(record.data, { title: titles[n % titles.length], status, created_at: moments[n], updated_at: moments[n + 2] });
     });
     stored("user").forEach((record, n) => {
       Object.assign(record.data, { created_at: moments[n % moments.length], updated_at: moments[(n + 3) % moments.length], ...(record.data.deleted_at ? { deleted_at: "2026-02-01T10:00+02:00" } : {}) });
@@ -3633,6 +3756,12 @@ describe("what the service can answer", () => {
       readText: async (tenant, kind, id) => (kind === "task" && Number(id) % 2 ? "" : storage.readText(tenant, kind, id)),
       readHistory: (tenant, kind, id) => storage.readHistory(tenant, kind, id),
       readHistoryPage: (tenant, kind, id, page) => storage.readHistoryPage(tenant, kind, id, page),
+      readTimeline: async (_tenant, kind, id, page = {}) => {
+        const entries = timelines.get(`${kind}:${id}`) ?? [];
+        const before = Math.min(page.before ?? entries.length, entries.length);
+        const start = page.limit === undefined ? 0 : Math.max(0, before - page.limit);
+        return { records: entries.slice(start, before).map((data, index) => ({ kind, id, place: start + index, data })), total: entries.length };
+      },
       close: async () => {},
     };
     const engine = await Engine.open({ storage: edges });

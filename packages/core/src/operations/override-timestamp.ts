@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { echo, invalidInput, refused } from "../errors.js";
-import type { StatusEntry } from "../model.js";
 import { defineWrite } from "../operation.js";
 import { describe, requireLive, requireVersion, resolveRef } from "../rules.js";
+import { timelineProblem } from "../shape.js";
 import { summary } from "../views.js";
 import { touch, version } from "./shared.js";
 
@@ -59,9 +59,16 @@ export const overrideTimestamp = defineWrite({
       });
     }
 
-    let timeline: StatusEntry[];
+    // The statuses the item went through are stored beside it, an entry for each. This is the one operation that
+    // gives entries another moment, and it reads them all to do so: which of them move depends on each. A
+    // timeline that does not end with the status the item has was damaged outside the service, and has no
+    // entry that could be moved: the cause goes to the service's log.
+    const stored = await ctx.readTimeline(node);
+    const damage = timelineProblem(node, stored.length, stored.at(-1));
+    if (damage) throw new Error(`${describe(node)} is damaged: ${damage}`);
     let old: string;
     let moved = 0;
+    let completionMoved = false;
     if (input.name === "created_at") {
       old = node.created_at;
       // What is carried over from another tool happened before the item was recorded here.
@@ -74,7 +81,7 @@ export const overrideTimestamp = defineWrite({
         });
       }
       // Whatever happened to the item happened after it was created.
-      const next = node.timeline.slice(1).reduce<string | null>((first, entry) => (first === null || before(entry.at, first) ? entry.at : first), null);
+      const next = stored.slice(1).reduce<string | null>((first, entry) => (first === null || before(entry.at, first) ? entry.at : first), null);
       if (next !== null && before(next, at)) {
         const completed = node.kind === "task" && node.status === "done";
         throw refused("created_after_change", `${describe(node)} cannot have been created on ${at}: its status changed on ${next}, before that.`, {
@@ -82,7 +89,9 @@ export const overrideTimestamp = defineWrite({
         });
       }
       // The first entry of the timeline is the status the item was created with: it moves with the creation.
-      timeline = node.timeline.map((entry, index) => (index === 0 ? { ...entry, at } : entry));
+      // When the task was created already done, its only entry is also its completion. Keep the two stored dates
+      // in step; otherwise future timestamp overrides would see a completed_at that disagrees with the timeline.
+      completionMoved = node.kind === "task" && node.status === "done" && stored.findLastIndex((entry) => entry.status === "done") === 0;
     } else {
       if (node.kind !== "task" || node.status !== "done") {
         throw refused("not_completed", `${describe(node)} has no completion date: ${node.kind === "task" ? `its status is ${node.status}` : "only tasks are completed"}.`, {
@@ -90,8 +99,8 @@ export const overrideTimestamp = defineWrite({
         });
       }
       // A task can be completed more than once; the last time is its completion date.
-      const last = node.timeline.findLastIndex((entry) => entry.status === "done");
-      old = node.timeline[last]!.at;
+      const last = stored.findLastIndex((entry) => entry.status === "done");
+      old = stored[last]!.at;
       if (before(at, node.created_at)) {
         throw refused("completed_before_created", `${describe(node)} cannot have been completed on ${at}: it was created on ${node.created_at}, after that.`, {
           actions: [`Give a completion date at or after ${node.created_at}.`, 'Or set when it was really created first: override_timestamp with name "created_at".'],
@@ -99,24 +108,36 @@ export const overrideTimestamp = defineWrite({
       }
       // A task that was completed before, reopened and completed again keeps its earlier completion as it was:
       // the new date cannot come before it.
-      const earlier = node.timeline.slice(0, last).findLastIndex((entry) => entry.status === "done");
-      if (earlier >= 0 && before(at, node.timeline[earlier]!.at)) {
-        throw refused("completed_before_earlier_completion", `${describe(node)} cannot have been completed on ${at}: it was completed once before, on ${node.timeline[earlier]!.at}, and reopened.`, {
-          actions: [`Give a completion date at or after ${node.timeline[earlier]!.at}.`],
+      const earlier = stored.slice(0, last).findLastIndex((entry) => entry.status === "done");
+      if (earlier >= 0 && before(at, stored[earlier]!.at)) {
+        throw refused("completed_before_earlier_completion", `${describe(node)} cannot have been completed on ${at}: it was completed once before, on ${stored[earlier]!.at}, and reopened.`, {
+          actions: [`Give a completion date at or after ${stored[earlier]!.at}.`],
         });
       }
       // What happened on the way to this completion cannot come after it: an import stamps those steps with the
       // moment of the import, and they move back with it. Nothing up to an earlier completion is touched.
-      timeline = node.timeline.map((entry, index) => {
-        if (index === last) return { ...entry, at };
-        if (index === 0 || index <= earlier || index > last || !before(at, entry.at)) return entry;
-        moved++;
-        return { ...entry, at };
-      });
+      const firstMovable = Math.max(1, earlier + 1);
+      for (let place = firstMovable; place < last; place++) if (before(at, stored[place]!.at)) moved++;
     }
 
     if (old !== at) {
-      ctx.plan.put(touch(node, ctx, input.name === "created_at" ? { created_at: at, timeline } : { timeline }));
+      const fields = input.name === "created_at"
+        ? { created_at: at, ...(completionMoved ? { completed_at: at } : {}) }
+        : { completed_at: at };
+      ctx.plan.put(touch(node, ctx, fields));
+      if (input.name === "created_at") {
+        ctx.plan.moment(node, 0, 0, at);
+      } else {
+        const last = stored.findLastIndex((entry) => entry.status === "done");
+        const earlier = stored.slice(0, last).findLastIndex((entry) => entry.status === "done");
+        const from = Math.max(1, earlier + 1);
+        const to = last - 1;
+        // Historical timestamps can be non-monotonic. One conditional patch moves all qualifying entries in
+        // the range without turning each alternating match into another record in the bounded commit.
+        if (from <= to) ctx.plan.moment(node, from, to, at, at);
+        // The latest completion always moves, even when its old moment is before the imported one.
+        ctx.plan.moment(node, last, last, at);
+      }
       ctx.plan.history(node, "timestamp_overridden", { changes: { [input.name]: [old, at] }, ...(moved ? { earlier_changes_moved: moved } : {}) });
     }
     return () => summary(ctx.graph, ctx.graph.node(node)!);

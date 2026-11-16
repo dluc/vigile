@@ -22,6 +22,8 @@ import {
   type ObjectRecord,
   type Snapshot,
   type StorageAdapter,
+  type TimelinePage,
+  type TimelinePageRequest,
 } from "@vigile/storage";
 
 /** Node 22 still marks its SQLite module experimental and warns on first load; that warning is not actionable for users. */
@@ -157,7 +159,8 @@ function openReadOnlyDatabase(file: string): ReadOnlyConnection {
 }
 /** SQLite's code for "another connection has the lock". */
 
-const SCHEMA = `
+/** The tables of format 1, as the store made them then: a file of that format has these and nothing else. */
+const SCHEMA_1 = `
 CREATE TABLE IF NOT EXISTS head (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   format INTEGER NOT NULL,
@@ -194,9 +197,112 @@ CREATE TABLE IF NOT EXISTS history (
 ) STRICT, WITHOUT ROWID;
 `;
 
+/**
+ * The statuses each item has had, one row for each, in the order of their places. A change of status adds a
+ * row and rewrites none: what it costs does not grow with the number of changes before it.
+ */
+const TIMELINE = `
+CREATE TABLE IF NOT EXISTS timeline (
+  kind TEXT NOT NULL,
+  id TEXT NOT NULL,
+  place INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (kind, id, place)
+) STRICT, WITHOUT ROWID;
+`;
+
+const SCHEMA = SCHEMA_1 + TIMELINE;
+
+/** The tables a file of a given format has. Everything before the present format is format 1. */
+const schemaOf = (format: number): string => (format >= FORMAT_VERSION ? SCHEMA : SCHEMA_1);
+
+/** The format a file says it is in, or null when it does not say: a file that is new, or that holds no tenant yet. */
+function formatIn(db: Database): number | null {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'head'").get()) return null;
+  const row = db.prepare("SELECT format FROM head WHERE id = 1").get() as { format: number } | undefined;
+  return row ? row.format : null;
+}
+
+/**
+ * Brings what a file of format 1 holds to format 2. In format 1 the statuses an item has had are a list in its
+ * record, `timeline`, each entry with its `status` and the moment `at` which it was taken; when a task was
+ * completed is read from the last entry that says "done". In format 2 each entry is a row of its own, under the
+ * place it had in the list, and the record of a task says when it was completed in `completed_at`: the moment
+ * its list said, or null for a task that is not done.
+ *
+ * To be called inside a transaction, by whoever opened the file to write to it: the tables, the rows, the
+ * records and the number of the format change in one step or not at all, so a file is never found half-way
+ * between the two, whatever ends the process that does this.
+ */
+function upgrade(db: Database): void {
+  db.exec(TIMELINE);
+  // An entry that is no record, in a list that was damaged, is carried over as what it is: whoever checks the
+  // file says so, as before.
+  const rows = db.prepare(`
+    INSERT INTO timeline (kind, id, place, data)
+      SELECT o.kind, o.id, e.key, CASE WHEN e.type IN ('object', 'array') THEN e.value ELSE json_quote(e.value) END
+      FROM objects o, json_each(o.data, '$.timeline') e
+      WHERE o.kind = ? AND o.id = ? AND json_type(o.data, '$.timeline') = 'array'`);
+  const record = db.prepare(`
+    UPDATE objects SET data = json_remove(CASE WHEN kind = 'task' THEN json_set(data, '$.completed_at', CASE WHEN json_extract(data, '$.status') = 'done' THEN (
+        SELECT json_extract(e.value, '$.at') FROM json_each(objects.data, '$.timeline') e
+        WHERE e.type = 'object' AND json_extract(e.value, '$.status') = 'done' ORDER BY e.key DESC LIMIT 1
+      ) END) ELSE data END, '$.timeline')
+      WHERE kind = ? AND id = ?`);
+  // Item by item, the rows first and then the record without its list: the room a long list leaves in the file
+  // is there for the rows of the next item, and the file does not grow by all the lists at once.
+  const listed = db.prepare("SELECT kind, id FROM objects WHERE json_type(data, '$.timeline') IS NOT NULL").all() as unknown as Array<{ kind: string; id: string }>;
+  for (const { kind, id } of listed) {
+    rows.run(kind, id);
+    record.run(kind, id);
+  }
+  // A task whose record had no list at all says, like every task that is not done, that it was not completed.
+  db.exec(`
+    UPDATE objects SET data = json_set(data, '$.completed_at', NULL) WHERE kind = 'task' AND json_type(data) = 'object' AND json_type(data, '$.completed_at') IS NULL;
+    -- Invalidate engines that read the earlier format before this transaction migrated the file. Their next
+    -- commit must conflict and reload instead of writing an old inline timeline into a format-2 object.
+    UPDATE head SET format = ${FORMAT_VERSION}, revision = revision + 1 WHERE id = 1;
+  `);
+}
+
+/**
+ * Makes a file ready for the store: its tables when it is new, and what it holds brought to the present format
+ * when an earlier version wrote it. One step, with the file taken for writing from its first look at it.
+ * Returns the format the file was brought from, when it was.
+ */
+function prepare(db: Database, file: string, create = true): number | null {
+  db.exec("BEGIN IMMEDIATE");
+  let from: number | null = null;
+  try {
+    const format = formatIn(db);
+    if (format !== null && format < FORMAT_VERSION) {
+      try {
+        upgrade(db);
+      } catch (error) {
+        throw new Error(
+          `The data file ${file} is in format ${format}, from an earlier version of the service, and could not be brought to format ${FORMAT_VERSION} (${(error as Error).message}). Nothing in it was changed. Restore a backup, or start it with the version that wrote it.`,
+          { cause: error },
+        );
+      }
+      from = format;
+    } else if (create) db.exec(SCHEMA);
+    db.exec("COMMIT");
+    return from;
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Nothing was open any more.
+    }
+    throw error;
+  }
+}
+
 export interface SqliteStorageOptions {
   /** The folder that holds one `<tenant>.sqlite` file per tenant. */
   directory: string;
+  /** Called when a tenant's file, written by an earlier version, has been brought to the present format. */
+  onUpgrade?: (tenant: string, from: number, to: number) => void;
 }
 
 export interface IntegrityReport {
@@ -207,11 +313,13 @@ export interface IntegrityReport {
 /** One SQLite file per tenant, so a query can never cross tenants. */
 export class SqliteStorage implements StorageAdapter {
   private readonly directory: string;
+  private readonly onUpgrade?: (tenant: string, from: number, to: number) => void;
   private readonly open = new Map<string, Database>();
   private closed = false;
 
   constructor(options: SqliteStorageOptions) {
     this.directory = options.directory;
+    this.onUpgrade = options.onUpgrade;
     mkdirSync(this.directory, { recursive: true });
   }
 
@@ -241,7 +349,18 @@ export class SqliteStorage implements StorageAdapter {
         db = opened;
         // WAL with synchronous=FULL: a confirmed write survives a power cut.
         db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;");
-        db.exec(SCHEMA);
+        const from = prepare(db, file);
+        if (from !== null) {
+          // What was written to bring the file over is as much as the file holds, and it went through the log of
+          // changes beside it: the log is folded into the file and emptied now, not at the next stop. Where that
+          // cannot be done now, because a backup is reading the file, it is done later as for any other change.
+          try {
+            db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+          } catch {
+            // The change is stored; only the room it took beside the file is given back later.
+          }
+          this.onUpgrade?.(tenant, from, FORMAT_VERSION);
+        }
         // A file that can be read and not written would let the service start and then fail every change.
         // Better to hear it now, by its name.
         db.exec("BEGIN IMMEDIATE; UPDATE head SET revision = revision WHERE 0; ROLLBACK");
@@ -315,6 +434,7 @@ export class SqliteStorage implements StorageAdapter {
           case "delete_object":
             db.prepare("DELETE FROM objects WHERE kind = ? AND id = ?").run(change.kind, change.id);
             db.prepare("DELETE FROM history WHERE kind = ? AND id = ?").run(change.kind, change.id);
+            db.prepare("DELETE FROM timeline WHERE kind = ? AND id = ?").run(change.kind, change.id);
             break;
           case "put_link": {
             const r = change.record;
@@ -347,6 +467,25 @@ export class SqliteStorage implements StorageAdapter {
               h.action,
               JSON.stringify(h.data),
             );
+            break;
+          }
+          case "add_timeline": {
+            const t = change.record;
+            // The place after the last, found at the end of the item's rows without going through them.
+            db.prepare(
+              "INSERT INTO timeline (kind, id, place, data) VALUES (?, ?, (SELECT coalesce(max(place), -1) + 1 FROM timeline WHERE kind = ? AND id = ?), ?)",
+            ).run(t.kind, t.id, t.kind, t.id, JSON.stringify(t.data));
+            break;
+          }
+          case "patch_timeline": {
+            const reached = db.prepare("SELECT place, data FROM timeline WHERE kind = ? AND id = ? AND place >= ? AND place <= ?").all(change.kind, change.id, change.from, change.to) as unknown as Array<{ place: number; data: string }>;
+            if (!reached.length) throw new Error(`The timeline of ${change.kind} ${change.id} has no entry from place ${change.from} to ${change.to}`);
+            const write = db.prepare("UPDATE timeline SET data = ? WHERE kind = ? AND id = ? AND place = ?");
+            for (const row of reached) {
+              const data = JSON.parse(row.data) as JsonObject;
+              if (change.when && !(Date.parse(String(data.at)) > Date.parse(change.when.at_after))) continue;
+              write.run(JSON.stringify({ ...data, ...change.data }), change.kind, change.id, row.place);
+            }
             break;
           }
         }
@@ -428,6 +567,11 @@ export class SqliteStorage implements StorageAdapter {
       return (found as { entries: number }).entries;
     };
     return { records: rows.reverse().map((r) => ({ ...r, data: JSON.parse(r.data) as JsonObject })), total: whole ? rows.length : counted() };
+  }
+
+  async readTimeline(tenant: string, kind: string, id: string, page: TimelinePageRequest = {}): Promise<TimelinePage> {
+    const db = this.existingDb(tenant);
+    return db ? timelineIn(db, kind, id, page) : { records: [], total: 0 };
   }
 
   /** SQLite's own consistency check of a tenant file. */
@@ -879,26 +1023,42 @@ export function tenantFiles(directory: string): Array<{ tenant: string; file: st
 export function inspectTenantFile(tenant: string, file: string): TenantFileReport {
   const report: TenantFileReport = { tenant, file, ok: false, messages: [], format: null, revision: null };
   let connection: ReadOnlyConnection | undefined;
+  let transaction = false;
   try {
     connection = openReadOnlyDatabase(file);
     const { db } = connection;
+    // Keep the head and schema checks on the same side of an atomic format upgrade. The first read establishes
+    // SQLite's snapshot, so a migration cannot make the cached format and the observed tables disagree.
+    db.exec("BEGIN");
+    transaction = true;
+    const head = db.prepare("SELECT format, revision FROM head WHERE id = 1").get() as { format: number; revision: number } | undefined;
     const rows = db.prepare("PRAGMA integrity_check").all() as unknown as Array<{ integrity_check: string }>;
     report.messages = rows.map((r) => r.integrity_check);
-    const head = db.prepare("SELECT format, revision FROM head WHERE id = 1").get() as { format: number; revision: number } | undefined;
     if (head) {
       report.format = head.format;
       report.revision = head.revision;
     } else report.messages.push("the tenant has no head record");
     // A sound database is not yet a plan: what is in it must read as one, or the service would not start on it.
-    const wrong = head && head.format <= FORMAT_VERSION ? unreadable(db) : null;
+    // By the format it says it is in: a file of an earlier format is one that the store brings to the present
+    // one when it opens it, and until then it has that format's tables and nothing else.
+    const wrong = head && head.format <= FORMAT_VERSION ? unreadable(db, head.format) : null;
     if (wrong) report.messages.push(wrong);
     report.ok = report.messages.length === 1 && report.messages[0] === "ok" && report.format !== null && report.format <= FORMAT_VERSION;
     if (report.format !== null && report.format > FORMAT_VERSION) {
       report.messages.push(`data format ${report.format} is newer than this version understands (${FORMAT_VERSION})`);
     }
+    db.exec("COMMIT");
+    transaction = false;
   } catch (error) {
     report.messages.push((error as Error).message);
   } finally {
+    if (transaction) {
+      try {
+        connection?.db.exec("ROLLBACK");
+      } catch {
+        // The connection may already have ended its transaction.
+      }
+    }
     connection?.close();
   }
   return report;
@@ -909,7 +1069,7 @@ function headIn(db: Database): Head | null {
   return row ? { format: row.format, revision: row.revision, counters: JSON.parse(row.counters) } : null;
 }
 
-/** Everything a tenant holds except long text and history, as the service reads it when it starts. */
+/** Everything a tenant holds except long text, history and timelines, as the service reads it when it starts. */
 function snapshotIn(db: Database): Snapshot | null {
   const head = headIn(db);
   if (!head) return null;
@@ -934,8 +1094,31 @@ function snapshotIn(db: Database): Snapshot | null {
   return { head, objects, links };
 }
 
-/** The tables of a tenant file. */
-const TABLES = ["head", "objects", "links", "history"];
+/** Reads a tenant file without changing it: used where a caller only needs its object and link snapshot. */
+export function readTenantFile(file: string): Snapshot | null {
+  const connection = openReadOnlyDatabase(file);
+  try {
+    return snapshotIn(connection.db);
+  } finally {
+    connection.close();
+  }
+}
+
+/** A page of an item's timeline, and how many entries it has: the place after its last, which is found without going through the rest. */
+function timelineIn(db: Database, kind: string, id: string, page: TimelinePageRequest): TimelinePage {
+  const last = db.prepare("SELECT max(place) AS place FROM timeline WHERE kind = ? AND id = ?").get(kind, id) as { place: number | null };
+  const total = last.place === null ? 0 : last.place + 1;
+  const columns = "SELECT place, data FROM timeline WHERE kind = ? AND id = ?";
+  const rows = (
+    page.limit === undefined
+      ? db.prepare(`${columns} AND place < ? ORDER BY place`).all(kind, id, page.before ?? total)
+      : db.prepare(`${columns} AND place < ? ORDER BY place DESC LIMIT ?`).all(kind, id, page.before ?? total, Math.max(0, page.limit)).reverse()
+  ) as unknown as Array<{ place: number; data: string }>;
+  return { records: rows.map((row) => ({ kind, id, place: row.place, data: JSON.parse(row.data) as JsonObject })), total };
+}
+
+/** The tables of a tenant file of a given format. */
+const tablesOf = (format: number): string[] => (format >= FORMAT_VERSION ? ["head", "objects", "links", "history", "timeline"] : ["head", "objects", "links", "history"]);
 
 interface Column {
   name: string;
@@ -948,15 +1131,21 @@ interface Column {
 const columnsOf = (db: Database, table: string): Column[] =>
   (db.prepare(`PRAGMA table_xinfo(${table})`).all() as unknown as Column[]).map(({ name, type, notnull, pk }) => ({ name, type: String(type).toUpperCase(), notnull, pk }));
 
-/** The tables as the store makes them, read from a database made from `SCHEMA`, so that the two cannot drift apart. */
-let made: Map<string, Column[]> | undefined;
-function asMade(): Map<string, Column[]> {
-  if (made) return made;
+/**
+ * The tables as the store makes them, or made them for an earlier format, read from a database made from the
+ * schema itself, so that the two cannot drift apart.
+ */
+const made = new Map<string, Map<string, Column[]>>();
+function asMade(format: number): Map<string, Column[]> {
+  const schema = schemaOf(format);
+  const known = made.get(schema);
+  if (known) return known;
   const db = openDatabase(":memory:");
   try {
-    db.exec(SCHEMA);
-    made = new Map(TABLES.map((table) => [table, columnsOf(db, table)]));
-    return made;
+    db.exec(schema);
+    const tables = new Map(tablesOf(format).map((table) => [table, columnsOf(db, table)]));
+    made.set(schema, tables);
+    return tables;
   } finally {
     db.close();
   }
@@ -967,8 +1156,8 @@ function asMade(): Map<string, Column[]> {
  * writes every column by name, and writes by each table's key: a table without a column fails every read of
  * it, and one without its key fails every write.
  */
-function lacking(db: Database): string | null {
-  for (const [table, wanted] of asMade()) {
+function lacking(db: Database, format: number): string | null {
+  for (const [table, wanted] of asMade(format)) {
     const has = columnsOf(db, table);
     if (!has.length) return `it has no table "${table}"`;
     const missing = wanted.filter((column) => !has.some((other) => other.name === column.name)).map((column) => column.name);
@@ -987,7 +1176,7 @@ function lacking(db: Database): string | null {
   // view the store does not make can each turn a write away. A backup is a copy of a file the store made, and
   // has exactly what the store makes.
   const defined = definedIn(db);
-  const wanted = asDefined();
+  const wanted = asDefined(format);
   const unknown = defined.find((entry) => !wanted.some((other) => other.type === entry.type && other.name === entry.name));
   if (unknown) return `it has ${/^[aeiou]/.test(unknown.type) ? "an" : "a"} ${unknown.type} "${unknown.name}" that the store does not make`;
   const changed = defined.find((entry) => wanted.find((other) => other.type === entry.type && other.name === entry.name)?.sql !== entry.sql);
@@ -1009,14 +1198,17 @@ const definedIn = (db: Database): Defined[] =>
     ({ type, name, sql }) => ({ type, name, sql: (sql ?? "").replace(/\s+/g, " ").trim() }),
   );
 
-let definitions: Defined[] | undefined;
-function asDefined(): Defined[] {
-  if (definitions) return definitions;
+const definitions = new Map<string, Defined[]>();
+function asDefined(format: number): Defined[] {
+  const schema = schemaOf(format);
+  const known = definitions.get(schema);
+  if (known) return known;
   const db = openDatabase(":memory:");
   try {
-    db.exec(SCHEMA);
-    definitions = definedIn(db);
-    return definitions;
+    db.exec(schema);
+    const defined = definedIn(db);
+    definitions.set(schema, defined);
+    return defined;
   } finally {
     db.close();
   }
@@ -1029,8 +1221,8 @@ const isRecord = (value: unknown): boolean => typeof value === "object" && value
  * says that the file is a sound database; this says that what is in it is a plan: the tables are there, every
  * record reads as what it has to be, and the counters are numbers.
  */
-function unreadable(db: Database): string | null {
-  const lacks = lacking(db);
+function unreadable(db: Database, format: number): string | null {
+  const lacks = lacking(db, format);
   if (lacks) return lacks;
   let snapshot: Snapshot | null;
   try {
@@ -1054,6 +1246,14 @@ function unreadable(db: Database): string | null {
   // in one statement, so that a change stored in between cannot come between them.
   const at = db.prepare("SELECT (SELECT revision FROM head WHERE id = 1) AS head, (SELECT max(revision) FROM history) AS latest").get() as { head: number | null; latest: number | null };
   if (at.head !== null && at.latest !== null && at.latest > at.head) return `its history goes on to revision ${at.latest}, after revision ${at.head}, which it says it is at`;
+  if (format < FORMAT_VERSION) return null;
+  // The timelines are not read at the start either, and one is read whenever an item is opened. What the
+  // statuses in them have to be is for the engine to say; here, that each entry is a record, and that the places
+  // of an item's entries are counted from 0 without a gap, as the store counts them when it adds one.
+  const status = db.prepare("SELECT kind, id, place FROM timeline WHERE NOT json_valid(data) OR json_type(data) <> 'object' LIMIT 1").get() as { kind: string; id: string; place: number } | undefined;
+  if (status) return `an entry in the timeline of ${status.kind} ${status.id}, at place ${status.place}, is not a record`;
+  const gap = db.prepare("SELECT kind, id FROM timeline GROUP BY kind, id HAVING min(place) <> 0 OR max(place) <> count(*) - 1 LIMIT 1").get() as { kind: string; id: string } | undefined;
+  if (gap) return `the timeline of ${gap.kind} ${gap.id} has entries missing: their places are not counted from 0 without a gap`;
   return null;
 }
 
@@ -1071,15 +1271,52 @@ export function historyOwners(file: string): Array<{ kind: string; id: string }>
 }
 
 /**
- * Reads a tenant file as the service would at its start, without changing it and without the service: for
- * whoever has to know that a file will open as a plan before it is put in the place of the data.
+ * The items that have a timeline in a tenant file of the present format, as they are stored. A timeline is not
+ * read at the start: this is for whoever checks a file before it takes the place of the data.
  */
-export function readTenantFile(file: string): Snapshot | null {
+export function timelineOwners(file: string): Array<{ kind: string; id: string }> {
   const connection = openReadOnlyDatabase(file);
   try {
-    return snapshotIn(connection.db);
+    return connection.db.prepare("SELECT DISTINCT kind, id FROM timeline").all() as unknown as Array<{ kind: string; id: string }>;
   } finally {
     connection.close();
+  }
+}
+
+export interface TenantFileReader {
+  /** Everything the file holds except long text, history and timelines, as the service reads it when it starts. */
+  snapshot(): Snapshot | null;
+  /** A page of an item's timeline, as the store returns it. */
+  timeline(kind: string, id: string, page?: TimelinePageRequest): TimelinePage;
+  close(): void;
+}
+
+/**
+ * Opens a tenant file to read it as the service would, without changing it and without the service: for
+ * whoever has to know that a file will open as a plan before it is put in the place of the data. The file is of
+ * the present format.
+ */
+export function openTenantFile(file: string): TenantFileReader {
+  const connection = openReadOnlyDatabase(file);
+  return {
+    snapshot: () => snapshotIn(connection.db),
+    timeline: (kind, id, page = {}) => timelineIn(connection.db, kind, id, page),
+    close: () => connection.close(),
+  };
+}
+
+/**
+ * Brings a tenant file that an earlier version wrote to the present format, as the store does when it opens
+ * one: in one step, or not at all. For a file that is nobody's data yet, such as the copy of a backup that is
+ * about to be restored. Returns the format it was brought from, or null when it was in the present one already.
+ */
+export function upgradeTenantFile(file: string): number | null {
+  const db = openDatabase(file);
+  try {
+    // Nothing is made in a file that lacks something: that is for whoever checks it to find.
+    return prepare(db, file, false);
+  } finally {
+    db.close();
   }
 }
 

@@ -1,6 +1,6 @@
 import type { Change, JsonObject, LinkKey, LinkRecord, ObjectRecord } from "@vigile/storage";
 import { userId, userNumber } from "./ids.js";
-import { KINDS, type Kind, type Link, type Node, type Ref } from "./model.js";
+import { KINDS, type Kind, type Link, type Node, type Ref, type StatusEntry } from "./model.js";
 import type { Mutation } from "./operation.js";
 
 /** For users only the number is stored; `USER-` is added when an ID is shown. */
@@ -29,7 +29,6 @@ const actorFromStorage = (id: string): string => displayId("user", id);
 export function nodeToRecord(node: Node): ObjectRecord {
   const { kind, id, version, created_by, ...rest } = node;
   const data: Record<string, unknown> = { ...rest, created_by: actorToStorage(created_by) };
-  if ("timeline" in rest) data.timeline = rest.timeline.map((e) => ({ ...e, by: actorToStorage(e.by) }));
   return { kind, id: storageId(kind, id), version, data: data as JsonObject };
 }
 
@@ -43,11 +42,25 @@ export function recordToNode(record: ObjectRecord): Node {
     version: record.version,
     created_by: actorFromStorage(data.created_by),
   };
-  if (Array.isArray(data.timeline)) node.timeline = data.timeline.map((e: any) => ({ ...e, by: actorFromStorage(e.by) }));
   // Tasks stored before the field existed have no reason recorded.
   if (kind === "task" && node.why === undefined) node.why = null;
   if (kind === "task" && node.type === undefined) node.type = "task";
   return node as unknown as Node;
+}
+
+/** An entry of a timeline as it is stored. */
+const entryToRecord = (entry: StatusEntry): JsonObject => ({ ...entry, by: actorToStorage(entry.by) });
+
+/**
+ * An entry of a timeline as it was stored. It is read to be shown, so one that is not what the engine writes,
+ * in data that was damaged, is shown as it is and fails nothing.
+ */
+export function recordToEntry(data: JsonObject): StatusEntry {
+  // A damaged timeline row can contain JSON null or another scalar. Keep it as an invalid empty entry so
+  // validation can name the timeline, and `get` can report it, instead of failing while decoding the row.
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return {} as StatusEntry;
+  const by = data.by;
+  return { ...data, by: typeof by === "string" && /^\d+$/.test(by) ? actorFromStorage(by) : by } as unknown as StatusEntry;
 }
 
 const linkKey = (link: Pick<Link, "from" | "type" | "to">): LinkKey => ({
@@ -81,6 +94,18 @@ export function toChanges(mutations: Mutation[], at: string, actor: string): Cha
         return {
           op: "add_history",
           record: { kind: m.ref.kind, id: storageId(m.ref.kind, m.ref.id), at, actor: actorToStorage(actor), action: m.action, data: m.data as JsonObject },
+        };
+      case "status":
+        return { op: "add_timeline", record: { kind: m.ref.kind, id: storageId(m.ref.kind, m.ref.id), data: entryToRecord(m.entry) } };
+      case "moment":
+        return {
+          op: "patch_timeline",
+          kind: m.ref.kind,
+          id: storageId(m.ref.kind, m.ref.id),
+          from: m.from,
+          to: m.to,
+          data: { at: m.at },
+          ...(m.atAfter === undefined ? {} : { when: { at_after: m.atAfter } }),
         };
     }
   });

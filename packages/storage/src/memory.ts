@@ -11,8 +11,11 @@ import {
   type LinkKey,
   type LinkRecord,
   type ObjectRecord,
+  type JsonObject,
   type Snapshot,
   type StorageAdapter,
+  type TimelinePage,
+  type TimelinePageRequest,
 } from "./types.js";
 
 interface Tenant {
@@ -21,6 +24,8 @@ interface Tenant {
   texts: Map<string, string>;
   links: Map<string, LinkRecord>;
   history: HistoryRecord[];
+  /** The entries of each item's timeline, each at its place. */
+  timelines: Map<string, JsonObject[]>;
 }
 
 const objectKey = (kind: string, id: string) => `${kind}\u0000${id}`;
@@ -47,7 +52,7 @@ export class MemoryStorage implements StorageAdapter {
 
     const t: Tenant = existing
       ? copy(existing)
-      : { head: { format: FORMAT_VERSION, revision: 0, counters: {} }, objects: new Map(), texts: new Map(), links: new Map(), history: [] };
+      : { head: { format: FORMAT_VERSION, revision: 0, counters: {} }, objects: new Map(), texts: new Map(), links: new Map(), history: [], timelines: new Map() };
     const revision = t.head.revision + 1;
     let seq = 0;
     for (const change of request.changes) {
@@ -63,6 +68,7 @@ export class MemoryStorage implements StorageAdapter {
           t.objects.delete(key);
           t.texts.delete(key);
           t.history = t.history.filter((h) => h.kind !== change.kind || h.id !== change.id);
+          t.timelines.delete(key);
           break;
         }
         case "put_link":
@@ -74,6 +80,22 @@ export class MemoryStorage implements StorageAdapter {
         case "add_history":
           t.history.push({ ...copy(change.record), revision, seq: seq++ });
           break;
+        case "add_timeline": {
+          const key = objectKey(change.record.kind, change.record.id);
+          t.timelines.set(key, [...(t.timelines.get(key) ?? []), copy(change.record.data)]);
+          break;
+        }
+        case "patch_timeline": {
+          const entries = t.timelines.get(objectKey(change.kind, change.id)) ?? [];
+          const from = Math.max(0, change.from);
+          const to = Math.min(entries.length - 1, change.to);
+          if (from > to) throw new Error(`The timeline of ${change.kind} ${change.id} has no entry from place ${change.from} to ${change.to}`);
+          for (let place = from; place <= to; place++) {
+            if (change.when && !(Date.parse(String(entries[place]?.at)) > Date.parse(change.when.at_after))) continue;
+            entries[place] = { ...entries[place], ...copy(change.data) };
+          }
+          break;
+        }
       }
     }
     t.head = { format: t.head.format, revision, counters: { ...request.counters } };
@@ -100,6 +122,13 @@ export class MemoryStorage implements StorageAdapter {
     const { before } = page;
     const earlier = before ? all.filter((h) => h.revision < before.revision || (h.revision === before.revision && h.seq < before.seq)) : all;
     return { records: copy(earlier.slice(Math.max(0, earlier.length - page.limit))), total: all.length };
+  }
+
+  async readTimeline(tenant: string, kind: string, id: string, page: TimelinePageRequest = {}): Promise<TimelinePage> {
+    const all = this.tenants.get(tenant)?.timelines.get(objectKey(kind, id)) ?? [];
+    const end = Math.max(0, Math.min(page.before ?? all.length, all.length));
+    const start = page.limit === undefined ? 0 : Math.max(0, end - page.limit);
+    return { records: all.slice(start, end).map((data, index) => ({ kind, id, place: start + index, data: copy(data) })), total: all.length };
   }
 
   async close(): Promise<void> {}

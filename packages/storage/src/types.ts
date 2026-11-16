@@ -4,7 +4,14 @@ export type JsonObject = { [key: string]: Json };
 /** The contract's limit, set by the weakest adapter (Azure Table storage). Every adapter enforces it. */
 export const MAX_RECORDS_PER_COMMIT = 100;
 
-export const FORMAT_VERSION = 1;
+/**
+ * The form of what is stored, counted up each time it changes in a way that an earlier version of the service
+ * would misread. A version refuses data of a later format than its own.
+ * 1: the statuses an item has had are a list inside its record.
+ * 2: they are entries of their own beside the record (`TimelineRecord`), and a task's record says when the task
+ *    was completed.
+ */
+export const FORMAT_VERSION = 2;
 
 export interface Head {
   format: number;
@@ -66,14 +73,51 @@ export interface HistoryPage {
   total: number;
 }
 
+/** One of the statuses an item has had, as it is added: the store gives it the place after the last. */
+export interface TimelineInput {
+  kind: string;
+  id: string;
+  data: JsonObject;
+}
+
+/** One of the statuses an item has had. Its place is its number among them, counted from 0 without gaps. */
+export interface TimelineRecord extends TimelineInput {
+  place: number;
+}
+
+export interface TimelinePageRequest {
+  /** Only entries before this place. */
+  before?: number;
+  /** At most this many, the latest of them. All of them when left out. */
+  limit?: number;
+}
+
+export interface TimelinePage {
+  /** Oldest first. */
+  records: TimelineRecord[];
+  /** How many entries the timeline has in all, on this page or not. */
+  total: number;
+}
+
 export type Change =
   /** `text` left undefined keeps the stored text; a string replaces it. */
   | { op: "put_object"; record: ObjectRecord; text?: string }
-  /** Takes the object's text and its history with it: nothing stays stored under its kind and ID. */
+  /** Takes the object's text, its history and its timeline with it: nothing stays stored under its kind and ID. */
   | { op: "delete_object"; kind: string; id: string }
   | { op: "put_link"; record: LinkRecord }
   | { op: "delete_link"; key: LinkKey }
-  | { op: "add_history"; record: HistoryInput };
+  | { op: "add_history"; record: HistoryInput }
+  /** Adds an entry after the last of an item's timeline. What is written is that one entry, however many came before. */
+  | { op: "add_timeline"; record: TimelineInput }
+  /**
+   * Sets the given fields in entries of an item's timeline from one place to another, both included, and leaves
+   * their other fields as they are. With `when.at_after`, only entries whose ISO timestamp field `at` is later
+   * than that moment are changed; a nonempty stretch with no matching entries is a no-op. It is one record of
+   * the commit however many entries it reaches: what is stored is one statement about a stretch of the timeline,
+   * and whether an adapter rewrites each entry or keeps the statement and applies it when it reads is its own
+   * affair. A stretch that holds no entry at all fails the commit.
+   */
+  | { op: "patch_timeline"; kind: string; id: string; from: number; to: number; data: JsonObject; when?: { at_after: string } };
 
 export interface Snapshot {
   head: Head;
@@ -89,7 +133,7 @@ export interface CommitRequest {
 }
 
 export interface StorageAdapter {
-  /** Loads everything except long text and history. Returns `null` for a tenant that does not exist. */
+  /** Loads everything except long text, history and timelines. Returns `null` for a tenant that does not exist. */
   load(tenant: string): Promise<Snapshot | null>;
   /**
    * Applies all changes and moves the tenant revision forward by one, or does nothing at all.
@@ -115,6 +159,12 @@ export interface StorageAdapter {
    * all of the history.
    */
   readHistoryPage(tenant: string, kind: string, id: string, page: HistoryPageRequest): Promise<HistoryPage>;
+  /**
+   * The entries of an item's timeline, oldest first: all of them, or at most `limit` of the latest, or of the
+   * latest before a place. With them, how many entries the timeline has in all. Neither a page nor the count
+   * reads the entries that are not returned.
+   */
+  readTimeline(tenant: string, kind: string, id: string, page?: TimelinePageRequest): Promise<TimelinePage>;
   close(): Promise<void>;
 }
 

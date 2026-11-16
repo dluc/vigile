@@ -5,11 +5,11 @@ import { VigileError, echo, forbidden, invalidInput, notFound, toErrorBody } fro
 import { Graph, type GraphView } from "./graph.js";
 import { userId } from "./ids.js";
 import { LINK_TYPES } from "./link-types.js";
-import { BUILT_IN_USERS, COUNTERS, LIMITS, RETIRED_PREFIX, areKeyMarks, keyMark, type Node, type Ref, type UserNode, type UserType } from "./model.js";
-import { shapeProblem } from "./shape.js";
-import { Plan, mayCall, type Clock, type HistoryItem, type HistoryPage, type HistoryPlace, type KeyStore, type Mutation, type Operation, type ReadContext } from "./operation.js";
+import { BUILT_IN_USERS, COUNTERS, LIMITS, RETIRED_PREFIX, areKeyMarks, keyMark, type Node, type Ref, type StatusEntry, type UserNode, type UserType } from "./model.js";
+import { entriesProblem, shapeProblem, timelineProblem } from "./shape.js";
+import { Plan, mayCall, type Clock, type HistoryItem, type HistoryPage, type HistoryPlace, type KeyStore, type Mutation, type Operation, type ReadContext, type TimelinePage } from "./operation.js";
 import { OPERATIONS, findOperation } from "./operations/index.js";
-import { displayId, recordToLink, recordToNode, storageId, storedAs, toChanges } from "./records.js";
+import { displayId, recordToEntry, recordToLink, recordToNode, storageId, storedAs, toChanges } from "./records.js";
 import { Unchanged } from "./unchanged.js";
 
 export interface OperationLog {
@@ -70,6 +70,9 @@ export class MemoryKeyStore implements KeyStore {
 
 /** The entry an item's history begins with. */
 const CREATED = "created";
+
+/** How many entries of a timeline are read at a time by the check of all timelines. */
+const TIMELINE_CHECKED_AT_ONCE = 500;
 
 /** How many of the mistakes in an operation's input a refusal puts into words. */
 const MOST_ISSUES = 5;
@@ -269,6 +272,8 @@ export class Engine {
       unchangedSince: (ref) => this.unchanged.since(ref),
       readHistory: (ref) => this.history(ref),
       readHistoryPage: (ref, before) => this.historyPage(ref, before),
+      readTimeline: (ref) => this.timeline(ref),
+      readTimelinePage: (ref, before) => this.timelinePage(ref, before),
     };
   }
 
@@ -305,7 +310,18 @@ export class Engine {
     for (let attempt = 0; ; attempt++) {
       const now = this.clock.now().toISOString();
       const plan = new Plan(this.counters);
-      const reply: () => unknown = await this.run(operation, username, letInAs, input, plan, now);
+      let reply: () => unknown;
+      try {
+        reply = await this.run(operation, username, letInAs, input, plan, now);
+      } catch (error) {
+        // A write that reads beside its checked plan can discover that another engine moved the store while it
+        // was reading. Refresh and rerun once, just as when the eventual commit finds that same revision drift.
+        if (!(error instanceof RevisionConflictError)) throw error;
+        this.stale = true;
+        await this.load();
+        if (attempt === 0) continue;
+        throw error;
+      }
       if (plan.mutations.length) {
         const caller = this.user(username)!;
         try {
@@ -370,6 +386,10 @@ export class Engine {
         case "history":
           this.unchanged.noted(m.ref, revision);
           break;
+        // Neither the history nor the timelines are part of the plan in memory: they are read from the store.
+        case "status":
+        case "moment":
+          break;
       }
     }
   }
@@ -386,6 +406,11 @@ export class Engine {
       throw new Error(
         `Tenant "${this.tenant}" uses data format ${snapshot.head.format}; this version of the service understands up to ${FORMAT_VERSION}. Upgrade the service.`,
       );
+    }
+    // Data of an earlier format is brought to the present one by the store when it opens it. Read as it is, its
+    // records would lack what this version reads in them, and its timelines would be taken for empty.
+    if (snapshot.head.format < FORMAT_VERSION) {
+      throw new Error(`Tenant "${this.tenant}" is in data format ${snapshot.head.format}, which the store has not brought to format ${FORMAT_VERSION}, the one this version of the service reads.`);
     }
     const graph = new Graph();
     for (const record of snapshot.objects) graph.putNode(recordToNode(record));
@@ -495,6 +520,103 @@ export class Engine {
     const shown = records.length > LIMITS.page ? records.slice(records.length - LIMITS.page) : records;
     const first = shown[0];
     return { items: shown.map((r) => ({ ...this.historyItem(r), place: [r.revision, r.seq] as const })), total, ...(first && shown.length < records.length ? { earlier: [first.revision, first.seq] as const } : {}) };
+  }
+
+  /**
+   * Every status an item went through, oldest first, each at its place in the list: whoever asks for all of
+   * them writes some of them back by their place. Entries that do not stand at the places 0, 1, 2 and so on
+   * were damaged outside the service, and are not handed out as if they did.
+   */
+  private async timeline(ref: Ref): Promise<StatusEntry[]> {
+    const revision = this.revision;
+    const { records } = await this.storage.readTimeline(this.tenant, ref.kind, storageId(ref.kind, ref.id));
+    const actual = await this.storage.readRevision(this.tenant);
+    if (actual !== revision) throw new RevisionConflictError(this.tenant, revision, actual);
+    const astray = records.findIndex((record, index) => record.place !== index);
+    if (astray >= 0) throw new Error(`The timeline of ${ref.kind} ${ref.id} is damaged: the entry after place ${astray - 1} is at place ${records[astray]!.place}`);
+    const entries = records.map((record) => ({ place: record.place, entry: recordToEntry(record.data) }));
+    if (ref.kind === "project" || ref.kind === "task") {
+      const problem = entriesProblem(ref.kind, entries);
+      if (problem) throw new Error(`The timeline of ${ref.kind} ${ref.id} is damaged: ${problem}`);
+    }
+    return entries.map(({ entry }) => entry);
+  }
+
+  /** One page of an item's timeline: the latest entries, or the latest before a place, and how many there are in all. */
+  private async timelinePage(ref: Ref, before?: number): Promise<TimelinePage> {
+    const { records, total } = await this.storage.readTimeline(this.tenant, ref.kind, storageId(ref.kind, ref.id), { ...(before === undefined ? {} : { before }), limit: LIMITS.page });
+    return { entries: records.map((record) => ({ ...recordToEntry(record.data), place: record.place })), total, from: records[0]?.place ?? 0 };
+  }
+
+  /**
+   * Looks for damage in the timelines, which are stored beside the items and are not part of the plan in
+   * memory: that each project and task has one, of statuses of its kind, that ends with the status the item
+   * has. It reads every entry of every item from the store, a few hundred at a time, so it is for whoever
+   * checks data before it is put to use, and not for a service that answers others meanwhile. It stops at the
+   * first few items it finds damaged.
+   */
+  async checkTimelines(most = 3, signal?: AbortSignal): Promise<string[]> {
+    // A diagnostic must not call a healthy timeline damaged just because another engine changed it during a
+    // multi-page scan. Validate one revision at a time; refresh and retry on drift, then refuse an unstable scan.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      signal?.throwIfAborted();
+      const revision = this.revision;
+      const graph = this.graph;
+      if ((await this.storage.readRevision(this.tenant)) !== revision) {
+        signal?.throwIfAborted();
+        await this.reload();
+        continue;
+      }
+      const problems = await this.timelineProblems(graph, most, signal);
+      signal?.throwIfAborted();
+      if (this.graph === graph && this.revision === revision && (await this.storage.readRevision(this.tenant)) === revision) return problems;
+      await this.reload();
+    }
+    throw new VigileError("too_many_requests", "The plan is being changed faster than its timelines can be checked.", { actions: ["Run doctor again."] });
+  }
+
+  private async timelineProblems(graph: GraphView, most: number, signal?: AbortSignal): Promise<string[]> {
+    const problems: string[] = [];
+    for (const node of [...graph.all("project"), ...graph.all("task")]) {
+      if (problems.length >= most) break;
+      const id = storageId(node.kind, node.id);
+      let wrong: string | null = null;
+      let end: { total: number; latest: StatusEntry | undefined } | undefined;
+      let before: number | undefined;
+      let expectedBefore: number | undefined;
+      for (;;) {
+        signal?.throwIfAborted();
+        const { records, total } = await this.storage.readTimeline(this.tenant, node.kind, id, { ...(before === undefined ? {} : { before }), limit: TIMELINE_CHECKED_AT_ONCE });
+        // SQLite reads are synchronous even though the storage contract is async. Yield between bounded pages
+        // so an opt-in doctor scan cannot monopolize the HTTP event loop for a long history.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        signal?.throwIfAborted();
+        const entries = records.map((record) => ({ place: record.place, entry: recordToEntry(record.data) }));
+        end ??= { total, latest: entries.at(-1)?.entry };
+        if (!records.length) {
+          if (expectedBefore !== undefined && expectedBefore > 0) wrong ??= `timeline has entries missing before place ${expectedBefore}`;
+          break;
+        }
+        const pageEnd = records.at(-1)!.place;
+        const expectedEnd = expectedBefore ?? total;
+        let gap: string | null = pageEnd === expectedEnd - 1 ? null : `has entries missing after place ${pageEnd} (expected place ${expectedEnd - 1})`;
+        for (let index = 1; index < records.length && !gap; index++) {
+          if (records[index]!.place !== records[index - 1]!.place + 1) gap = `has entries missing between places ${records[index - 1]!.place} and ${records[index]!.place}`;
+        }
+        // Read from the latest back, so what is found later stands earlier in the timeline: that is the one said.
+        wrong = entriesProblem(node.kind, entries) ?? (gap ? `timeline ${gap}` : null) ?? wrong;
+        expectedBefore = records[0]!.place;
+        if (expectedBefore === 0) break;
+        if (before !== undefined && expectedBefore >= before) {
+          wrong ??= `timeline pages did not move before place ${before}`;
+          break;
+        }
+        before = expectedBefore;
+      }
+      wrong ??= timelineProblem(node, end.total, end.latest);
+      if (wrong) problems.push(`The ${node.kind} ${node.id} is damaged: ${wrong}`);
+    }
+    return problems;
   }
 
   /** Looks for damage in the graph. An empty list means it is consistent. */

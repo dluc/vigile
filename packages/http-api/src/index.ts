@@ -184,7 +184,26 @@ export function createApiHandler(options: ApiOptions): ApiHandler {
       }
       if (request.method === "GET" && path === "admin/status") {
         if (user.type !== "admin") throw new VigileError("forbidden", "Only an admin can read the service status.");
-        return send(response, 200, { ...options.instance(), ...(options.adminStatus?.() ?? {}), engine: engine.status(), listeners: streams.size, inconsistencies: engine.checkConsistency() });
+        let timelineInconsistencies: string[] | undefined;
+        if (url.searchParams.get("check_timelines") === "true") {
+          const controller = new AbortController();
+          const cancelIfDisconnected = () => { if (!response.writableEnded) controller.abort(); };
+          if (response.destroyed) controller.abort();
+          else response.once("close", cancelIfDisconnected);
+          try {
+            timelineInconsistencies = await engine.checkTimelines(3, controller.signal);
+          } finally {
+            response.off("close", cancelIfDisconnected);
+          }
+        }
+        return send(response, 200, {
+          ...options.instance(),
+          ...(options.adminStatus?.() ?? {}),
+          engine: engine.status(),
+          listeners: streams.size,
+          inconsistencies: engine.checkConsistency(),
+          ...(timelineInconsistencies === undefined ? {} : { timeline_inconsistencies: timelineInconsistencies }),
+        });
       }
       if (request.method !== "POST") {
         throw new VigileError("not_found", `${echo(request.method ?? "")} ${echo(url.pathname)} is not part of the API.`, {
@@ -196,6 +215,8 @@ export function createApiHandler(options: ApiOptions): ApiHandler {
       const result = await engine.execute(toUnderscores(path), { username: who.username, id: who.id }, await readJson(request));
       return send(response, 200, result);
     } catch (error) {
+      // A caller that left during an opt-in paged diagnostic is no longer waiting for an error response.
+      if (response.destroyed) return;
       // A refusal is an answer. Anything else is the service's own trouble: the caller is told that there was
       // some, and whoever runs the service is told what. That it could not be told keeps no answer back.
       if (!(error instanceof VigileError)) {

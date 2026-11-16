@@ -1046,10 +1046,6 @@ export function taskCalc(graph: GraphView, task: TaskNode, known: Known = new Ma
   const assigned = assignees(graph, task);
   let waitingFor: Array<TaskNode | ProjectNode> | undefined;
   let problems: Problem[] | undefined;
-  let completedAt: string | null = null;
-  if (task.status === "done") {
-    for (const entry of task.timeline) if (entry.status === "done") completedAt = entry.at;
-  }
   return {
     is_waiting: isWaiting,
     get waiting_for() {
@@ -1064,7 +1060,8 @@ export function taskCalc(graph: GraphView, task: TaskNode, known: Known = new Ma
     get problems() {
       return (problems ??= taskProblems(graph, task, known, route));
     },
-    completed_at: completedAt,
+    // Kept with the task, for a task that is done: its timeline is not read for this.
+    completed_at: task.status === "done" ? task.completed_at : null,
   };
 }
 

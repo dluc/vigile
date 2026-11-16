@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { MemoryStorage, type CommitRequest, type Head, type Snapshot, type StorageAdapter } from "@vigile/storage";
+import { MemoryStorage, type CommitRequest, type Head, type JsonObject, type Snapshot, type StorageAdapter } from "@vigile/storage";
 import { Engine, MemoryKeyStore, VigileError, type KeyStore, type OperationLog } from "./index.js";
 
 const task = (title: string, extra: Record<string, unknown> = {}) => ({ title, description: `Do ${title}`, ...extra });
@@ -369,8 +369,11 @@ describe("a second writer on the same store", () => {
   });
 });
 
-/** A read-only store that serves one fixed snapshot. */
-function fixed(snapshot: Snapshot): StorageAdapter {
+/** The timelines of a store, each under the kind and ID of its item as they are stored. */
+type Timelines = Record<string, JsonObject[]>;
+
+/** A read-only store that serves one fixed snapshot, and the timelines that go with it when they are given. */
+function fixed(snapshot: Snapshot, timelines: Timelines = {}): StorageAdapter {
   return {
     load: async () => structuredClone(snapshot),
     commit: async () => {
@@ -380,6 +383,12 @@ function fixed(snapshot: Snapshot): StorageAdapter {
     readText: async () => null,
     readHistory: async () => [],
     readHistoryPage: async () => ({ records: [], total: 0 }),
+    readTimeline: async (_tenant, kind, id, page = {}) => {
+      const all = Object.hasOwn(timelines, `${kind} ${id}`) ? timelines[`${kind} ${id}`]! : [];
+      const end = Math.min(page.before ?? all.length, all.length);
+      const start = page.limit === undefined ? 0 : Math.max(0, end - page.limit);
+      return { records: all.slice(start, end).map((data, index) => ({ kind, id, place: start + index, data })), total: all.length };
+    },
     close: async () => {},
   };
 }
@@ -391,11 +400,34 @@ async function snapshotOf(build: (engine: Engine) => Promise<void>): Promise<Sna
   return (await storage.load("default"))!;
 }
 
+/** The same, with the timeline of each project and task, which a snapshot does not hold. */
+async function storedOf(build: (engine: Engine) => Promise<void>): Promise<{ snapshot: Snapshot; timelines: Timelines }> {
+  const storage = new MemoryStorage();
+  const engine = await Engine.open({ storage });
+  await build(engine);
+  const snapshot = (await storage.load("default"))!;
+  const timelines: Timelines = {};
+  for (const { kind, id } of snapshot.objects) {
+    if (kind !== "user") timelines[`${kind} ${id}`] = (await storage.readTimeline("default", kind, id)).records.map((record) => record.data);
+  }
+  return { snapshot, timelines };
+}
+
 describe("a damaged or foreign store", () => {
   it("refuses data written in a newer format", async () => {
     const snapshot = await snapshotOf(async () => {});
     snapshot.head.format = 99;
     await assert.rejects(Engine.open({ storage: fixed(snapshot) }), /data format 99.*Upgrade the service/);
+  });
+
+  it("refuses data of an earlier format that the store has not brought to the present one", async () => {
+    // In format 1 the statuses an item has had are a list in its record. Read as it is, every timeline would be
+    // taken for empty and no task for completed.
+    const snapshot = await snapshotOf(async (engine) => {
+      await engine.execute("create_task", "agent1", task("A"));
+    });
+    snapshot.head.format = 1;
+    await assert.rejects(Engine.open({ storage: fixed(snapshot) }), /is in data format 1, which the store has not brought to format 2/);
   });
 
   it("reports a healthy graph as consistent", async () => {
@@ -531,8 +563,7 @@ describe("a damaged or foreign store", () => {
       const snapshot = structuredClone(small);
       const data = { at: "2026-01-01T00:00:00.000Z", by: "1" };
       const id = (n: number) => `BIG-${String(n).padStart(3, "0")}`;
-      const first = snapshot.objects.find((o) => o.kind === "task")!;
-      first.data = { ...first.data, timeline: Array.from({ length: tasks }, (_, n) => ({ status: n % 2 ? "draft" : "open", at: new Date(Date.UTC(2026, 0, 1) + n * 1000).toISOString(), by: "1" })) };
+      const timelines = { [`task ${id(1)}`]: Array.from({ length: tasks }, (_, n) => ({ status: n % 2 ? "draft" : "open", at: new Date(Date.UTC(2026, 0, 1) + n * 1000).toISOString(), by: "1" })) };
       snapshot.links.push({ fromKind: "task", fromId: id(1), type: "assigned to", toKind: "user", toId: person.id, data });
       for (let n = 2; n <= tasks; n++) {
         snapshot.objects.push({ ...template, id: id(n) });
@@ -543,7 +574,7 @@ describe("a damaged or foreign store", () => {
       }
       snapshot.head.counters.task = tasks;
       return {
-        ...fixed(snapshot),
+        ...fixed(snapshot, timelines),
         // One entry for each revision from 1 to the number of tasks, of which a page is the latest before a given one.
         readHistoryPage: async (_tenant, kind, item, page) => {
           const end = page.before ? page.before.revision - 1 : tasks;
@@ -689,15 +720,18 @@ describe("a damaged or foreign store", () => {
   });
 
   it("finds items whose fields are not what the engine reads them as, and finds nothing wrong with those it wrote", async () => {
-    const whole = await snapshotOf(async (engine) => {
+    const { snapshot: whole, timelines } = await storedOf(async (engine) => {
       await engine.execute("create_project", "agent1", { title: "P", prefix: "abc" });
       const inProject = (await engine.execute("create_task", "agent1", task("In a project", { project: "ABC", why: "because", value: 3, size: 2 }))) as { id: string };
       const bug = (await engine.execute("create_task", "agent1", task("A bug", { type: "bug" }))) as { id: string };
       await engine.execute("set_task_status", "agent1", { id: inProject.id, version: 1, status: "in_progress" });
       await engine.execute("create_user", "admin", { username: "bob", type: "person" });
       await engine.execute("delete", "admin", { id: bug.id, version: 1 });
+      const finished = (await engine.execute("create_task", "agent1", task("Finished"))) as { id: string };
+      await engine.execute("set_task_status", "agent1", { id: finished.id, version: 1, status: "done" });
     });
-    assert.deepEqual((await Engine.open({ storage: fixed(whole) })).checkConsistency(), [], "what the operations write passes");
+    const sound = await Engine.open({ storage: fixed(whole, timelines) });
+    assert.deepEqual([sound.checkConsistency(), await sound.checkTimelines()], [[], []], "what the operations write passes");
 
     const damaged = (change: (snapshot: Snapshot) => void) => {
       const snapshot = structuredClone(whole);
@@ -705,17 +739,15 @@ describe("a damaged or foreign store", () => {
       return Engine.open({ storage: fixed(snapshot) }).then((engine) => engine.checkConsistency());
     };
     const of = (snapshot: Snapshot, kind: string) => snapshot.objects.find((record) => record.kind === kind)!;
-    // A done task without its timeline is what breaks every list of tasks: the completion date is read from it.
-    assert.match((await damaged((s) => (of(s, "task").data.timeline = null as never))).join("\n"), /The task \S+ is damaged: timeline is not what it has to be/);
-    assert.match((await damaged((s) => (of(s, "task").data.timeline = [{ status: "open" }] as never))).join("\n"), /timeline\.0\.at is not what it has to be/);
+    // A task that does not say when it was completed is what breaks every list of tasks: the completion date is
+    // read from the task, for every task that is done.
+    assert.match((await damaged((s) => delete of(s, "task").data.completed_at)).join("\n"), /The task \S+ is damaged: completed_at is not what it has to be/);
+    assert.match((await damaged((s) => (of(s, "task").data.completed_at = "last week"))).join("\n"), /completed_at is not what it has to be \(not a moment in time\)/);
     assert.match((await damaged((s) => (of(s, "task").data.status = "sideways"))).join("\n"), /The task \S+ is damaged: status is not what it has to be/);
-    // The timeline tells of every status the item has had, the present one last: a task that is done with no
-    // entry that says so has no moment at which it was completed, and setting that moment would have none to move.
-    assert.match((await damaged((s) => (of(s, "task").data.status = "done"))).join("\n"), /The task \S+ is damaged: has the status done, and its timeline ends with in_progress/);
-    assert.match((await damaged((s) => Object.assign(of(s, "task").data, { status: "done", timeline: [] }))).join("\n"), /timeline is not what it has to be \(empty\)/);
-    assert.match((await damaged((s) => (of(s, "task").data.timeline as Array<{ status: string }>)[0]!.status = "sideways")).join("\n"), /timeline\.0\.status is not what it has to be/);
-    assert.match((await damaged((s) => (of(s, "project").data.status = "ready"))).join("\n"), /The project \S+ is damaged: has the status ready, and its timeline ends with open/);
-    assert.match((await damaged((s) => (of(s, "project").data.timeline = []))).join("\n"), /The project \S+ is damaged: timeline is not what it has to be \(empty\)/);
+    // A task says when it was completed exactly while it is done: one that is done and does not say when has no
+    // moment at which it was completed, and one that says when and is not done would show a date nobody set.
+    assert.match((await damaged((s) => (of(s, "task").data.status = "done"))).join("\n"), /The task \S+ is damaged: has the status done, and nothing that says when it was completed/);
+    assert.match((await damaged((s) => (of(s, "task").data.completed_at = "2026-01-01T00:00:00.000Z"))).join("\n"), /The task \S+ is damaged: says when it was completed, and has the status in_progress/);
     assert.match((await damaged((s) => (of(s, "task").data.priority = "high"))).join("\n"), /priority is not what it has to be/);
     assert.match((await damaged((s) => delete of(s, "project").data.title)).join("\n"), /The project \S+ is damaged: title is not what it has to be/);
     assert.match((await damaged((s) => (of(s, "user").data.built_in = "yes"))).join("\n"), /The user \S+ is damaged: built_in is not what it has to be/);
@@ -753,5 +785,50 @@ describe("a damaged or foreign store", () => {
     );
     // A built-in user is what it was made as: an admin that is an agent leaves nobody who can do an admin's work.
     assert.match((await damaged((s) => (s.objects.find((r) => r.kind === "user" && r.data.username === "admin")!.data.type = "agent"))).join("\n"), /The built-in user "admin" is of type agent, not admin/);
+  });
+
+  it("finds timelines that are not what the engine reads them as: empty, of statuses the kind does not have, or not ending with the status the item has", async () => {
+    const { snapshot: whole, timelines: sound } = await storedOf(async (engine) => {
+      await engine.execute("create_project", "agent1", { title: "P", prefix: "abc" });
+      const started = (await engine.execute("create_task", "agent1", task("Started", { project: "ABC" }))) as { id: string };
+      await engine.execute("set_task_status", "agent1", { id: started.id, version: 1, status: "in_progress" });
+      const finished = (await engine.execute("create_task", "agent1", task("Finished", { project: "ABC" }))) as { id: string };
+      await engine.execute("set_task_status", "agent1", { id: finished.id, version: 1, status: "done" });
+    });
+    const damaged = async (change: (timelines: Timelines, snapshot: Snapshot) => void) => {
+      const snapshot = structuredClone(whole);
+      const timelines = structuredClone(sound);
+      change(timelines, snapshot);
+      const engine = await Engine.open({ storage: fixed(snapshot, timelines) });
+      // The records themselves are sound in each of these: what is wrong is beside them.
+      assert.deepEqual(engine.checkConsistency(), []);
+      return (await engine.checkTimelines()).join("\n");
+    };
+    const record = (snapshot: Snapshot, kind: string, id: string) => snapshot.objects.find((r) => r.kind === kind && r.id === id)!;
+    // Every change of status adds an entry, the status an item is created with being the first: there is always one.
+    assert.match(await damaged((t) => delete t["task ABC-001"]), /^The task ABC-001 is damaged: timeline is not what it has to be \(empty\)$/);
+    assert.match(await damaged((t) => (t["project ABC"] = [])), /^The project ABC is damaged: timeline is not what it has to be \(empty\)$/);
+    // Each entry names a status of the item's kind, a moment and a user.
+    assert.match(await damaged((t) => (t["task ABC-001"]![0] = { status: "open" })), /The task ABC-001 is damaged: timeline\.0\.at is not what it has to be/);
+    assert.match(await damaged((t) => (t["task ABC-001"]![0]!.status = "sideways")), /timeline\.0\.status is not what it has to be/);
+    assert.match(await damaged((t) => (t["task ABC-001"]![1]!.by = "somebody")), /timeline\.1\.by is not what it has to be \(not the id of a user\)/);
+    assert.match(await damaged((t) => (t["project ABC"]![0]!.status = "in_progress")), /The project ABC is damaged: timeline\.0\.status is not what it has to be/);
+    assert.match(await damaged((t) => (t["task ABC-002"]![1] = 7 as never)), /The task ABC-002 is damaged: timeline\.1\.status is not what it has to be/);
+    // The last entry is the status the item has: the next change would otherwise start from a status it never took.
+    assert.match(await damaged((_, s) => (record(s, "task", "ABC-001").data.status = "paused")), /^The task ABC-001 is damaged: has the status paused, and its timeline ends with in_progress$/);
+    assert.match(await damaged((_, s) => (record(s, "project", "ABC").data.status = "ready")), /^The project ABC is damaged: has the status ready, and its timeline ends with open$/);
+    assert.match(await damaged((t) => t["task ABC-002"]!.pop()), /^The task ABC-002 is damaged: has the status done, and its timeline ends with open$/);
+    // And for a task that is done, the moment of that entry is when the task says it was completed.
+    assert.match(await damaged((t) => (t["task ABC-002"]![1]!.at = "2020-01-01T00:00:00.000Z")), /^The task ABC-002 is damaged: says it was completed on 2026-\S+, and its timeline on 2020-01-01T00:00:00.000Z$/);
+    // An entry far from the end of a long timeline is found too, and of several the earliest is the one named.
+    const long = (bad: number[]) => (t: Timelines) => {
+      t["task ABC-001"] = Array.from({ length: 1201 }, (_, place) => ({ status: bad.includes(place) ? "sideways" : place % 2 ? "in_progress" : "open", at: "2026-01-01T00:00:00.000Z", by: "3" }));
+      t["task ABC-001"]!.push({ status: "in_progress", at: "2026-01-01T00:00:00.000Z", by: "3" });
+    };
+    assert.equal(await damaged(long([])), "");
+    assert.match(await damaged(long([3])), /^The task ABC-001 is damaged: timeline\.3\.status is not what it has to be/);
+    assert.match(await damaged(long([1100, 640, 7])), /^The task ABC-001 is damaged: timeline\.7\.status is not what it has to be/);
+    // The check stops at the first few items it finds damaged: it says that the data is damaged, not all of how.
+    assert.equal((await damaged((t) => Object.keys(t).forEach((key) => (t[key] = [])))).split("\n").length, 3);
   });
 });

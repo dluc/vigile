@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { NoPlace, kindOf, loadConfig, placeOf, samePlace } from "@vigile/config";
 import { assertTenantName } from "@vigile/storage";
-import { backupTenantFile, holdFolder, holdTenantFiles, inspectTenantFile } from "@vigile/storage-sqlite";
+import { backupTenantFile, holdFolder, holdTenantFiles, inspectTenantFile, upgradeTenantFile } from "@vigile/storage-sqlite";
 import { UsageError, configPath, flag, type Args } from "../args.js";
 import { BACKUPS_LOCK } from "../backup.js";
 import { BESIDE, BESIDE_COPY, FILES_WAIT_MS, isWorkingFile, putInPlace, recoverRestore, restoreInterrupted, stagingFile, openAsPlan } from "../restore.js";
@@ -124,7 +124,20 @@ export async function restoreBackup(args: Args, ui: Ui): Promise<void> {
       throw new Error(`${source} could not be copied to ${incoming}: ${(error as Error).message}. Nothing was changed.`, { cause: error });
     }
     chmodSync(incoming, 0o600);
+    // A backup that an earlier version of the service took is in that version's format. The copy is brought to
+    // the present one here, as the service would do at its start, so that what is checked next is what the
+    // service will read. The backup itself is left as it is.
+    let broughtFrom: number | null;
+    try {
+      broughtFrom = upgradeTenantFile(incoming);
+    } catch (error) {
+      const why = ((error as Error).cause as Error | undefined)?.message ?? (error as Error).message;
+      throw new UsageError(`${source} cannot be restored: it is of an earlier data format, and the copy of it could not be brought to the present one (${why}). Nothing was changed.`, ["Choose another backup."]);
+    }
     const copied = inspectTenantFile(tenant, incoming);
+    // What the check finds in a copy that was just brought to the present format was in the backup: an entry of
+    // a timeline that is no record lay inside a record until then, where the first look at the backup did not go.
+    if (!copied.ok && broughtFrom !== null) throw new UsageError(`${source} cannot be restored: ${found(copied.messages)}. Nothing was changed.`, ["Choose another backup."]);
     if (!copied.ok) throw new Error(`The copy of the backup does not pass the check: ${found(copied.messages)}. Nothing was changed.`);
     // A sound database with a plan's tables in it is not yet a plan the service starts on. The copy is opened
     // the way the service opens its data, before it may take the place of data that works.

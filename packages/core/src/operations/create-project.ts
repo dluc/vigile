@@ -44,7 +44,6 @@ export const createProject = defineWrite({
       prefix,
       title: input.title,
       status: "open",
-      timeline: [statusEntry("open", ctx)],
       version: 1,
       created_at: ctx.now,
       created_by: ctx.caller.id,
@@ -52,6 +51,7 @@ export const createProject = defineWrite({
       deleted_at: null,
     };
     ctx.plan.put(project, input.description ?? "");
+    ctx.plan.status(project, statusEntry(project.status, ctx));
     ctx.plan.history(project, "created", { status: project.status });
     return () => projectSummary(ctx.graph, ctx.graph.get("project", project.id)!);
   },

@@ -23,7 +23,10 @@ export const setTaskStatus = defineWrite({
     requireVersion(task, input.version, () => taskSummary(ctx.graph, task));
     checkTaskMove(ctx.graph, task, input.status, ctx.caller);
 
-    ctx.plan.put(touch(task, ctx, { status: input.status, timeline: [...task.timeline, statusEntry(input.status, ctx)] }));
+    // The task says what its status is and, when that is done, since when; the timeline gets one entry more.
+    // Neither grows with the changes that came before.
+    ctx.plan.put(touch(task, ctx, { status: input.status, completed_at: input.status === "done" ? ctx.now : null }));
+    ctx.plan.status(task, statusEntry(input.status, ctx));
     const takes = input.status === "in_progress" && assignees(ctx.graph, task).length === 0;
     if (takes) ctx.plan.link(newLink(ctx, task, ASSIGNED_TO, ctx.caller));
     ctx.plan.history(task, "status_changed", { from: task.status, to: input.status, ...(takes ? { assigned_to: ctx.caller.username } : {}) });

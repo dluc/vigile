@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ConfigError, checkUsers, isTooOpen, loadConfig, masked, samePlace as sameAs, unknownEnvironment, type LoadedConfig } from "@vigile/config";
 import { OPERATIONS, VERSION } from "@vigile/core";
+import { FORMAT_VERSION } from "@vigile/storage";
 import { folderIsHeld, inspectTenantFile, tenantFiles } from "@vigile/storage-sqlite";
 import { UsageError, configPath, flag, type Args } from "../args.js";
 import { allUsers, areTexts, isCount, isRecord, keyRefused, oneLine, refusalOf } from "../answers.js";
@@ -56,6 +57,8 @@ interface Status {
   code_stamp: number | undefined;
   settings: Record<string, unknown> | undefined;
   inconsistencies: string[];
+  /** Absent from older services that did not check timelines in their admin status. */
+  timeline_inconsistencies: string[];
   counts: { project: number; task: number; user: number };
   links: number;
   /** Absent from a service from before it said which keys are in effect: the config's are taken. */
@@ -110,6 +113,7 @@ function readStatus(answer: unknown): Status {
     code_stamp: absent(answer.code_stamp) ? undefined : number(answer, "code_stamp"),
     settings: part(answer, "settings"),
     inconsistencies: absent(answer.inconsistencies) ? [] : texts(answer, "inconsistencies"),
+    timeline_inconsistencies: absent(answer.timeline_inconsistencies) ? [] : texts(answer, "timeline_inconsistencies"),
     counts: { project: count("project"), task: count("task"), user: count("user") },
     links: !engine || absent(engine.links) ? 0 : number(engine, "links", "engine.links"),
     auth: auth && {
@@ -284,7 +288,8 @@ export async function doctor(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
           section: "Data",
           level: report.ok ? "ok" : "fail",
           title: `store "${tenant}" is intact`,
-          detail: report.ok ? `format ${report.format}, revision ${report.revision}` : report.messages.join("; "),
+          // A file that an earlier version wrote is sound as it is: the service brings it to the present format when it starts on it.
+          detail: report.ok ? `format ${report.format}${report.format !== null && report.format < FORMAT_VERSION ? `, which the service brings to format ${FORMAT_VERSION} at its next start` : ""}, revision ${report.revision}` : report.messages.join("; "),
           fix: "Stop the service and restore a backup: vigile restore-backup <backup file>",
         });
       }
@@ -428,7 +433,7 @@ export async function doctor(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
       let client: ServiceClient | null = null;
       try {
         client = clientFor(loaded, "admin", answerWithinMs);
-        status = readStatus(await client.get("/api/admin/status"));
+        status = readStatus(await client.get("/api/admin/status?check_timelines=true"));
         add({ section: "Service", level: "ok", title: "service is running", detail: `${health.name} ${health.version}, up ${duration(status.uptime_s)}, process ${status.pid}` });
         add({ section: "Service", level: "ok", title: "admin key works" });
       } catch (error) {
@@ -449,7 +454,7 @@ export async function doctor(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
             section: "Service",
             level: "fail",
             title: "service is running",
-            detail: `${health.name} ${health.version} answers at ${base}, and did not give its status: ${error instanceof NotVigile ? `it answered GET /api/admin/status, but not as a Vigile service does: ${reason}` : reason}`,
+            detail: `${health.name} ${health.version} answers at ${base}, and did not give its status: ${error instanceof NotVigile ? `it answered GET /api/admin/status?check_timelines=true, but not as a Vigile service does: ${reason}` : reason}`,
             fix: actions.length ? actions.join(" ") : "The service and this command line may be different versions: stop the service and start it again. If it stays so, check the service log.",
           });
         }
@@ -519,6 +524,14 @@ export async function doctor(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
           title: "graph is consistent",
           detail: broken.length ? broken.slice(0, 3).map(said).join("; ") : `${plural(status.counts.project, "project")}, ${plural(status.counts.task, "task")}, ${plural(status.counts.user, "user")}, ${plural(status.links, "link")}`,
           fix: "The stored graph is damaged. Restore from a backup, or repair the listed items.",
+        });
+        const timelines = status.timeline_inconsistencies;
+        add({
+          section: "Service",
+          level: timelines.length ? "fail" : "ok",
+          title: "status timelines are consistent",
+          detail: timelines.length ? timelines.slice(0, 3).map(said).join("; ") : "each project and task has a timeline that ends with its status",
+          fix: "A stored status timeline is damaged. Restore from a backup, or repair the listed items.",
         });
 
         const liveAuth = status.auth ?? { keyless_user: config.auth.keyless_user, users_with_keys: Object.keys(config.auth.keys), keys_of_someone_else: [] };

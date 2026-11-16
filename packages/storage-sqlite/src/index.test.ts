@@ -2,14 +2,15 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { once } from "node:events";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it, mock } from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { RevisionConflictError } from "@vigile/storage";
 import { runStorageContractTests } from "@vigile/storage/contract-tests";
-import { SqliteStorage, backupTenantFile, flushFolder, folderIsHeld, holdFile, holdFolder, holdTenantFiles, inspectTenantFile, needSqlite, readTenantFile, tenantFiles } from "./index.js";
+import { SqliteStorage, backupTenantFile, flushFolder, folderIsHeld, holdFile, holdFolder, holdTenantFiles, inspectTenantFile, needSqlite, openTenantFile, readTenantFile, tenantFiles, upgradeTenantFile } from "./index.js";
 import { stopProcess } from "./stop-process.js";
 
 it("does not follow a replacement link when SQLite opens a prepared backup destination", { skip: process.platform === "win32" }, () => {
@@ -575,6 +576,307 @@ it("read-only checks through a symlink include committed WAL records", async () 
   } finally {
     release?.();
     await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+/** The tables of a tenant file of format 1, to the letter as the store made them then: a file is held to that. */
+const FORMAT_1_TABLES = `
+CREATE TABLE head (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  format INTEGER NOT NULL,
+  revision INTEGER NOT NULL,
+  counters TEXT NOT NULL
+) STRICT;
+CREATE TABLE objects (
+  kind TEXT NOT NULL,
+  id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  text TEXT,
+  PRIMARY KEY (kind, id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE links (
+  from_kind TEXT NOT NULL,
+  from_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  to_kind TEXT NOT NULL,
+  to_id TEXT NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (from_kind, from_id, type, to_kind, to_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE history (
+  kind TEXT NOT NULL,
+  id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  at TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  action TEXT NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (kind, id, revision, seq)
+) STRICT, WITHOUT ROWID;
+`;
+
+/**
+ * A tenant file of format 1 in a folder of its own: the statuses each item has had are a list in its record.
+ * `objects` are the records, each under its kind and ID.
+ */
+function format1(objects: Record<string, unknown>): { directory: string; file: string } {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-format-1-"));
+  const file = join(directory, "default.sqlite");
+  const db = new DatabaseSync(file);
+  db.exec(FORMAT_1_TABLES);
+  db.prepare("INSERT INTO head VALUES (1, 1, 7, ?)").run(JSON.stringify({ task: 4, "prefix:OLD": 1 }));
+  for (const [key, data] of Object.entries(objects)) {
+    const [kind, id] = key.split(" ");
+    db.prepare("INSERT INTO objects VALUES (?, ?, 3, ?, ?)").run(kind!, id!, typeof data === "string" ? data : JSON.stringify(data), `Text of ${id}`);
+  }
+  db.prepare("INSERT INTO links VALUES ('project', 'ABC', 'contains', 'task', 'ABC-001', '{}')").run();
+  db.prepare("INSERT INTO history VALUES ('task', 'ABC-001', 7, 0, 't', '1', 'status_changed', '{}')").run();
+  db.close();
+  return { directory, file };
+}
+
+/** Everything a file holds, table by table, as it is stored. */
+function contents(file: string): Record<string, unknown[]> {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as Array<{ name: string }>).map((row) => row.name);
+    return Object.fromEntries(tables.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
+  } finally {
+    db.close();
+  }
+}
+
+const entry = (status: string, at: string, by = "3") => ({ status, at, by });
+
+it("sqlite: brings a file of format 1 to format 2 when it opens it: each timeline beside its record, entry for entry, and when a task was completed in its record", async () => {
+  const started = [entry("open", "t1"), entry("in_progress", "t2", "4")];
+  const twice = [entry("open", "t1"), entry("done", "t2"), entry("open", "t3"), entry("in_progress", "t4"), entry("done", "t5", "4")];
+  const { directory, file } = format1({
+    "project ABC": { title: "P", status: "ready", prefix: "ABC", timeline: [entry("open", "p1"), entry("ready", "p2")] },
+    "task ABC-001": { title: "Started", status: "in_progress", priority: 1.5, why: "line one\nline two\ttab \u{1F600} \\ \u2028", value: 1e21, size: -0.5, timeline: started },
+    "task ABC-002": { title: "Done twice, said with \"quotes\" and ünicode", status: "done", nested: { timeline: ["not this one"] }, timeline: twice },
+    "task ABC-003": { title: "Done and reopened", status: "open", timeline: [entry("open", "t1"), entry("done", "t2"), entry("open", "t3")] },
+    "user 3": { username: "agent1", type: "agent" },
+  });
+  const upgrades: unknown[] = [];
+  const store = new SqliteStorage({ directory, onUpgrade: (...told) => upgrades.push(told) });
+  try {
+    assert.deepEqual([inspectTenantFile("default", file).ok, inspectTenantFile("default", file).format], [true, 1], "sound as it is, before the store has opened it");
+    const snapshot = (await store.load("default"))!;
+    assert.deepEqual(upgrades, [["default", 1, 2]]);
+    // Migration advances the revision to invalidate any writer that still holds a format-1 snapshot.
+    assert.deepEqual(snapshot.head, { format: 2, revision: 8, counters: { task: 4, "prefix:OLD": 1 } });
+    assert.deepEqual(
+      snapshot.objects.map((record) => [record.kind, record.id, record.version, record.data]),
+      [
+        ["project", "ABC", 3, { title: "P", status: "ready", prefix: "ABC" }],
+        // What the record says besides is to the letter what it said: line breaks, a character of two code units, numbers.
+        ["task", "ABC-001", 3, { title: "Started", status: "in_progress", priority: 1.5, why: "line one\nline two\ttab \u{1F600} \\ \u2028", value: 1e21, size: -0.5, completed_at: null }],
+        // Completed at the moment of the last entry that says so; what else the record holds is as it was.
+        ["task", "ABC-002", 3, { title: "Done twice, said with \"quotes\" and ünicode", status: "done", nested: { timeline: ["not this one"] }, completed_at: "t5" }],
+        ["task", "ABC-003", 3, { title: "Done and reopened", status: "open", completed_at: null }],
+        ["user", "3", 3, { username: "agent1", type: "agent" }],
+      ],
+    );
+    const timeline = async (kind: string, id: string) => (await store.readTimeline("default", kind, id)).records.map((record) => [record.place, record.data]);
+    assert.deepEqual(await timeline("project", "ABC"), [[0, entry("open", "p1")], [1, entry("ready", "p2")]]);
+    assert.deepEqual(await timeline("task", "ABC-001"), started.map((data, place) => [place, data]));
+    assert.deepEqual(await timeline("task", "ABC-002"), twice.map((data, place) => [place, data]));
+    assert.deepEqual(await timeline("user", "3"), []);
+    // What is not the records is as it was: the long text, the links, the history.
+    assert.equal(await store.readText("default", "task", "ABC-002"), "Text of ABC-002");
+    assert.equal(snapshot.links.length, 1);
+    assert.deepEqual((await store.readHistory("default", "task", "ABC-001")).map((h) => [h.revision, h.action]), [[7, "status_changed"]]);
+    assert.deepEqual([inspectTenantFile("default", file).ok, inspectTenantFile("default", file).format, inspectTenantFile("default", file).revision], [true, 2, 8]);
+    // What bringing the file over wrote is in the file, not in a log of changes left beside it for the next stop.
+    assert.equal(statSync(`${file}-wal`).size, 0);
+    // The next entry of a timeline that was carried over goes after its last.
+    await assert.rejects(
+      store.commit("default", { expectedRevision: 7, counters: snapshot.head.counters, changes: [{ op: "add_timeline", record: { kind: "task", id: "ABC-001", data: entry("done", "t9") } }] }),
+      RevisionConflictError,
+      "a pre-migration writer cannot commit its stale inline timeline",
+    );
+    await store.commit("default", { expectedRevision: 8, counters: snapshot.head.counters, changes: [{ op: "add_timeline", record: { kind: "task", id: "ABC-001", data: entry("done", "t9") } }] });
+    assert.deepEqual((await timeline("task", "ABC-001")).at(-1), [2, entry("done", "t9")]);
+    await store.close();
+    // Opened again, the file is of the present format: nothing is brought anywhere a second time.
+    const again = new SqliteStorage({ directory, onUpgrade: (...told) => upgrades.push(told) });
+    assert.equal((await again.load("default"))?.head.revision, 9);
+    assert.equal((await again.readTimeline("default", "task", "ABC-001")).total, 3);
+    assert.equal(upgrades.length, 1);
+    await again.close();
+  } finally {
+    await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("sqlite: inspects the format and schema from one snapshot while a format-1 migration commits", () => {
+  const { directory, file } = format1({ "task 001": { status: "open", timeline: [entry("open", "t1")] } });
+  const writer = new DatabaseSync(file);
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  try {
+    writer.exec("PRAGMA journal_mode = WAL");
+    const oldRevision = (writer.prepare("SELECT revision FROM head WHERE id = 1").get() as { revision: number }).revision;
+    let migrated = false;
+    mock.method(DatabaseSync.prototype, "prepare", (function (this: DatabaseSync, sql: string) {
+      const statement = originalPrepare.call(this, sql);
+      if (sql !== "SELECT format, revision FROM head WHERE id = 1") return statement;
+      return new Proxy(statement, {
+        get(target, property, receiver) {
+          if (property === "get") {
+            return (...values: any[]) => {
+              const found = target.get(...values);
+              if (!migrated) {
+                migrated = true;
+                assert.equal(upgradeTenantFile(file), 1, "the migration commits after inspection has read the old head");
+              }
+              return found;
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }) as typeof originalPrepare);
+
+    const during = inspectTenantFile("default", file);
+    assert.deepEqual([during.ok, during.format, during.revision], [true, 1, oldRevision], "the inspection stays on its original schema snapshot");
+    mock.restoreAll();
+    const after = inspectTenantFile("default", file);
+    assert.deepEqual([after.ok, after.format, after.revision], [true, 2, oldRevision + 1], "the next inspection sees the migrated format and revision");
+  } finally {
+    mock.restoreAll();
+    writer.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("sqlite: reading a missing tenant timeline does not create its file", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-missing-timeline-"));
+  const store = new SqliteStorage({ directory });
+  try {
+    assert.deepEqual(await store.readTimeline("ghost", "task", "001"), { records: [], total: 0 });
+    assert.deepEqual(store.listTenants(), []);
+    assert.equal(existsSync(join(directory, "ghost.sqlite")), false);
+  } finally {
+    await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("sqlite: carries over what a damaged record of format 1 holds as it is, for whoever checks the file to find", async () => {
+  const { directory } = format1({
+    // Done, with no entry that says so: there is no moment at which it was completed.
+    "task 001": { status: "done", timeline: [entry("open", "t1")] },
+    "task 002": { status: "done", timeline: [] },
+    "task 003": { status: "open", timeline: null },
+    "task 004": { status: "done" },
+    // Entries that are no records, among ones that are.
+    "task 005": { status: "done", timeline: [7, "done", true, null, ["done"], entry("done", "t6"), { status: "done", at: 8 }] },
+    "task 006": { status: "done", timeline: "done" },
+    "project ABC": { status: "open", timeline: { status: "open" } },
+  });
+  const store = new SqliteStorage({ directory });
+  try {
+    const snapshot = (await store.load("default"))!;
+    assert.deepEqual(
+      snapshot.objects.map((record) => [record.id, record.data]),
+      [
+        ["ABC", { status: "open" }],
+        ["001", { status: "done", completed_at: null }],
+        ["002", { status: "done", completed_at: null }],
+        ["003", { status: "open", completed_at: null }],
+        ["004", { status: "done", completed_at: null }],
+        ["005", { status: "done", completed_at: 8 }],
+        ["006", { status: "done", completed_at: null }],
+      ],
+    );
+    const stored = (id: string) => {
+      const db = new DatabaseSync(join(directory, "default.sqlite"), { readOnly: true });
+      try {
+        return (db.prepare("SELECT data FROM timeline WHERE id = ? ORDER BY place").all(id) as Array<{ data: string }>).map((row) => JSON.parse(row.data));
+      } finally {
+        db.close();
+      }
+    };
+    assert.deepEqual(stored("001"), [entry("open", "t1")]);
+    assert.deepEqual([stored("002"), stored("003"), stored("004"), stored("006"), stored("ABC")], [[], [], [], [], []], "a list that is none leaves no entries");
+    assert.deepEqual(stored("005"), [7, "done", 1, null, ["done"], entry("done", "t6"), { status: "done", at: 8 }]);
+    // An entry that is no record is what the check of the file names.
+    assert.match(inspectTenantFile("default", join(directory, "default.sqlite")).messages.join("; "), /an entry in the timeline of task 005, at place 0, is not a record/);
+  } finally {
+    await store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("sqlite: brings a file to the present format whole or not at all, and says which file it could not bring there", async () => {
+  // A record that cannot be read, after one that can: the first is not left changed when the second fails.
+  const unread = format1({ "task 001": { status: "done", timeline: [entry("open", "t1"), entry("done", "t2")] }, "task 002": "{not a record" });
+  // And a file in which the very last step fails, after every timeline was carried over: the number of the format.
+  const late = format1({ "task 001": { status: "done", timeline: [entry("open", "t1"), entry("done", "t2")] }, "project ABC": { status: "open", timeline: [entry("open", "p1")] } });
+  const db = new DatabaseSync(late.file);
+  db.exec("CREATE TRIGGER stays BEFORE UPDATE OF format ON head BEGIN SELECT RAISE(ABORT, 'the format stays'); END");
+  db.close();
+  try {
+    for (const { directory, file, why } of [{ ...unread, why: /malformed JSON/ }, { ...late, why: /the format stays/ }]) {
+      const before = contents(file);
+      const store = new SqliteStorage({ directory, onUpgrade: () => assert.fail("nothing was brought anywhere") });
+      await assert.rejects(store.load("default"), (error: Error) => error.message.startsWith(`The data file ${file} is in format 1, from an earlier version of the service, and could not be brought to format 2 (`) && why.test(error.message) && /Nothing in it was changed\. Restore a backup, or start it with the version that wrote it\.$/.test(error.message));
+      await store.close();
+      assert.deepEqual(contents(file), before, "every table and every row is as it was, and there is no table for timelines");
+      assert.deepEqual(Object.keys(before), ["head", "history", "links", "objects"]);
+      // The copy of a backup that is about to be restored is brought there the same way, and fails the same way.
+      assert.throws(() => upgradeTenantFile(file), why);
+      assert.deepEqual(contents(file), before);
+    }
+    // With what stood in the way gone, the same file is brought to the present format.
+    const mended = new DatabaseSync(late.file);
+    mended.exec("DROP TRIGGER stays");
+    mended.close();
+    assert.equal(upgradeTenantFile(late.file), 1);
+    assert.equal(upgradeTenantFile(late.file), null, "a second time there is nothing to do");
+    const reader = openTenantFile(late.file);
+    try {
+      assert.deepEqual(reader.snapshot()?.objects.map((record) => record.data), [{ status: "open" }, { status: "done", completed_at: "t2" }]);
+      assert.deepEqual(reader.timeline("task", "001", { limit: 1 }), { records: [{ kind: "task", id: "001", place: 1, data: entry("done", "t2") }], total: 2 });
+    } finally {
+      reader.close();
+    }
+  } finally {
+    rmSync(unread.directory, { recursive: true, force: true });
+    rmSync(late.directory, { recursive: true, force: true });
+  }
+});
+
+it("sqlite: holds a file to the tables of the format it says it is in: no more than format 1 had, no less than the present one has", async () => {
+  const { directory, file } = format1({ "task 001": { status: "open", timeline: [entry("open", "t1")] } });
+  const change = (sql: string) => {
+    const db = new DatabaseSync(file);
+    db.exec(sql);
+    db.close();
+  };
+  const found = () => inspectTenantFile("default", file).messages.join("; ");
+  try {
+    assert.equal(found(), "ok");
+    // A table for timelines in a file that says its timelines are in its records.
+    change("CREATE TABLE timeline (kind TEXT, id TEXT, place INTEGER, data TEXT)");
+    assert.match(found(), /it has a table "timeline" that the store does not make/);
+    change("DROP TABLE timeline");
+    assert.equal(upgradeTenantFile(file), 1);
+    assert.equal(found(), "ok");
+    // And a file of the present format without that table, or with its entries out of place.
+    change("UPDATE timeline SET place = 2");
+    assert.match(found(), /the timeline of task 001 has entries missing: their places are not counted from 0 without a gap/);
+    change("UPDATE timeline SET place = 0; ALTER TABLE timeline RENAME TO statuses");
+    assert.match(found(), /it has no table "timeline"/);
+    change("ALTER TABLE statuses RENAME TO timeline; UPDATE head SET format = 3");
+    assert.match(found(), /data format 3 is newer than this version understands \(2\)/);
+  } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });

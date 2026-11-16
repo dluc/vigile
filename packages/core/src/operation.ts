@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import type { GraphView } from "./graph.js";
-import { RETIRED_PREFIX, type CounterName, type Link, type Node, type Ref, type UserNode, type UserType } from "./model.js";
+import { RETIRED_PREFIX, type CounterName, type Link, type Node, type Ref, type StatusEntry, type UserNode, type UserType } from "./model.js";
 
 export interface Clock {
   now(): Date;
@@ -44,6 +44,15 @@ export interface HistoryPage {
   earlier?: HistoryPlace;
 }
 
+export interface TimelinePage {
+  /** Oldest first, each with its actual place in storage, including gaps in damaged timelines. */
+  entries: Array<StatusEntry & { place: number }>;
+  /** How many statuses the item went through in all. */
+  total: number;
+  /** The place in the timeline of the first entry of this page. Above 0, there are entries before it. */
+  from: number;
+}
+
 export interface ReadContext {
   /**
    * The plan as the engine has it at the moment this is asked. A read that waits for the store asks again after
@@ -67,6 +76,10 @@ export interface ReadContext {
   unchangedSince(ref: Ref): number;
   /** The latest recorded changes to an item, or the latest before a given one: at most a page of them, without reading the rest. */
   readHistoryPage(ref: Ref, before?: HistoryPlace): Promise<HistoryPage>;
+  /** Every status an item went through, oldest first. For the one operation that moves them; a timeline is shown a page at a time. */
+  readTimeline(ref: Ref): Promise<StatusEntry[]>;
+  /** The latest statuses an item went through, or the latest before a place in its timeline: at most a page of them, without reading the rest. */
+  readTimelinePage(ref: Ref, before?: number): Promise<TimelinePage>;
   /**
    * Whether the store is at the revision of the plan in memory. Asked after reading text or history beside the
    * plan: the revision only goes up, so a store that is still where the plan in memory is was there during the
@@ -87,7 +100,11 @@ export type Mutation =
   | { t: "remove"; ref: Ref }
   | { t: "link"; link: Link }
   | { t: "unlink"; link: Pick<Link, "from" | "type" | "to"> }
-  | { t: "history"; ref: Ref; action: string; data: Record<string, unknown> };
+  | { t: "history"; ref: Ref; action: string; data: Record<string, unknown> }
+  /** The item has taken a status: the next entry of its timeline. */
+  | { t: "status"; ref: Ref; entry: StatusEntry }
+  /** Gives entries in a timeline range another moment, optionally only when their old moment is later. */
+  | { t: "moment"; ref: Ref; from: number; to: number; at: string; atAfter?: string };
 
 /** The changes one write operation wants. Nothing happens until the engine commits them as one step. */
 export class Plan {
@@ -134,6 +151,19 @@ export class Plan {
 
   history(ref: Ref, action: string, data: Record<string, unknown> = {}): void {
     this.mutations.push({ t: "history", ref: { kind: ref.kind, id: ref.id }, action, data });
+  }
+
+  /**
+   * Adds the status an item has taken to its timeline. To be planned together with the item itself, which says
+   * what its status is: the last entry of a timeline is the status the item has.
+   */
+  status(ref: Ref, entry: StatusEntry): void {
+    this.mutations.push({ t: "status", ref: { kind: ref.kind, id: ref.id }, entry });
+  }
+
+  /** Gives the entries of an item's timeline from one place to another, both included, another moment. */
+  moment(ref: Ref, from: number, to: number, at: string, atAfter?: string): void {
+    this.mutations.push({ t: "moment", ref: { kind: ref.kind, id: ref.id }, from, to, at, ...(atAfter === undefined ? {} : { atAfter }) });
   }
 }
 
