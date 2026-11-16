@@ -169,7 +169,7 @@ const TOPICS: Record<GuideTopic, Topic> = {
 
 ## Calculated for you, never stored
 - next: an open task with nothing unfinished in front of it, reached through an active path of projects and groups. list_next_tasks lists these.
-- waiting: an open task that depends on something unfinished, or for which every path through its containers is inactive. waiting_for says on what.
+- waiting: an unfinished task that depends on something unfinished, or for which every path through its containers is inactive. A draft can be waiting; only an open task can be next. waiting_for says what blocks it.
 - progress: for a task that contains tasks, and for a project, how many of the tasks inside are finished.
 - problems: contradictions in the plan, such as a finished task whose dependency was reopened.
 
@@ -196,11 +196,11 @@ get_guide with topic "organising" shows the ways to structure work. "working" is
 - To read a plan from the top, call list_tasks with top_level. To open one part, call list_tasks or list_next_tasks with parent.
 
 ## Order
-- "depends on" says one task must be finished before another can start. Give depends_on when creating a task, or add_link later.
-- Depend on a group to wait for a whole feature, or on a project to wait for a whole project, with one link.
+- "depends on" says one task must be finished before another can start. Give depends_on when creating a task, or add_link later. A dependency on a task or group clears when that item is done or cancelled.
+- A project dependency clears when the project is ready or cancelled, even if it still has unfinished tasks; a ready project with unfinished tasks is flagged as a problem.
 - Containment directs execution as well as presentation. list_next_tasks compares the priority of the outermost group first, then each nested group, then the task. A group comes before what it contains. A task in several groups uses its highest active path; one with no group uses its own priority.
 - A group is active while open or in progress. A project is active until ready or cancelled. Where every path is inactive, the task waits and has a problem that names the containers to reopen. Dependencies and assignments still decide whether it can start.
-- Among tasks on the same priority path, value and size help the caller choose; they do not sort the list.
+- Tasks on the same priority path are listed by ID for a stable order; ID is not a priority. Value and size help the caller choose, but do not sort the list.
 
 ## What a task says
 - Title: say the outcome, not only the area. "Checkout: a customer can pay for a basket" tells a reader what will exist; "Checkout" or "Web page" does not. A group's title matters most, because it is what the high-level view shows.

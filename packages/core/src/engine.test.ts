@@ -519,16 +519,27 @@ describe("dependencies", () => {
     const { agent } = await setup();
     await agent("create_project", { title: "Platform", prefix: "PLT" });
     await agent("create_project", { title: "App", prefix: "APP" });
+    const platformTask = await agent("create_task", task("Still unfinished", { project: "PLT" }));
     const t = await agent("create_task", task("Use the platform", { project: "APP", depends_on: ["PLT"] }));
     assert.deepEqual(t.waiting_for, ["PLT"]);
     await agent("set_project_status", { id: "PLT", version: 1, status: "in_preview" });
     assert.equal((await agent("get", { id: t.id })).is_waiting, true);
     await agent("set_project_status", { id: "PLT", version: 2, status: "ready" });
-    assert.equal((await agent("get", { id: t.id })).is_next, true);
+    const readyDependent = await agent("get", { id: t.id });
+    assert.deepEqual([readyDependent.is_waiting, readyDependent.is_next, readyDependent.waiting_for], [false, true, []], "a project dependency clears at ready even while one of its tasks remains open");
+    assert.equal((await agent("get", { id: platformTask.id })).is_waiting, true, "unfinished tasks inside a ready project wait on its inactive path");
+    assert.equal((await agent("get", { id: "PLT" })).has_problems, true, "unfinished tasks inside a ready project are reported");
     await agent("set_project_status", { id: "PLT", version: 3, status: "broken" });
     const read = await agent("get", { id: t.id });
     assert.equal(read.is_waiting, true);
     assert.equal(read.problems[0].code, "depends_on_broken_project");
+  });
+
+  it("reports an unfinished dependency on a draft without making it next", async () => {
+    const { agent } = await setup();
+    const blocker = await agent("create_task", task("Blocker"));
+    const draft = await agent("create_task", task("Draft with a dependency", { draft: true, depends_on: [blocker.id] }));
+    assert.deepEqual([draft.status, draft.is_waiting, draft.is_next, draft.waiting_for], ["draft", true, false, [blocker.id]]);
   });
 
   it("does not make contents inherit their container's dependencies", async () => {
@@ -769,12 +780,12 @@ describe("containers and projects", () => {
 });
 
 describe("next", () => {
-  it("lists startable tasks by priority, leaving out work assigned to someone else", async () => {
+  it("lists startable tasks by priority path then ID, not by value or size", async () => {
     const { agent, person } = await setup();
     const low = await agent("create_task", task("Low"));
-    const high = await agent("create_task", task("High", { priority: 5, value: 8, size: 3 }));
+    const high = await agent("create_task", task("High", { priority: 5, value: 100, size: 100 }));
     const theirs = await agent("create_task", task("Theirs", { priority: 9, assigned_to: ["user"] }));
-    const mine = await agent("create_task", task("Mine", { priority: 5, assigned_to: ["agent1"] }));
+    const mine = await agent("create_task", task("Mine", { priority: 5, value: 1, size: 1, assigned_to: ["agent1"] }));
     await agent("create_task", task("Waiting", { priority: 9, depends_on: [low.id] }));
     await agent("create_task", task("Draft", { priority: 9, draft: true }));
     const started = await agent("create_task", task("Started", { priority: 9 }));

@@ -91,6 +91,20 @@ describe("service over HTTP", () => {
     assert.deepEqual(body, { status: "ok", name: "test", version: "0.1.0" });
   });
 
+  it("omits successful reads from info logs and includes them at debug", async () => {
+    const before = running.logged.length;
+    assert.equal((await running.call("/api/list-projects", {})).status, 200);
+    assert.deepEqual(running.logged.slice(before), [], "info does not log successful reads");
+
+    const debug = await start({ VIGILE_LOG_LEVEL: "debug" });
+    try {
+      assert.equal((await debug.call("/api/list-projects", {})).status, 200);
+      assert.ok(debug.logged.some((line) => /op=list_projects caller=agent1 kind=read .*result=ok$/.test(line)));
+    } finally {
+      await debug.stop();
+    }
+  });
+
   it("treats a connection without a key as the keyless user", async () => {
     const { body } = await running.call("/api/instance");
     assert.deepEqual(body.you, { username: "agent1", type: "agent", keyless: true });

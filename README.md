@@ -200,12 +200,16 @@ Nothing here is required. A task with a title and a description is a valid plan.
   set to it. Groups can hold groups. `list_tasks` with `top_level` reads the
   plan from the top; with `parent` it opens one group.
 - **Dependencies.** Give `depends_on` when creating a task, or `add_link` with
-  `"depends on"` later. Depend on a group or a project to wait for all of it
-  with one link.
+  `"depends on"` later. A dependency on a task or group clears when that item is
+  done or cancelled. A project dependency clears when the project is ready or
+  cancelled, even if it still has unfinished tasks; those tasks are reported as
+  a problem on the ready project.
 - **Types.** `task` is planned work. `bug`, `issue` and `incident` are problems,
   shown in their own colour.
 - **Why.** An optional reason for the work, for whoever picks the task up.
-- **Priority, value, size.** Among tasks that can start, priority decides first.
+- **Priority, value, size.** Priority paths order the tasks that can start. Tasks
+  on the same path are listed by ID for stability, not importance; value and
+  size help choose but do not sort the list.
 - **Drafts.** An idea nobody should start yet. It is never listed as next.
 
 `vigile get-guide --topic examples` prints complete sequences of calls for each
@@ -454,12 +458,15 @@ curl -s http://127.0.0.1:8700/api/list-next-tasks \
 
 Add `-H 'Authorization: Bearer vig_...'` to act as the user that key belongs to.
 
-A call that is refused gets the same answer whichever way it came:
+A call to a named operation that is refused gets the same answer whichever way
+it came:
 `{"error": {"code", "message", "actions"}}`, as the body over HTTP and as the
 text of a tool result marked as an error over MCP. That includes input the
 operation cannot take: a value of the wrong type, a required field that is
 missing or a field it does not know is `invalid_input`, with a message that
-names the field, and has its line in the log like any other refusal.
+names the field, and has its line in the log like any other refusal. A malformed
+MCP request that does not name a tool is a protocol error, not an operation, so
+it has no operation line in the log.
 
 `GET /api/events` is a stream of server-sent events for anything that wants to
 know when the plan changes. It sends `hello` on connecting and `change` after
@@ -543,9 +550,12 @@ admin = "vig_..."
   call the service do not: it is still what it was started as, and no longer
   what the config describes.
 
-A value that fails the check is never written, and a config that fails the check
-never starts the service. For one run, a setting can be overridden by an
-environment variable (`VIGILE_LISTEN_PORT`, `VIGILE_LISTEN_ADDRESS`,
+A value that can be checked and fails is never written, and a config that fails
+startup checks does not start the service. If no service runs on the config's
+data, `config set auth.keyless_user` is written unchecked with a warning; the
+service will not start if that user does not exist. For one run, a setting can
+be overridden by an environment variable (`VIGILE_LISTEN_PORT`,
+`VIGILE_LISTEN_ADDRESS`,
 `VIGILE_NAME`, `VIGILE_DATA_DIR`, `VIGILE_LOG_LEVEL`,
 `VIGILE_AUTH_KEYLESS_USER`, `VIGILE_BACKUP_ENABLED`,
 `VIGILE_BACKUP_EVERY_HOURS`, `VIGILE_BACKUP_FOLDER`, `VIGILE_BACKUP_KEEP`) or an
@@ -725,8 +735,10 @@ vigile restore-backup backups/default-20260112-091403-120-auto.sqlite
 
 ### Logs
 
-`serve` writes one line per operation to its output: the operation, the caller,
-how long it took and the result.
+At the default `info` level, `serve` logs each write and each failed operation,
+but omits successful reads. `debug` includes successful reads; `quiet` suppresses
+operation lines. Unexpected internal failures still produce warnings. Each
+operation line contains its name, caller, duration and result.
 
 ```
 2026-01-12T09:14:03.120Z op=set_task_status caller=agent1 kind=write ms=6.1 result=ok
@@ -803,9 +815,10 @@ reveal unfinished contents; that exceptional state is reported as a problem.
 ### What do "next" and "waiting" mean?
 
 A task is *next* when it is open and nothing unfinished is in front of it: it
-can start now. It is *waiting* when it is open and depends on something that is
-not done or cancelled yet; `waiting_for` names what. Neither is a status you
-set. They are worked out from the links each time you ask.
+can start now. An unfinished task is *waiting* when it depends on something
+unfinished or when every path through its containers is inactive; a draft can
+therefore be waiting too. `waiting_for` names what blocks it. Neither is a
+status you set; they are worked out from the links each time you ask.
 
 ### Why was my change refused with a conflict?
 
