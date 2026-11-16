@@ -90,10 +90,13 @@ async function instance(settings: Record<string, string> = {}): Promise<Instance
   initConfig(config, { name: "backups", port: await freePort() });
   for (const [key, value] of Object.entries(settings)) setValue(config, key, value);
   let running: Service | undefined;
+  let dataDir = join(directory, "data");
   const made: Instance = {
     directory,
     config,
-    data: join(directory, "data"),
+    get data() {
+      return dataDir;
+    },
     backups: join(directory, "backups"),
     clock: { now: START, mono: 1_000_000 },
     warnings: [],
@@ -102,16 +105,20 @@ async function instance(settings: Record<string, string> = {}): Promise<Instance
       return running!;
     },
     async start(times = {}, hooks = undefined, environment = {}, options = {}) {
-      running = await startService({
+      if (running && !running.server.listening) await waitForFolderRelease(dataDir);
+      const loaded = loadConfig(config, environment, options);
+      const service = await startService({
         backupHooks: hooks,
-        loaded: loadConfig(config, environment, options),
+        loaded,
         log: (line) => made.logged.push(line),
         warn: (line) => made.warnings.push(line),
         now: () => made.clock.now,
         monotonic: () => made.clock.mono,
         backupTimes: { firstMs: 1_000_000_000, checkMs: 1_000_000_000, ...times },
       });
-      return running;
+      dataDir = loaded.dataDir;
+      running = service;
+      return service;
     },
     automatic: (folder = made.backups) => automaticBackups(folder).sort((a, b) => a.at - b.at).map((backup) => backup.file.slice(folder.length + 1)),
     async pass(ms) {
@@ -131,7 +138,10 @@ async function instance(settings: Record<string, string> = {}): Promise<Instance
       return JSON.parse(lines.join("\n"));
     },
     async remove() {
-      await running?.stop();
+      if (running) {
+        await running.stop();
+        await waitForFolderRelease(dataDir);
+      }
       rmSync(directory, { recursive: true, force: true });
     },
   };
