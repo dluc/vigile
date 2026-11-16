@@ -51,7 +51,7 @@ for (const el of document.querySelectorAll("[hidden]")) {
 }
 {
   const shown = ["board", "graph-panel"].filter((id) => { const r = document.getElementById(id).getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-  const wanted = location.hash === "#graph" ? "graph-panel" : "board";
+  const wanted = location.hash.split("?")[0].split("/")[0] === "#graph" ? "graph-panel" : "board";
   if ([...document.querySelectorAll(".card, #graph-box canvas")].some((el) => el.getBoundingClientRect().width > 0) && !document.getElementById("main").hidden && (shown.length !== 1 || shown[0] !== wanted)) issues.add("VIEWS on screen: " + (shown.join(" and ") || "none") + "; expected only " + wanted);
 }
 if (innerWidth > 640) {
@@ -695,10 +695,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await load("/#board/project:WEB");
       await page.until("return document.querySelector('.detail-title')?.textContent === 'Website relaunch'", "a project named in the address");
       await page.key("Escape");
-      await page.click(".project .tag-button", 2);
-      await page.until("return !document.getElementById('panel').hidden", "the project's panel");
-      assert.equal(await page.run<string>("return location.hash"), "#board/project:WEB");
-      await page.key("Escape");
+      assert.equal(await count("#projects .tag-button"), 0, "project cards have no separate details button");
 
       await load("/#board/WEB-999");
       await page.until("return !document.getElementById('panel').hidden", "the panel for an address that names nothing");
@@ -888,7 +885,19 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     it("narrows to a project when its card is clicked, and shows an empty project as empty", async () => {
       await load();
       await page.click(".project-main", 2);
+      assert.equal(await page.run<string>("return location.hash"), "#board?project=WEB", "the existing project-selection toggle has a bookmarkable address");
       assert.match(await text("#scope"), /in WEB · Website relaunch/);
+      await load("/#board?project=WEB");
+      assert.match(await text("#scope"), /in WEB · Website relaunch/, "a shared selection address restores the selected project");
+      assert.equal(await page.run<string | null>("return document.querySelectorAll('.project-main')[2].getAttribute('aria-pressed')"), "true");
+      await page.click(".project-main", 2);
+      assert.equal(await page.run<string>("return location.hash"), "#board", "clicking the selected project still toggles selection off");
+      await page.run("history.back()");
+      await page.until("return location.hash === '#board?project=WEB'", "Back to restore the prior project selection");
+      assert.match(await text("#scope"), /in WEB · Website relaunch/);
+      await page.run("history.forward()");
+      await page.until("return location.hash === '#board'", "Forward to restore all projects");
+      await page.click(".project-main", 2);
       assert.match(await text("#summary"), /^53 tasks/);
       await page.click(".project-main", 0);
       assert.equal(await text("#empty"), "No tasks in this project.");
@@ -899,6 +908,92 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await layout("in the project with a very long title");
       await page.click(".project-main", 1);
       assert.match(await text("#scope"), /in all projects/);
+      await load("/#board?project=NO-SUCH-PROJECT&projectZoom=1");
+      assert.deepEqual(await page.run("return [location.hash, document.querySelectorAll('.project-main').length, document.querySelectorAll('.project-zoom[aria-pressed=\"true\"]').length]"), ["#board", 3, 0], "a project missing from the plan is removed from the bookmark");
+      await page.run("location.hash = '#board?project=GONE&projectZoom=1'");
+      await page.until("return location.hash === '#board'", "Back or a typed URL to remove an unknown project");
+      assert.equal(await count(".project-main"), 3, "a project missing on route navigation falls back to all projects");
+    });
+
+    it("zooms into one project, hides the others, and leaves back to its selection", async () => {
+      await load();
+      await page.click(".project-zoom", 2);
+      assert.equal(await page.run<string>("return location.hash"), "#board?project=WEB&projectZoom=1");
+      assert.deepEqual(await page.run("return [document.getElementById('projects-section').hidden, document.querySelectorAll('.project-main').length]"), [true, 0], "project zoom removes the project cards from view");
+      assert.match(await text("#summary"), /^53 tasks/);
+      assert.equal(await page.run<string>("return document.getElementById('leave-group').textContent.trim()"), "↑ Leave project");
+      await load("/#board?project=WEB&projectZoom=1");
+      assert.deepEqual(await page.run("return [location.hash, document.getElementById('projects-section').hidden, document.querySelectorAll('.project-main').length, document.getElementById('leave-group').hidden]"), ["#board?project=WEB&projectZoom=1", true, 0, false], "a project zoom bookmark restores the narrow view mode without its card");
+      await page.click("#view-graph");
+      await graphReady();
+      assert.equal(await page.run<string>("return location.hash"), "#graph?project=WEB&projectZoom=1", "switching views preserves the zoomed project");
+      assert.deepEqual(await page.run("return window.vigileGraph.nodes('[kind = \"project\"]').map((node) => node.data('ref'))"), ["WEB"], "the graph also hides projects outside the zoom");
+      await load("/#graph?project=WEB&projectZoom=1");
+      await graphReady();
+      assert.deepEqual(await page.run("return [location.hash, window.vigileGraph.nodes('[kind = \"project\"]').map((node) => node.data('ref'))]"), ["#graph?project=WEB&projectZoom=1", ["WEB"]], "a graph bookmark restores project zoom too");
+      await page.click("#view-board");
+      await page.click("#leave-group");
+      assert.equal(await page.run<string>("return location.hash"), "#board?project=WEB", "leaving zoom returns to the bookmarkable toggle selection");
+      assert.equal(await count(".project-main"), 3);
+      assert.match(await text("#summary"), /^53 tasks/);
+      await page.run("history.back()");
+      await page.until("return location.hash === '#board?project=WEB&projectZoom=1'", "Back to restore project zoom");
+      assert.equal(await count(".project-main"), 0);
+      await page.run("history.forward()");
+      await page.until("return location.hash === '#board?project=WEB'", "Forward to restore selection mode");
+      assert.equal(await count(".project-main"), 3);
+    });
+
+    it("moves keyboard focus to Leave project after zooming from expanded or folded projects", async () => {
+      await load();
+      const previousFold = await page.run<string | null>("return localStorage.getItem('vigile.projects')");
+      try {
+        for (const folded of [false, true]) {
+          for (const key of ["Enter", "Space"] as const) {
+            await page.run(`localStorage.setItem('vigile.projects', ${JSON.stringify(folded ? "folded" : "open")})`);
+            await load();
+            const selector = folded ? ".project-chip-zoom" : ".project-zoom";
+            await page.run(`document.querySelectorAll(${JSON.stringify(selector)})[2].focus()`);
+            await page.key(key);
+            await page.until("return location.hash === '#board?project=WEB&projectZoom=1'", `project zoom from ${folded ? "folded" : "expanded"} projects with ${key}`);
+            assert.equal(await page.run<string>("return document.activeElement?.id"), "leave-group", `${key} from ${folded ? "folded" : "expanded"} projects focuses Leave project`);
+          }
+        }
+      } finally {
+        await page.run(`if (${JSON.stringify(previousFold)} === null) localStorage.removeItem('vigile.projects'); else localStorage.setItem('vigile.projects', ${JSON.stringify(previousFold)})`);
+      }
+    });
+
+    it("restores keyboard focus to the selected numeric project after leaving zoom", async () => {
+      await load();
+      const previousFold = await page.run<string | null>("return localStorage.getItem('vigile.projects')");
+      const project = await run("create_project", { title: "Unprefixed focus target" }) as { id: string };
+      try {
+        for (const folded of [false, true]) {
+          await load();
+          const isFolded = await page.run<boolean>("return document.getElementById('projects-section').classList.contains('folded')");
+          if (isFolded !== folded) await page.click("#projects-fold");
+          const shownIds = await page.run<string[]>("return [...document.querySelectorAll('#projects .project-id')].map((item) => item.textContent)");
+          assert.ok(shownIds.includes(project.id), `project ${JSON.stringify(project)} is among displayed IDs ${JSON.stringify(shownIds)}`);
+          await page.run(`const id = ${JSON.stringify(project.id)}; const button = [...document.querySelectorAll('#projects .project-zoom, #projects .project-chip-zoom')].find((item) => item.closest('.project, .project-chip-wrap')?.querySelector('.project-id')?.textContent === id); if (!button) throw new Error('No zoom control for ' + id); button.focus()`);
+          await page.key("Enter");
+          await page.until("return document.getElementById('projects-section').hidden", "zoom into the numeric project");
+          await page.key("Enter");
+          await page.until("return !document.getElementById('projects-section').hidden", "leave the numeric project zoom");
+          assert.deepEqual(
+            await page.run("const at = document.activeElement; return [at.matches('.project-main'), at.matches('.project-chip'), at.querySelector('.project-id')?.textContent]"),
+            folded ? [false, true, project.id] : [true, false, project.id],
+            `leaving ${folded ? "folded" : "expanded"} project zoom restores focus by its displayed ID`,
+          );
+        }
+      } finally {
+        await page.run(`if (${JSON.stringify(previousFold)} === null) localStorage.removeItem('vigile.projects'); else localStorage.setItem('vigile.projects', ${JSON.stringify(previousFold)})`);
+        await page.run("location.hash = '#board'");
+        await page.until("return location.hash === '#board'", "show all projects before cleanup");
+        const current = await run("get", { kind: "project", id: project.id });
+        await run("delete", { kind: "project", id: project.id, version: current.version });
+        await load();
+      }
     });
 
     it("folds the projects into one small row, which still selects a project, and remembers it", async () => {
@@ -916,7 +1011,12 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.ok(await page.run<boolean>("const b = document.getElementById('board').getBoundingClientRect(); const s = document.getElementById('summary').getBoundingClientRect(); return Math.abs(s.top - b.bottom - 12) < 2"), "and still reaches to just above the docked counts");
       const row = await page.run<number>("return Math.round(document.getElementById('projects-section').getBoundingClientRect().height)");
       assert.ok(row <= 40, `the folded projects are one small row: ${row}px`);
-      await page.click(".project-chip", 2);
+      assert.equal(await count(".project-chip-zoom"), 3, "every folded project keeps a distinct zoom action");
+      await page.click(".project-chip-zoom", 2);
+      assert.equal(await page.run<string>("return location.hash"), "#board?project=WEB&projectZoom=1");
+      assert.deepEqual(await page.run("return [document.getElementById('projects-section').hidden, document.querySelectorAll('.project-chip').length]"), [true, 0], "project zoom removes folded project chips too");
+      await page.click("#leave-group");
+      assert.equal(await page.run<boolean>("return document.getElementById('projects-section').hidden"), false);
       assert.match(await text("#scope"), /in WEB · Website relaunch/);
       assert.equal(await page.run<string | null>("return document.querySelectorAll('.project-chip')[2].getAttribute('aria-pressed')"), "true");
       await layout("with the projects folded");
@@ -7626,7 +7726,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await open("/#board?zoom=1");
         const choose = (project: string) => page.run(`[...document.querySelectorAll('#projects .project-main')].find((main) => main.querySelector('.project-id').textContent === ${JSON.stringify(project)}).click()`);
         await choose("FLAT");
-        assert.deepEqual([await level(), await cards(), await hash()], [null, these("f1", "f2"), "#board?zoom=1"]);
+        assert.deepEqual([await level(), await cards(), await hash()], [null, these("f1", "f2"), "#board?project=FLAT&zoom=1"]);
         assert.match(await text("#summary"), /^2 tasks/);
         await layout("in a project with nothing to zoom");
         // The levels are those of what is in view: in the other project the groups are back, closed as the address says.
@@ -8330,7 +8430,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await page.until("return !document.getElementById('main').hidden && document.querySelectorAll('#board .card, #graph-box canvas').length > 0", "the page, once it is let in again");
       };
       const choose = (project: string) => page.run(`[...document.querySelectorAll('#projects .project-main')].find((main) => main.querySelector('.project-id').textContent === ${JSON.stringify(project)}).click()`);
-      const place = `#board?in=${z.alpha}/${z.sub}&zoom=1`;
+      const place = `#board?project=ZOO&in=${z.alpha}/${z.sub}&zoom=1`;
       const shown = async () => [await hash(), await level(), await cards(), await trail(), await page.run<string>("return document.title")];
       const there = [place, "Top level", these("s1", "s2", "s3", "deep*", "near"), `in ZOO › ${z.alpha} › ${z.sub} · Shared sub-group`, "zoom · Vigile"];
       try {
@@ -8386,7 +8486,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.deepEqual(await left(), []);
         // Back and Forward lead to addresses that name a group: they are put away as well, and nothing is shown for them.
         await travel("back", "#board");
-        assert.deepEqual([await left(), await page.run("return history.state.kept")], [[], { route: `#board?in=${z.alpha}&zoom=1`, project: "ZOO" }]);
+        assert.deepEqual([await left(), await page.run("return history.state.kept")], [[], { route: `#board?project=ZOO&in=${z.alpha}&zoom=1`, project: "ZOO" }]);
         await travel("forward", "#board");
         assert.deepEqual([await left(), await page.run("return history.state.kept.route")], [[], place]);
         // An address typed by hand while the page is locked out is put away too.
@@ -8413,40 +8513,47 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await refuse();
         await alter("delete", { id: z.sub! });
         await letIn();
-        assert.deepEqual([await hash(), await trail()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha`]);
+        assert.deepEqual([await hash(), await trail()], [`#board?project=ZOO&in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha`]);
         await plan("restore", { id: z.sub });
 
-        // The project is selected for the whole page and not for one entry of the history. Locked out two groups
-        // in and gone back one entry, the page comes back in that entry's place, in the same project: the entry is
-        // given the selection the page was locked out with, not the one it was emptied of.
+        // Project mode belongs to each history entry. Back through the selection and then to all projects while
+        // locked out; after authentication, Forward restores the selected and zoomed entries exactly.
         await open("/#board?zoom=1");
         await choose("ZOO");
         await into("alpha");
         await into("sub");
         await refuse();
         await travel("back", "#board");
-        assert.deepEqual(await page.run("return history.state.kept"), { route: `#board?in=${z.alpha}&zoom=1`, project: "ZOO" });
+        assert.deepEqual(await page.run("return history.state.kept"), { route: `#board?project=ZOO&in=${z.alpha}&zoom=1`, project: "ZOO" });
+        await travel("back", "#board");
+        assert.deepEqual(await page.run("return history.state.kept"), { route: "#board?project=ZOO&zoom=1", project: "ZOO" });
+        await travel("back", "#board");
+        assert.deepEqual(await page.run("return history.state.kept"), { route: "#board?zoom=1", project: null });
         await letIn();
-        assert.deepEqual([await hash(), await trail(), await cards()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha`, these("a1", "a2", "sub*", "both", "near")]);
+        assert.deepEqual([await hash(), await trail(), await cards()], ["#board?zoom=1", "in all projects", these(...TOP)]);
+        assert.equal(await page.run<string | null>("return document.querySelector('#projects .project.selected .project-id')?.textContent ?? null"), null);
+        await travel("forward", "#board?project=ZOO&zoom=1");
         assert.equal(await page.run<string>("return document.querySelector('#projects .project.selected .project-id')?.textContent"), "ZOO");
-        // The entry the page was locked out on still has its address put away. Come back to, it has it again.
+        await travel("forward", `#board?project=ZOO&in=${z.alpha}&zoom=1`);
+        assert.equal(await trail(), `in ZOO › ${z.alpha} · Alpha`);
         await travel("forward", place);
         assert.deepEqual([await shown(), await page.run("return history.state.kept")], [there, undefined]);
+        // The entry the page was locked out on still has its address put away. Come back to, it has it again.
         // The same after the page was loaded again while locked out, when all it knows is what was put away.
         await refuse();
         await page.run("window.before = true; location.reload()");
         await page.until("return !window.before && document.readyState === 'complete' && Boolean(document.getElementById('main')?.hidden) && !document.getElementById('notice').hidden", "the key form of the page that was loaded again");
         await travel("back", "#board");
-        assert.deepEqual([await left(), await page.run("return history.state.kept")], [[], { route: `#board?in=${z.alpha}&zoom=1`, project: "ZOO" }]);
+        assert.deepEqual([await left(), await page.run("return history.state.kept")], [[], { route: `#board?project=ZOO&in=${z.alpha}&zoom=1`, project: "ZOO" }]);
         await letIn();
-        assert.deepEqual([await hash(), await trail()], [`#board?in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha`]);
+        assert.deepEqual([await hash(), await trail()], [`#board?project=ZOO&in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha`]);
         // And when the other view was gone to while locked out, which is an entry of its own.
         await refuse();
         await page.click("#view-graph");
         await page.until("return location.hash === '#graph'", "the other view");
         assert.deepEqual(await left(), []);
         await letIn();
-        assert.deepEqual([await hash(), await trail()], ["#graph", "in ZOO · Zoo"]);
+        assert.deepEqual([await hash(), await trail()], [`#graph?project=ZOO&in=${z.alpha}&zoom=1`, `in ZOO › ${z.alpha} · Alpha`]);
 
         // What was typed into the filter is often a title. With everything above the board folded away it is also
         // in the line that says what is in view, and where the page says that nothing matches: all of it goes.
@@ -8455,7 +8562,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await page.type("Shared sub-group zzz");
         await page.click("#focus");
         assert.deepEqual(await page.run("return [document.querySelector('#scope .scope-text').textContent, document.getElementById('empty').textContent]"), [
-          `in all projects › ${z.alpha} › ${z.sub} · Shared sub-group, matching "Shared sub-group zzz", top level only`,
+          `in ZOO › ${z.alpha} › ${z.sub} · Shared sub-group, matching "Shared sub-group zzz", top level only`,
           'No task matches "Shared sub-group zzz".',
         ]);
         await refuse();
@@ -9186,7 +9293,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await press(M[40]!);
         await page.until("return !document.getElementById('panel').hidden && [...document.querySelectorAll('#detail .detail-head .pill')].some((pill) => pill.textContent === 'deleted')", "the panel of the task that is gone");
         assert.equal(await head(), `${title} | open | deleted`);
-        assert.equal(await page.run<string>("return location.hash"), `#graph/${M[40]}`);
+        assert.equal(await page.run<string>("return location.hash"), `#graph/${M[40]}?project=MID`);
         await page.key("Escape");
 
         // The same for a task that is deleted for good, of which the service knows nothing any more: the panel that
