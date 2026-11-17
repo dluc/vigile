@@ -164,6 +164,15 @@ export function checkTaskMove(graph: GraphView, task: TaskNode, to: TaskStatus, 
       });
     }
   }
+  if (to === "cancelled") {
+    const active = containedTasks(graph, task).filter((t) => t.status === "in_progress" || t.status === "in_review");
+    if (active.length) {
+      throw refused("active_contents", `${describe(task)} cannot be cancelled: it contains ${active.length} active task${active.length === 1 ? "" : "s"}.`, {
+        ...blockedBy(active),
+        actions: ["Finish the active tasks first.", `Or call remove_link with type "${CONTAINS}" to move them out of the container.`],
+      });
+    }
+  }
 }
 
 const blockingTypes = [CONTAINS, DEPENDS_ON];

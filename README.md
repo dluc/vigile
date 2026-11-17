@@ -839,6 +839,9 @@ group, including through a nested group, and tells you which container to
 reopen first. Reopening existing work or restoring deleted work can still
 reveal unfinished contents; that exceptional state is reported as a problem.
 
+Cancellation is refused while a group contains work that is in progress or in
+review, including through nested groups. Finish that work or move it out first.
+
 ### What do "next" and "waiting" mean?
 
 A task is *next* when it is open and nothing unfinished is in front of it: it

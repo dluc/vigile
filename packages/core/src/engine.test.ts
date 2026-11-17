@@ -1121,6 +1121,25 @@ describe("containers and projects", () => {
     assert.equal((await agent("set_task_status", { id: group.id, version: 1, status: "done" })).status, "done");
   });
 
+  it("refuses to cancel a container while it contains tasks in progress or in review", async () => {
+    const { agent } = await setup();
+    const group = await agent("create_task", task("Group"));
+    const sub = await agent("create_task", task("Sub-group", { parent: group.id }));
+    const working = await agent("create_task", task("Working below the sub-group", { parent: sub.id }));
+    const reviewing = await agent("create_task", task("In review directly inside", { parent: group.id }));
+    await agent("set_task_status", { id: working.id, version: 1, status: "in_progress" });
+    await agent("set_task_status", { id: reviewing.id, version: 1, status: "in_progress" });
+    await agent("set_task_status", { id: reviewing.id, version: 2, status: "in_review" });
+
+    const error = await refusal(agent("set_task_status", { id: group.id, version: 1, status: "cancelled" }));
+    assert.equal(error.rule, "active_contents");
+    assert.match(error.message, /contains 2 active tasks/);
+    assert.deepEqual(error.blocking?.map((item: any) => item.id).sort(), [working.id, reviewing.id].sort());
+    assert.match(error.actions?.[0] ?? "", /Finish the active tasks first/);
+    assert.match(error.actions?.[1] ?? "", /remove_link.*contains.*move them out/);
+    assert.equal((await agent("get", { id: group.id })).status, "open", "the refused cancellation changes nothing");
+  });
+
   it("counts progress over everything a project contains, at any depth", async () => {
     const { agent } = await setup();
     await agent("create_project", { title: "Alpha", prefix: "ABC" });
