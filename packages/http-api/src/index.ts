@@ -16,9 +16,15 @@ export interface ApiOptions {
    * changes, working out the status. What goes wrong inside an operation is the engine's to report.
    */
   onUnexpected?(error: unknown): void;
+  /**
+   * Whether a request was sent from the service's own machine over an address that is not always a machine's
+   * own, which only the service knows. Without it, only what comes from a loopback address is taken to be.
+   */
+  fromThisMachine?(request: IncomingMessage): boolean;
 }
 
-const MAX_BODY = 1024 * 1024;
+/** How large the body of a request may be, in bytes. */
+export const MAX_BODY = 1024 * 1024;
 /** How many clients may listen for changes at once. */
 const MAX_STREAMS = 200;
 /**
@@ -27,7 +33,14 @@ const MAX_STREAMS = 200;
  * taking every place.
  */
 const MAX_STREAMS_PER_ADDRESS = 32;
-const PING_MS = 20_000;
+/**
+ * How many of them may connect from this machine, whomever they say they speak for. A proxy on this machine is
+ * believed about the address of its client, and so is any other program on it: one that named a new address
+ * each time would take every place. What is left is for clients that connect from elsewhere themselves.
+ */
+const MAX_STREAMS_FROM_HERE = MAX_STREAMS - MAX_STREAMS_PER_ADDRESS;
+/** How often a client that listens is sent a line that says nothing, so that its connection is not taken for idle. */
+export const PING_MS = 20_000;
 
 export type ApiHandler = ((request: IncomingMessage, response: ServerResponse, url: URL) => Promise<void>) & {
   /** Ends every open stream of changes, so the server can stop. */
@@ -51,15 +64,31 @@ function clientAddress(request: IncomingMessage): string {
   const direct = request.socket?.remoteAddress ?? "";
   const forwarded = request.headers?.["x-forwarded-for"];
   const last = (Array.isArray(forwarded) ? forwarded.join(",") : forwarded)?.split(",").at(-1)?.trim();
-  const local = direct === "::1" || direct.startsWith("127.") || direct.startsWith("::ffff:127.");
-  return local && last ? last.slice(0, 64) : direct;
+  return fromLoopback(request) && last ? last.slice(0, 64) : direct;
+}
+
+/** Whether the request was sent from this machine to itself: by a program on it, or by a proxy on it for someone else. */
+function fromLoopback(request: IncomingMessage): boolean {
+  const direct = request.socket?.remoteAddress ?? "";
+  return direct === "::1" || direct.startsWith("127.") || direct.startsWith("::ffff:127.");
+}
+
+/**
+ * Why the body of a request is not read, when it is not, from what the request says of it before any of it has
+ * come: it does not say it is JSON, or it says it is larger than is taken.
+ */
+export function bodyRefused(request: IncomingMessage): VigileError | null {
+  const length = Number(request.headers["content-length"] ?? 0);
+  const hasBody = length > 0 || request.headers["transfer-encoding"] !== undefined;
+  if (hasBody && !/^application\/json\s*(;|$)/i.test(request.headers["content-type"] ?? "")) {
+    return new VigileError("invalid_input", "The request body must be JSON and say so.", { actions: ['Send the header "Content-Type: application/json".'] });
+  }
+  return length > MAX_BODY ? new VigileError("limit_exceeded", "The request body is larger than 1 MB.") : null;
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
-  const hasBody = Number(request.headers["content-length"] ?? 0) > 0 || request.headers["transfer-encoding"] !== undefined;
-  if (hasBody && !/^application\/json\s*(;|$)/i.test(request.headers["content-type"] ?? "")) {
-    throw new VigileError("invalid_input", "The request body must be JSON and say so.", { actions: ['Send the header "Content-Type: application/json".'] });
-  }
+  const refused = bodyRefused(request);
+  if (refused) throw refused;
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
@@ -96,6 +125,7 @@ export function createApiHandler(options: ApiOptions): ApiHandler {
   const { engine } = options;
   const streams = new Set<() => void>();
   const streamsFrom = new Map<string, number>();
+  let streamsFromHere = 0;
 
   /**
    * `GET /api/events`: a stream of server-sent events that says when the plan has changed. An event carries the
@@ -103,12 +133,21 @@ export function createApiHandler(options: ApiOptions): ApiHandler {
    */
   function stream(request: IncomingMessage, response: ServerResponse): void {
     const address = clientAddress(request);
-    const fromHere = streamsFrom.get(address) ?? 0;
-    if (streams.size >= MAX_STREAMS || fromHere >= MAX_STREAMS_PER_ADDRESS) {
-      const message = fromHere >= MAX_STREAMS_PER_ADDRESS ? `${MAX_STREAMS_PER_ADDRESS} clients at your address are already listening for changes.` : `${MAX_STREAMS} clients are already listening for changes.`;
-      throw new VigileError("too_many_requests", message, { actions: ["Close a page that is listening, or ask for changes with list_tasks instead."] });
-    }
-    streamsFrom.set(address, fromHere + 1);
+    // From this machine by whichever of its addresses: otherwise a program on it would have the places of the
+    // machine over one address and those of an address beyond it over another.
+    const here = fromLoopback(request) || (options.fromThisMachine?.(request) ?? false);
+    const atAddress = streamsFrom.get(address) ?? 0;
+    const full =
+      atAddress >= MAX_STREAMS_PER_ADDRESS
+        ? `${MAX_STREAMS_PER_ADDRESS} clients at your address are already listening for changes.`
+        : streams.size >= MAX_STREAMS
+          ? `${MAX_STREAMS} clients are already listening for changes.`
+          : here && streamsFromHere >= MAX_STREAMS_FROM_HERE
+            ? `${MAX_STREAMS_FROM_HERE} clients that connect from the service's own machine are already listening for changes.`
+            : null;
+    if (full) throw new VigileError("too_many_requests", full, { actions: ["Close a page that is listening, or ask for changes with list_tasks instead."] });
+    streamsFrom.set(address, atAddress + 1);
+    if (here) streamsFromHere++;
     response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", connection: "keep-alive", "x-accel-buffering": "no" });
     let ping: NodeJS.Timeout | undefined;
     let unsubscribe = (): void => {};
@@ -122,6 +161,7 @@ export function createApiHandler(options: ApiOptions): ApiHandler {
       const left = (streamsFrom.get(address) ?? 1) - 1;
       if (left > 0) streamsFrom.set(address, left);
       else streamsFrom.delete(address);
+      if (here) streamsFromHere--;
       response.end();
     };
     /**

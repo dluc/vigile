@@ -1,16 +1,17 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isIP, type Socket } from "node:net";
 import { uptime } from "node:os";
 import { join } from "node:path";
 import { LiveAuth, masked, saidNothingOf, staleKeys, type LoadedConfig } from "@vigile/config";
 import { Engine, VERSION, VigileError, echo, readAll, type OperationLog } from "@vigile/core";
-import { createApiHandler, sendError } from "@vigile/http-api";
-import { createMcpHandler } from "@vigile/mcp";
+import { bodyRefused, createApiHandler, sendError } from "@vigile/http-api";
+import { createMcpHandler, mcpBodyRead } from "@vigile/mcp";
 import { SqliteStorage, everHeld, holdFolder } from "@vigile/storage-sqlite";
 import { serveWeb } from "@vigile/web";
 import { BACKUP_TIMES, startBackups, type BackupSchedule } from "./backup-schedule.js";
 import { BACKUPS_LOCK, backupMemory, backupPlaceRefused, refusedPlace, sqliteBackups, unknownRefusal, type BackupHooks } from "./backup.js";
+import { Connections } from "./connections.js";
 import { recoverAtStart } from "./restore.js";
 import { codeStamp } from "./stamp.js";
 
@@ -55,8 +56,30 @@ export const LIMITS = {
   headersMs: 15_000,
   /** How often connections are looked at for having taken too long. */
   checkMs: 5_000,
-  /** How many connections may be open at once. Further ones are refused until some close. */
+  /**
+   * How long a connection may go without a byte moving either way. An answer that the client does not read, and
+   * a request that is never answered, would otherwise keep their connection for good. For an answer on its way
+   * out, a byte moves when the system takes more of it off the service, which it does as the client reads. Each
+   * time the limit passes, it is looked at how much of the answer still waits, and the connection is closed when
+   * that is as much as the time before: between one and two limits after the last of it could be handed on. So
+   * a client that reads on, with pauses shorter than the limit, gets all of its answer, and one that takes so
+   * little that nothing more can be handed on counts as one that does not read. A stream of changes says
+   * something more often than the limit.
+   */
+  idleMs: 60_000,
+  /** How many connections may be open at once. See `Connections` for who gets one when there are no more. */
   connections: 1024,
+  /**
+   * How many of them one address beyond this machine may hold: room for some dozen browsers and agents behind
+   * one address, and sixteen such addresses before they hold all there is for them.
+   */
+  connectionsPerAddress: 64,
+  /**
+   * How many are left to this machine, whatever other addresses hold: the command line and the doctor get
+   * through while the network is busy. This machine itself has no share of its own: a proxy on it speaks for
+   * everyone it serves.
+   */
+  connectionsKeptForHere: 32,
   /**
    * How many requests one connection may have sent that are not answered yet. A client that waits for each
    * answer before it asks again has one, and two for the moment in which its next request is read before the
@@ -408,6 +431,7 @@ export async function startService(options: ServiceOptions): Promise<Service> {
     engine,
     caller,
     instance,
+    fromThisMachine: (request) => connections.fromHere(request.socket),
     onUnexpected: (error) => warn(`A request to the API failed unexpectedly: ${explain(error)}`),
     adminStatus: () => ({
       pid: process.pid,
@@ -428,9 +452,16 @@ export async function startService(options: ServiceOptions): Promise<Service> {
   // Set once the service listens, from the address it is then bound to. The config may write a loopback address
   // in a way that does not look like one (127.1, a name of the machine's own): the address bound is what counts.
   let loopbackOnly = isLoopback(config.listen.address);
+  const connections = new Connections(limits, (closed, refused) =>
+    warn(`The service has no connection left to give: since this was last said, ${closed} idle or stalled ${closed === 1 ? "connection was" : "connections were"} closed to make room, and ${refused} new ${refused === 1 ? "one was" : "ones were"} refused.`),
+  );
   /** How many requests each connection has sent that are not answered yet. */
   const unanswered = new WeakMap<Socket, number>();
-  const server = createServer({ requestTimeout: limits.requestMs, headersTimeout: Math.min(limits.headersMs, limits.requestMs), connectionsCheckingInterval: limits.checkMs }, (request, response) => {
+  /**
+   * Answers a request. `asksFirst` is a request that waits to be told to go ahead before it sends its body: it
+   * is told so only where the body would be read, and is otherwise answered as it is.
+   */
+  const answer = (request: IncomingMessage, response: ServerResponse, asksFirst: boolean): void => {
     const { socket } = request;
     // Requests that arrive in one piece are all handed over before the connection is seen to be closed: what
     // came with the one that was one too many is not looked at.
@@ -441,6 +472,7 @@ export async function startService(options: ServiceOptions): Promise<Service> {
     // An answer is out when all of it has been handed to the connection, which for one that waits behind others
     // is when its turn has come. A connection that closes first takes its count with it.
     response.once("finish", () => unanswered.set(socket, (unanswered.get(socket) ?? 1) - 1));
+    connections.began(request, response);
     // Whatever is answered is what its type says it is, whichever part of the service answers.
     response.setHeader("x-content-type-options", "nosniff");
     // Everything a request can set off happens in here, so that nothing it throws ends the service.
@@ -469,6 +501,7 @@ export async function startService(options: ServiceOptions): Promise<Service> {
           }),
         );
       }
+      if (asksFirst && guarded && request.method === "POST" && wouldBeRead(request, url)) response.writeContinue();
       if (url.pathname === "/mcp") return mcp(request, response);
       if (url.pathname === "/health" || guarded) return api(request, response, url);
       if ((request.method === "GET" || request.method === "HEAD") && serveWeb(response, url.pathname, request.method === "HEAD", (error) => warn(`The page's file ${url.pathname} could not be read: ${explain(error)}`))) return;
@@ -484,15 +517,33 @@ export async function startService(options: ServiceOptions): Promise<Service> {
         response.destroy();
       }
     });
-  });
-
-  server.maxConnections = limits.connections;
+  };
+  /**
+   * Whether a request to the API or to MCP is told to send its body: its caller may connect, and the body is
+   * one that would be read, by what the request says of it. Whatever answers the request refuses it for the same
+   * reasons, without the body.
+   */
+  const wouldBeRead = (request: IncomingMessage, url: URL): boolean => {
+    try {
+      caller(request);
+    } catch {
+      return false;
+    }
+    return url.pathname === "/mcp" ? mcpBodyRead(request) : bodyRefused(request) === null;
+  };
+  const server = createServer({ requestTimeout: limits.requestMs, headersTimeout: Math.min(limits.headersMs, limits.requestMs), connectionsCheckingInterval: limits.checkMs }, (request, response) => answer(request, response, false));
+  server.on("checkContinue", (request, response) => answer(request, response, true));
+  server.on("connection", (socket) => void connections.connected(socket));
+  // With nobody listening for it, a connection that has gone this long without a byte is closed.
+  server.timeout = limits.idleMs;
 
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(config.listen.port, config.listen.address, () => {
         server.off("error", reject);
+        // Whatever goes wrong with the server from here on is said, and does not end the service.
+        server.on("error", (error) => warn(`The server reported an error: ${explain(error)}`));
         const bound = server.address();
         if (bound && typeof bound === "object") loopbackOnly = isLoopback(bound.address);
         resolve();

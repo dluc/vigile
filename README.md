@@ -800,6 +800,26 @@ changes before the service faces a network:
   behalf of a page the service did not serve is refused, over the API and over
   MCP, and the API reads a body only when it says it is JSON. A page you happen
   to have open cannot write to the plan through your browser.
+- **No client holds the service for itself.** The service has 1,024
+  connections. An address beyond its own machine holds at most 64 of them, an
+  IPv6 network of 64 bits counting as one address, and 32 are always left to
+  the machine itself, so the command line and the doctor get through while the
+  network is busy. What connects from one of the machine's own addresses is
+  the machine itself, also when the service listens on an address of a
+  network. When a new connection finds no room, one that is doing less gives
+  way to it: the one idle the longest, then one whose request is still
+  arriving, then one that does not read its answer. A connection whose request
+  is being answered is never closed to make room; only then is the new one
+  refused. A connection on which nothing moves for a minute is closed. An
+  answer on its way out moves as its client reads it: when no more of it could
+  be sent for one to two minutes, the connection is closed. A client that reads
+  on with pauses shorter than a minute gets its answer whole; one that takes
+  too little for more to be sent counts as not reading. A proxy on the same
+  machine speaks for everyone it serves and shares the machine's connections
+  among them. Of the 200 clients that may listen for changes, 32 may come from
+  one address and 168 from the machine itself, by whichever of its addresses
+  and whomever they say they speak for. The service says in its log, at most
+  once a minute, when it had to close or refuse connections.
 - **On this machine only, it answers only to this machine's names.** While it
   listens on `127.0.0.1`, a request that calls it anything but `localhost` or a
   loopback address is refused, so a site that points a name of its own at your
