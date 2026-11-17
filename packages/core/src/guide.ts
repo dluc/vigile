@@ -247,7 +247,7 @@ get_guide with topic "examples" shows complete sequences of calls for these shap
 - When work turns out to have several steps, create them inside the task with parent: the task becomes a group and reports its progress.
 - When a task turns out to need another first, add_link with "depends on".
 - When the title, description, reason, priority, value or size is no longer true, use update_task with the version you read. Record newly discovered work instead of silently expanding the current task.
-- When a task no longer makes sense, set it to cancelled; it then stops holding back what depends on it.
+- When a task no longer makes sense, set it to cancelled; it then stops holding back what depends on it. A task container cannot be cancelled while it holds a task in progress or in review, at any depth; finish the active work or move it out first.
 
 ## When a call is refused
 - Version conflict: someone changed the item since you read it. The error contains the current item. Look at what changed, then call again with the new version if your change still makes sense.
