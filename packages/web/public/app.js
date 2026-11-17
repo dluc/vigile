@@ -904,7 +904,7 @@ function renderSummary(tasks, all, visibleTasks = tasks) {
   // Counted as the board shows them: with bugs in a column of their own, they are not also among the waiting or the next.
   const count = (key) => tasks.filter((t) => boardColumn(t) === key).length;
   const trouble = visibleTasks.filter(isOpenTrouble).length;
-  const problems = visibleTasks.filter((t) => t.has_problems).length + (state.group ? 0 : state.projects.filter((project) => project.has_problems && (!state.project || projectRef(project) === state.project)).length);
+  const problems = visibleTasks.filter((t) => t.has_problems).length + (state.group || state.projectZoom ? 0 : state.projects.filter((project) => project.has_problems && (!state.project || projectRef(project) === state.project)).length);
   const summaryFilter = (key, count, text, tone) => el("button", {
     class: `tag ${tone} summary-filter`,
     type: "button",

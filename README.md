@@ -296,6 +296,8 @@ stays marked until cleared. If the problem filter hides a selected project, a
 separate control lets you clear that project scope. The selected filter and its
 clear action stay visible in Graph view and in focus mode. A nonempty search has
 one clear button that removes the filter and keeps the keyboard in search. The
+with-problems count includes projects while their row is visible; in project
+zoom the row is hidden, so the count includes tasks only. The
 minus and plus close or open one level of groups at a time, down to
 “Top level”: the groups that are in no other group, and the tasks that are in none.
 One group at the last open level is closed. Its card stands for the tasks it

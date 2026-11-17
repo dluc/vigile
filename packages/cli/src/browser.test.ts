@@ -356,6 +356,39 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       }
     });
 
+    it("does not count the hidden project in the problems filter during project zoom", async () => {
+      await page.size(1440, 900);
+      const made: string[] = [];
+      const makeBlocked = async (label: string) => {
+        const task = (await run("create_task", { title: `${label} task`, description: "d", project: "EMPTY" })).id as string;
+        made.push(task);
+        await move(task, "in_progress");
+        const blocker = (await run("create_task", { title: `${label} blocker`, description: "d", project: "EMPTY" })).id as string;
+        made.push(blocker);
+        await run("add_link", { from: task, type: "depends on", to: blocker });
+        return task;
+      };
+      const first = await makeBlocked("First");
+      const second = await makeBlocked("Second");
+      const empty = await run("get", { id: "EMPTY", kind: "project" });
+      await run("set_project_status", { id: "EMPTY", status: "broken", version: empty.version });
+
+      try {
+        await load("/#board?project=EMPTY&projectZoom=1");
+        assert.equal(await page.run<boolean>("return document.getElementById('projects-section').hidden"), true, "project zoom hides the project row");
+        assert.match(await text('#summary [data-summary-filter="problems"]'), /^2 items with problems$/, "the hidden project is not counted alongside its two task problems");
+        await page.click('#summary [data-summary-filter="problems"]');
+        assert.deepEqual(await page.run<string[]>(`return [...document.querySelectorAll('#board .card')].map((card) => card.dataset.id).sort()`), [first, second].sort(), "both problem tasks remain available in the filtered board");
+      } finally {
+        for (const id of [first, second, ...made.filter((id) => id !== first && id !== second)]) {
+          await run("delete", { id, version: (await run("get", { id })).version });
+        }
+        const current = await run("get", { id: "EMPTY", kind: "project" });
+        await run("set_project_status", { id: "EMPTY", status: "open", version: current.version });
+        await load();
+      }
+    });
+
     it("offers the problems filter when only a project has a problem", async () => {
       await page.size(1440, 900);
       const empty = await run("get", { id: "EMPTY", kind: "project" });
