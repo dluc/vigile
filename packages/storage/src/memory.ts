@@ -8,6 +8,7 @@ import {
   type HistoryPage,
   type HistoryPageRequest,
   type HistoryFeedPage,
+  type HistoryFeedRecord,
   type HistoryFeedPageRequest,
   type HistoryRecord,
   type LinkKey,
@@ -144,6 +145,22 @@ export class MemoryStorage implements StorageAdapter {
         }
       }
     }
+    const inParent = page.parent === undefined ? null : new Set<string>();
+    if (inParent) {
+      const seen = new Set<string>();
+      const queue = [objectKey("task", page.parent!)];
+      seen.add(queue[0]!);
+      for (let next = 0; next < queue.length; next++) {
+        for (const link of stored.links.values()) {
+          if (link.type !== "contains" || objectKey(link.fromKind, link.fromId) !== queue[next]) continue;
+          const target = objectKey(link.toKind, link.toId);
+          if (seen.has(target)) continue;
+          seen.add(target);
+          if (link.toKind === "task") inParent.add(target);
+          queue.push(target);
+        }
+      }
+    }
 
     const beginnings = new Map<string, HistoryRecord>();
     for (const record of stored.history) {
@@ -158,6 +175,19 @@ export class MemoryStorage implements StorageAdapter {
       if (start && (record.revision < start.revision || (record.revision === start.revision && record.seq < start.seq))) return false;
       if (before && (record.revision > before.revision || (record.revision === before.revision && record.seq >= before.seq))) return false;
       if (page.project !== undefined && !inProject?.has(objectKey(record.kind, record.id))) return false;
+      if (page.parent !== undefined && !inParent?.has(objectKey(record.kind, record.id))) return false;
+      if (page.text !== undefined) {
+        const needle = page.text.trim().toLowerCase();
+        const item = stored.objects.get(objectKey(record.kind, record.id));
+        const title = item?.data.title ?? item?.data.username;
+        const publicId = record.kind === "user"
+          ? `USER-${record.id.replace(/^0+(?=\d)/, "").padStart(3, "0")}`
+          : record.kind === "project" && /^\d+$/.test(record.id)
+            ? `project:${record.id}`
+            : record.id;
+        const matches = [record.id, publicId, typeof title === "string" ? title : ""].some((value) => value.toLowerCase().includes(needle));
+        if (!matches) return false;
+      }
       if (page.kind !== undefined && record.kind !== page.kind) return false;
       if (page.actor !== undefined && record.actor !== page.actor) return false;
       if (page.action !== undefined && record.action !== page.action) return false;
@@ -165,8 +195,35 @@ export class MemoryStorage implements StorageAdapter {
       if (page.to !== undefined && record.at > page.to) return false;
       return true;
     }).sort((a, b) => b.revision - a.revision || b.seq - a.seq);
+    const completionIndexes = new Map<string, number>();
+    const nextCompletion = new Map<string, number>();
+    for (const record of stored.history) {
+      const key = objectKey(record.kind, record.id);
+      const start = beginnings.get(key);
+      if (!start) continue;
+      const beforeStart = record.revision < start.revision || (record.revision === start.revision && record.seq < start.seq);
+      if (beforeStart) continue;
+      if (record.revision === start.revision && record.seq === start.seq) {
+        nextCompletion.set(key, record.data.status === "done" ? 1 : 0);
+        continue;
+      }
+      if (record.kind !== "task" || record.action !== "status_changed" || record.data.to !== "done") continue;
+      const index = nextCompletion.get(key) ?? 0;
+      completionIndexes.set(`${key}\u0000${record.revision}\u0000${record.seq}`, index);
+      nextCompletion.set(key, index + 1);
+    }
+
     const selected = records.slice(0, page.limit + 1);
-    return { records: copy(selected.slice(0, page.limit)), hasMore: selected.length > page.limit };
+    const pageRecords: HistoryFeedRecord[] = selected.slice(0, page.limit).map((record) => {
+      if (record.kind !== "task" || record.action !== "status_changed" || record.data.to !== "done") return record;
+      const key = objectKey(record.kind, record.id);
+      const index = completionIndexes.get(`${key}\u0000${record.revision}\u0000${record.seq}`);
+      const completedAt = index === undefined
+        ? undefined
+        : (stored.timelines.get(key) ?? []).filter((entry) => entry.status === "done")[index]?.at;
+      return typeof completedAt === "string" ? { ...record, completion_at: completedAt } : record;
+    });
+    return { records: copy(pageRecords), hasMore: selected.length > page.limit };
   }
 
   async readTimeline(tenant: string, kind: string, id: string, page: TimelinePageRequest = {}): Promise<TimelinePage> {

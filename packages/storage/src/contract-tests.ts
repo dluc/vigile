@@ -6,6 +6,7 @@ import {
   MAX_RECORDS_PER_COMMIT,
   RevisionConflictError,
   type Change,
+  type JsonObject,
   type StorageAdapter,
 } from "./types.js";
 
@@ -243,7 +244,7 @@ export function runStorageContractTests(name: string, factory: () => AdapterFact
           changes: [change("task", "ABC-001", "updated", "2026-01-03T00:00:00.000Z")],
         });
 
-        const read = (store as any).readHistoryFeedPage as (tenant: string, page: { before?: { revision: number; seq: number }; project?: string; kind?: string; actor?: string; action?: string; from?: string; to?: string; limit: number }) => Promise<{ records: Array<{ kind: string; id: string; action: string; revision: number; seq: number }>; hasMore: boolean }>;
+        const read = (store as any).readHistoryFeedPage as (tenant: string, page: { before?: { revision: number; seq: number }; project?: string; text?: string; kind?: string; actor?: string; action?: string; from?: string; to?: string; limit: number }) => Promise<{ records: Array<{ kind: string; id: string; action: string; revision: number; seq: number }>; hasMore: boolean }>;
         const latest = await read.call(store, "default", { limit: 2 });
         assert.deepEqual(latest.records.map(({ kind, id, action, revision, seq }) => [kind, id, action, revision, seq]), [
           ["task", "ABC-001", "updated", 3, 0],
@@ -281,6 +282,137 @@ export function runStorageContractTests(name: string, factory: () => AdapterFact
           ["project", "ABC", "created"],
         ]);
         assert.equal(projectFeed.hasMore, false);
+      }));
+
+    it("filters the history feed by item ID or current title, without changing its order", () =>
+      withStore(async (store) => {
+        const change = (id: string, action: string, at: string): Change => ({
+          op: "add_history",
+          record: { kind: "task", id, at, actor: "1", action, data: {} },
+        });
+        await store.commit("default", {
+          expectedRevision: null,
+          counters: {},
+          changes: [
+            task("ABC-001", 1, "Unrelated task"),
+            task("ABC-002", 1, "Needle work item"),
+            task("UNICODE-001", 1, "École work item"),
+            { op: "put_object", record: { kind: "project", id: "001", version: 1, data: { title: "Numbered project" } } },
+            { op: "put_object", record: { kind: "user", id: "3", version: 1, data: { username: "Alice" } } },
+            change("ABC-001", "created", "2026-01-01T00:00:00.000Z"),
+            change("ABC-002", "created", "2026-01-01T00:00:01.000Z"),
+            { op: "add_history", record: { kind: "task", id: "UNICODE-001", at: "2026-01-01T00:00:02.000Z", actor: "1", action: "created", data: {} } },
+            { op: "add_history", record: { kind: "project", id: "001", at: "2026-01-01T00:00:03.000Z", actor: "1", action: "created", data: {} } },
+            { op: "add_history", record: { kind: "user", id: "3", at: "2026-01-01T00:00:03.000Z", actor: "1", action: "created", data: {} } },
+          ],
+        });
+        await store.commit("default", {
+          expectedRevision: 1,
+          counters: {},
+          changes: [change("ABC-002", "status_changed", "2026-01-02T00:00:00.000Z")],
+        });
+        const read = store.readHistoryFeedPage.bind(store) as unknown as (
+          tenant: string,
+          page: { text?: string; limit: number },
+        ) => Promise<{ records: Array<{ kind: string; id: string; action: string; revision: number; seq: number }>; hasMore: boolean }>;
+
+        const byId = await read("default", { text: "bc-002", limit: 10 });
+        assert.deepEqual(byId.records.map(({ id, action }) => [id, action]), [
+          ["ABC-002", "status_changed"],
+          ["ABC-002", "created"],
+        ]);
+        const byTitle = await read("default", { text: "NEEDLE WORK", limit: 10 });
+        assert.deepEqual(byTitle.records.map(({ id }) => id), ["ABC-002", "ABC-002"]);
+        const byPublicUserId = await read("default", { text: "USER-003", limit: 10 });
+        assert.deepEqual(byPublicUserId.records.map(({ kind, id }) => [kind, id]), [["user", "3"]]);
+        const byPublicProjectId = await read("default", { text: "project:001", limit: 10 });
+        assert.deepEqual(byPublicProjectId.records.map(({ kind, id }) => [kind, id]), [["project", "001"]]);
+        const byUnicodeTitle = await read("default", { text: "éCOLE", limit: 10 });
+        assert.deepEqual(byUnicodeTitle.records.map(({ id }) => id), ["UNICODE-001"]);
+      }));
+
+    it("scopes the history feed to a group's descendants and intersects the selected project", () =>
+      withStore(async (store) => {
+        const change = (id: string, at: string): Change => ({
+          op: "add_history",
+          record: { kind: "task", id, at, actor: "1", action: "created", data: {} },
+        });
+        const contains = (from: string, to: string): Change => ({
+          op: "put_link",
+          record: { fromKind: "task", fromId: from, type: "contains", toKind: "task", toId: to, data: {} },
+        });
+        await store.commit("default", {
+          expectedRevision: null,
+          counters: {},
+          changes: [
+            { op: "put_object", record: { kind: "project", id: "ABC", version: 1, data: { title: "Project" } } },
+            task("ABC-001", 1, "Outer group"),
+            task("ABC-002", 1, "Inner group"),
+            task("ABC-003", 1, "Nested task"),
+            task("ABC-004", 1, "Other task"),
+            task("OUT-001", 1, "Outside task"),
+            { op: "put_link", record: { fromKind: "project", fromId: "ABC", type: "contains", toKind: "task", toId: "ABC-001", data: {} } },
+            { op: "put_link", record: { fromKind: "project", fromId: "ABC", type: "contains", toKind: "task", toId: "ABC-004", data: {} } },
+            contains("ABC-001", "ABC-002"),
+            contains("ABC-002", "ABC-003"),
+            change("ABC-001", "2026-01-01T00:00:00.000Z"),
+            change("ABC-002", "2026-01-01T00:00:01.000Z"),
+            change("ABC-003", "2026-01-01T00:00:02.000Z"),
+            change("ABC-004", "2026-01-01T00:00:03.000Z"),
+            change("OUT-001", "2026-01-01T00:00:04.000Z"),
+          ],
+        });
+        const read = store.readHistoryFeedPage.bind(store) as unknown as (
+          tenant: string,
+          page: { project?: string; parent?: string; limit: number },
+        ) => Promise<{ records: Array<{ id: string }>; hasMore: boolean }>;
+
+        const scoped = await read("default", { project: "ABC", parent: "ABC-001", limit: 10 });
+        assert.deepEqual(scoped.records.map(({ id }) => id), ["ABC-003", "ABC-002"]);
+        assert.equal(scoped.hasMore, false);
+      }));
+
+    it("pairs reopened completion events with their effective timeline timestamps", () =>
+      withStore(async (store) => {
+        const event = (action: string, data: JsonObject, at: string): Change => ({
+          op: "add_history",
+          record: { kind: "task", id: "ABC-001", at, actor: "1", action, data },
+        });
+        const status = (value: string, at: string): Change => ({
+          op: "add_timeline",
+          record: { kind: "task", id: "ABC-001", data: { status: value, at, by: "1" } },
+        });
+        await store.commit("default", {
+          expectedRevision: null,
+          counters: {},
+          changes: [task("ABC-001"), event("created", { status: "open" }, "2026-01-01T00:00:00.000Z"), status("open", "2026-01-01T00:00:00.000Z")],
+        });
+        await store.commit("default", {
+          expectedRevision: 1,
+          counters: {},
+          changes: [event("status_changed", { from: "open", to: "done" }, "2026-01-02T00:00:00.000Z"), status("done", "2026-01-02T00:00:00.000Z")],
+        });
+        await store.commit("default", {
+          expectedRevision: 2,
+          counters: {},
+          changes: [{ op: "patch_timeline", kind: "task", id: "ABC-001", from: 1, to: 1, data: { at: "2025-04-15T16:30:00.000Z" } }],
+        });
+        await store.commit("default", {
+          expectedRevision: 3,
+          counters: {},
+          changes: [event("status_changed", { from: "done", to: "open" }, "2026-01-04T00:00:00.000Z"), status("open", "2026-01-04T00:00:00.000Z")],
+        });
+        await store.commit("default", {
+          expectedRevision: 4,
+          counters: {},
+          changes: [event("status_changed", { from: "open", to: "done" }, "2026-01-05T00:00:00.000Z"), status("done", "2026-01-05T00:00:00.000Z")],
+        });
+
+        const page = await store.readHistoryFeedPage("default", { kind: "task", action: "status_changed", limit: 10 });
+        assert.deepEqual(page.records.filter((record) => record.data.to === "done").map((record) => record.completion_at), [
+          "2026-01-05T00:00:00.000Z",
+          "2025-04-15T16:30:00.000Z",
+        ]);
       }));
 
     it("starts each feed entry at the item's latest creation", () =>

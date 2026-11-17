@@ -339,6 +339,21 @@ describe("command line", () => {
     assert.deepEqual(JSON.parse(listed.out).changes.map((event: any) => [event.id, event.action, event.by]), [[made.id, "status_changed", "agent1"]]);
   });
 
+  it("prints a task's elapsed duration on its completion event in History", async () => {
+    await cli("create-project", "--title", "Completion duration", "--prefix", "HISDUR", "--as", "agent1");
+    const made = JSON.parse((await cli("create-task", "--title", "Measured task", "--description", "Finish it.", "--project", "HISDUR", "--as", "agent1", "--json")).out);
+    await cli("set-task-status", made.id, "--version", "1", "--status", "in_progress", "--as", "agent1");
+    await cli("set-task-status", made.id, "--version", "2", "--status", "done", "--as", "agent1");
+
+    const args = ["list-history", "--project", "HISDUR", "--text", made.id, "--as", "agent1"];
+    const json = await cli(...args, "--json");
+    const completion = JSON.parse(json.out).changes.find((event: any) => event.data.to === "done");
+    assert.ok(completion.duration_ms > 0);
+    const printed = await cli(...args);
+    assert.equal(printed.code, 0, printed.err);
+    assert.match(printed.out, /completed.*took less than a minute/);
+  });
+
   it("shows a refusal with what is in the way, and exits with an error", async () => {
     const refused = await cli("set-task-status", "ABC-002", "--version", "1", "--status", "done", "--as", "agent1");
     assert.equal(refused.code, 1);
@@ -3318,7 +3333,7 @@ describe("the answer of each operation", () => {
       const cut = answer?.more ?? {};
       if (path.length === 1 && Object.hasOwn(cut, last)) return false;
       if (path.length === 2 && path[0] === "links" && Object.hasOwn(cut.links ?? {}, last)) return false;
-      if (["problems", "completed_at", "deleted_at", "continuation", "warning", "history"].includes(last)) return true;
+      if (["problems", "completed_at", "deleted_at", "continuation", "warning", "history", "duration_ms"].includes(last)) return true;
       // How far a task has come is said only of one that contains others. Of a project it is always said.
       if (last === "progress") return of.kind === "task";
       const links = path.lastIndexOf("links");

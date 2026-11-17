@@ -132,8 +132,13 @@
           <h2 id="history-heading" tabindex="-1">History</h2>
           <p>Recorded changes across the plan, newest first.</p>
         </div>
+        <div class="history-scope-row">
+          <nav id="history-scope" class="history-scope" aria-label="History scope"></nav>
+          <button id="history-zoom-out" class="history-zoom-out" type="button" aria-label="Zoom out of History group" disabled>− Zoom out</button>
+        </div>
       </div>
       <form id="history-filters" class="history-filters" aria-label="Filter history">
+        <label><span>Text</span><input id="history-text" type="search" maxlength="128" placeholder="ID, title or username" autocomplete="off"></label>
         <label><span>Item kind</span><select id="history-kind"><option value="">All kinds</option><option value="project">Projects</option><option value="task">Tasks</option><option value="user">Users</option></select></label>
         <label><span>Event</span><select id="history-action">
           <option value="">All events</option>

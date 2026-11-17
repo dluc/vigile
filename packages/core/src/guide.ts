@@ -257,7 +257,7 @@ get_guide with topic "examples" shows complete sequences of calls for these shap
 ## Looking back
 - get with history returns the recorded changes to an item: when, by whom and what.
 - A task's timeline shows each status it went through.
-- list_history shows retained changes across the plan, newest first; filter by project, item kind, actor, action or time range, and continue with its token.
+- list_history shows retained changes across the plan, newest first; filter by project, group, item ID or title, item kind, actor, action or time range, and continue with its token.
 - The item's history and status timeline each show the latest 100 entries, oldest first. When there are more, "more" in the answer says how many and gives a continuation token: get with the same id and that token returns the 100 before.
 - list_history shows at most 100 newest-first entries in its changes field and returns a continuation token for the older page.
 

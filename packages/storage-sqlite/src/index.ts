@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
-import type { DatabaseSync as Database } from "node:sqlite";
+import type { DatabaseSync as Database, SQLOutputValue } from "node:sqlite";
 import {
   FORMAT_VERSION,
   RevisionConflictError,
@@ -16,6 +16,7 @@ import {
   type HistoryPage,
   type HistoryPageRequest,
   type HistoryFeedPage,
+  type HistoryFeedRecord,
   type HistoryFeedPageRequest,
   type HistoryPlace,
   type HistoryRecord,
@@ -355,6 +356,7 @@ export class SqliteStorage implements StorageAdapter {
         // named like one that cannot be written.
         opened = openDatabase(file);
         db = opened;
+        db.function("vigile_lower", { deterministic: true }, (value: SQLOutputValue, ..._rest: SQLOutputValue[]) => typeof value === "string" ? value.toLowerCase() : "");
         // WAL with synchronous=FULL: a confirmed write survives a power cut.
         db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;");
         const from = prepare(db, file);
@@ -592,17 +594,41 @@ export class SqliteStorage implements StorageAdapter {
       )`,
     ];
     const values: Array<string | number> = [];
-    let recursive = "";
+    const recursive: string[] = [];
     if (page.project !== undefined) {
-      recursive = `WITH RECURSIVE descendants(kind, id) AS (
+      recursive.push(`project_descendants(kind, id) AS (
         SELECT 'project', ?
         UNION
         SELECT l.to_kind, l.to_id FROM links l
-        JOIN descendants d ON l.from_kind = d.kind AND l.from_id = d.id
+        JOIN project_descendants d ON l.from_kind = d.kind AND l.from_id = d.id
         WHERE l.type = 'contains'
-      ) `;
+      )`);
       values.push(page.project);
-      filters.push("EXISTS (SELECT 1 FROM descendants d WHERE d.kind = h.kind AND d.id = h.id)");
+      filters.push("EXISTS (SELECT 1 FROM project_descendants d WHERE d.kind = h.kind AND d.id = h.id)");
+    }
+    if (page.parent !== undefined) {
+      recursive.push(`parent_descendants(kind, id) AS (
+        SELECT l.to_kind, l.to_id FROM links l WHERE l.from_kind = 'task' AND l.from_id = ? AND l.type = 'contains'
+        UNION
+        SELECT l.to_kind, l.to_id FROM links l
+        JOIN parent_descendants d ON l.from_kind = d.kind AND l.from_id = d.id
+        WHERE l.type = 'contains'
+      )`);
+      values.push(page.parent);
+      filters.push("EXISTS (SELECT 1 FROM parent_descendants d WHERE d.kind = h.kind AND d.id = h.id)");
+    }
+    if (page.text !== undefined) {
+      filters.push(`(
+        instr(vigile_lower(h.id), vigile_lower(?)) > 0
+        OR (h.kind = 'user' AND instr(vigile_lower('USER-' || printf('%03d', CAST(h.id AS INTEGER))), vigile_lower(?)) > 0)
+        OR (h.kind = 'project' AND h.id <> '' AND h.id NOT GLOB '*[^0-9]*' AND instr(vigile_lower('project:' || h.id), vigile_lower(?)) > 0)
+        OR EXISTS (
+          SELECT 1 FROM objects o
+          WHERE o.kind = h.kind AND o.id = h.id
+            AND instr(vigile_lower(COALESCE(json_extract(o.data, '$.title'), json_extract(o.data, '$.username'), '')), vigile_lower(?)) > 0
+        )
+      )`);
+      values.push(page.text.trim(), page.text.trim(), page.text.trim(), page.text.trim());
     }
     for (const [field, column] of [["kind", "kind"], ["actor", "actor"], ["action", "action"], ["from", "at"], ["to", "at"]] as const) {
       const value = page[field];
@@ -614,15 +640,60 @@ export class SqliteStorage implements StorageAdapter {
       filters.push("(h.revision, h.seq) < (?, ?)");
       values.push(page.before.revision, page.before.seq);
     }
-    const rows = db.prepare(`${recursive}
-      SELECT h.kind, h.id, h.revision, h.seq, h.at, h.actor, h.action, h.data
-      FROM history h
-      WHERE ${filters.join(" AND ")}
-      ORDER BY h.revision DESC, h.seq DESC
-      LIMIT ?`).all(...values, page.limit + 1) as unknown as Array<Omit<HistoryRecord, "data"> & { data: string }>;
+    const ctes = [
+      ...recursive,
+      `filtered_history AS (
+        SELECT h.kind, h.id, h.revision, h.seq, h.at, h.actor, h.action, h.data
+        FROM history h
+        WHERE ${filters.join(" AND ")}
+        ORDER BY h.revision DESC, h.seq DESC
+        LIMIT ?
+      )`,
+      `completion_items AS (
+        SELECT DISTINCT kind, id FROM filtered_history
+        WHERE kind = 'task' AND action = 'status_changed' AND json_extract(data, '$.to') = 'done'
+      )`,
+      `latest_creation AS (
+        SELECT b.kind, b.id, b.revision, b.seq, json_extract(b.data, '$.status') AS status
+        FROM completion_items p
+        JOIN history b ON b.kind = p.kind AND b.id = p.id AND b.action = 'created'
+        WHERE NOT EXISTS (
+          SELECT 1 FROM history newer
+          WHERE newer.kind = b.kind AND newer.id = b.id AND newer.action = 'created'
+            AND (newer.revision, newer.seq) > (b.revision, b.seq)
+        )
+      )`,
+      `completion_event_ranks AS (
+        SELECT h.kind, h.id, h.revision, h.seq,
+          ROW_NUMBER() OVER (PARTITION BY h.kind, h.id ORDER BY h.revision, h.seq) - 1
+            + CASE WHEN c.status = 'done' THEN 1 ELSE 0 END AS completion_index
+        FROM latest_creation c
+        JOIN history h ON h.kind = c.kind AND h.id = c.id
+        WHERE h.action = 'status_changed' AND json_extract(h.data, '$.to') = 'done'
+          AND (h.revision, h.seq) >= (c.revision, c.seq)
+      )`,
+      `completion_timeline AS (
+        SELECT t.kind, t.id, json_extract(t.data, '$.at') AS completion_at,
+          ROW_NUMBER() OVER (PARTITION BY t.kind, t.id ORDER BY t.place) - 1 AS completion_index
+        FROM completion_items p
+        JOIN timeline t ON t.kind = p.kind AND t.id = p.id
+        WHERE json_extract(t.data, '$.status') = 'done'
+      )`,
+    ];
+    const recursiveClause = `WITH RECURSIVE ${ctes.join(",")} `;
+    const rows = db.prepare(`${recursiveClause}
+      SELECT f.kind, f.id, f.revision, f.seq, f.at, f.actor, f.action, f.data, ct.completion_at
+      FROM filtered_history f
+      LEFT JOIN completion_event_ranks r ON r.kind = f.kind AND r.id = f.id AND r.revision = f.revision AND r.seq = f.seq
+      LEFT JOIN completion_timeline ct ON ct.kind = r.kind AND ct.id = r.id AND ct.completion_index = r.completion_index
+      ORDER BY f.revision DESC, f.seq DESC`).all(...values, page.limit + 1) as unknown as Array<Omit<HistoryRecord, "data"> & { data: string; completion_at: string | null }>;
     const hasMore = rows.length > page.limit;
     return {
-      records: rows.slice(0, page.limit).map((row) => ({ ...row, data: JSON.parse(row.data) as JsonObject })),
+      records: rows.slice(0, page.limit).map(({ completion_at, ...row }): HistoryFeedRecord => ({
+        ...row,
+        data: JSON.parse(row.data) as JsonObject,
+        ...(completion_at === null ? {} : { completion_at }),
+      })),
       hasMore,
     };
   }

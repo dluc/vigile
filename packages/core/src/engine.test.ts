@@ -3339,6 +3339,74 @@ describe("tenant-wide History", () => {
     );
   });
 
+  it("filters History by an item's task ID or current title, case-insensitively", async () => {
+    const { agent } = await setup();
+    await agent("create_project", { title: "Search", prefix: "HISTXT" });
+    const wanted = await agent("create_task", task("Needle task", { project: "HISTXT" }));
+    const other = await agent("create_task", task("Different task", { project: "HISTXT" }));
+
+    const byId = await agent("list_history", { text: wanted.id.toLowerCase() });
+    assert.ok(byId.changes.length > 0);
+    assert.ok(byId.changes.every((event: any) => event.id === wanted.id));
+    const byTitle = await agent("list_history", { text: "NEEDLE TASK" });
+    assert.ok(byTitle.changes.length > 0);
+    assert.ok(byTitle.changes.every((event: any) => event.id === wanted.id));
+    assert.ok(!byId.changes.some((event: any) => event.id === other.id));
+  });
+
+  it("scopes History to the selected group's descendants within the project", async () => {
+    const { agent } = await setup();
+    await agent("create_project", { title: "History scope", prefix: "HISTSCP" });
+    await agent("create_project", { title: "Other scope", prefix: "OTHERS" });
+    const group = await agent("create_task", task("Outer group", { project: "HISTSCP" }));
+    const inner = await agent("create_task", task("Inner group", { project: "HISTSCP", parent: group.id }));
+    const child = await agent("create_task", task("Nested work", { project: "HISTSCP", parent: inner.id }));
+    const sibling = await agent("create_task", task("Sibling work", { project: "HISTSCP" }));
+    const outside = await agent("create_task", task("Outside project", { project: "OTHERS" }));
+
+    const scoped = await agent("list_history", { project: "HISTSCP", parent: group.id });
+    const ids = new Set(scoped.changes.map((event: any) => event.id));
+    assert.ok(ids.has(inner.id));
+    assert.ok(ids.has(child.id));
+    assert.ok(!ids.has(group.id), "zooming into a group shows its contents, not the group itself");
+    assert.ok(!ids.has(sibling.id));
+    assert.ok(!ids.has(outside.id));
+  });
+
+  it("reports elapsed wall-clock time on each task completion event", async () => {
+    const { agent } = await setup();
+    await agent("create_project", { title: "History duration", prefix: "HSTDUR" });
+    const made = await agent("create_task", task("Measured work", { project: "HSTDUR" }));
+    await agent("set_task_status", { id: made.id, version: made.version, status: "done" });
+    const detail = await agent("get", { id: made.id });
+    const feed = await agent("list_history", { text: made.id });
+    const completed = feed.changes.find((event: any) => event.data.to === "done");
+
+    assert.ok(completed, "the completed task has a distinct status-change event");
+    assert.equal(completed.duration_ms, Date.parse(detail.completed_at) - Date.parse(detail.created_at));
+    assert.ok(completed.duration_ms > 0);
+  });
+
+  it("uses overridden creation and completion moments for each reopened History completion", async () => {
+    const { agent } = await setup();
+    const made = await agent("create_task", task("Imported and reopened"));
+    const firstDone = await agent("set_task_status", { id: made.id, version: made.version, status: "done" });
+    const created = await agent("override_timestamp", { id: made.id, version: firstDone.version, name: "created_at", value: "2025-03-01T09:00:00Z" });
+    const firstOverride = await agent("override_timestamp", { id: made.id, version: created.version, name: "completed_at", value: "2025-04-15T18:30:00+02:00" });
+    const reopened = await agent("set_task_status", { id: made.id, version: firstOverride.version, status: "open" });
+    const startedAgain = await agent("set_task_status", { id: made.id, version: reopened.version, status: "in_progress" });
+    await agent("set_task_status", { id: made.id, version: startedAgain.version, status: "done" });
+
+    const detail = await agent("get", { id: made.id });
+    const feed = await agent("list_history", { text: made.id });
+    const completions = feed.changes.filter((event: any) => event.data.to === "done");
+    assert.equal(completions.length, 2);
+    assert.deepEqual(completions.map((event: any) => event.duration_ms), [
+      Date.parse(detail.completed_at) - Date.parse(detail.created_at),
+      Date.parse(firstOverride.completed_at) - Date.parse(detail.created_at),
+    ]);
+  });
+
   it("does not show events from before a project ID's latest creation", async () => {
     const { agent, second } = await earlierOfTheName();
     const feed = await agent("list_history", { kind: "project" });
@@ -3349,7 +3417,8 @@ describe("tenant-wide History", () => {
     const { agent, person } = await setup();
     await agent("create_project", { title: "History project", prefix: "HIS" });
     await agent("create_project", { title: "Other project", prefix: "OTH" });
-    const inside = await agent("create_task", task("Inside", { project: "HIS" }));
+    const group = await agent("create_task", task("Group", { project: "HIS" }));
+    const inside = await agent("create_task", task("Inside", { project: "HIS", parent: group.id }));
     const outside = await agent("create_task", task("Outside", { project: "OTH" }));
     await agent("set_task_status", { id: inside.id, version: inside.version, status: "in_progress" });
     await agent("set_task_status", { id: outside.id, version: outside.version, status: "in_progress" });
@@ -3371,7 +3440,7 @@ describe("tenant-wide History", () => {
       const updated = await agent("update_task", { id: inside.id, version, priority });
       version = updated.version;
     }
-    const query = { project: " HIS ", kind: "task", action: " updated " };
+    const query = { project: " HIS ", parent: ` ${group.id} `, text: ` ${inside.id.toLowerCase()} `, kind: "task", action: " updated " };
     const first = await agent("list_history", query);
     assert.equal(first.changes.length, 100);
     assert.equal(typeof first.continuation, "string");

@@ -237,7 +237,7 @@ const isOpenTrouble = (task) => isTrouble(task) && !FINISHED.includes(task.statu
  */
 const boardColumn = (task) => (state.bugsApart && isOpenTrouble(task) ? "trouble" : columnOf(task));
 
-const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, historyFilters: { kind: null, actor: null, action: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
+const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, historyFilters: { text: null, kind: null, actor: null, action: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
 let historyTurn = 0;
 let historyLoadingTurn = 0;
 
@@ -1015,6 +1015,30 @@ const TRAIL_SHOWN = 3;
 
 const when = (iso) => new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
+/** Wall-clock elapsed time, in the two largest whole units that fit. */
+function elapsedDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return null;
+  if (milliseconds < 60_000) return "less than a minute";
+  const units = [
+    [365 * 24 * 60 * 60 * 1000, "year"],
+    [30 * 24 * 60 * 60 * 1000, "month"],
+    [7 * 24 * 60 * 60 * 1000, "week"],
+    [24 * 60 * 60 * 1000, "day"],
+    [60 * 60 * 1000, "hour"],
+    [60 * 1000, "minute"],
+  ];
+  let rest = Math.floor(milliseconds);
+  const parts = [];
+  for (const [size, name] of units) {
+    const count = Math.floor(rest / size);
+    if (!count) continue;
+    parts.push(`${count} ${name}${count === 1 ? "" : "s"}`);
+    rest -= count * size;
+    if (parts.length === 2) break;
+  }
+  return parts.join(", ") || "less than a minute";
+}
+
 /** A bookmarked History date must be a real calendar date, not merely something the Date parser tolerates. */
 function validHistoryDate(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
@@ -1022,12 +1046,20 @@ function validHistoryDate(value) {
   return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value ? null : value;
 }
 
+/** Truncates at a UTF-16 code-point boundary without exceeding the requested code-unit limit. */
+function truncateAtCodePointBoundary(value, limit) {
+  let end = Math.min(value.length, limit);
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end--;
+  return value.slice(0, end);
+}
+
 /**
  * The address after the # names the view and, when one is open, the item: #board, #graph/VIG-041,
  * #board/project:VIG. So an item can be bookmarked, and the browser's Back returns to the one before it.
- * After a ? it says where the board is zoomed to: `in` names the groups that were zoomed into, one inside the
- * other and the last the one in view, and `zoom` how many levels are open; neither is there for the whole plan
- * with everything shown. #board?in=VIG-003/VIG-012&zoom=1 is the top level of VIG-012, reached through VIG-003.
+ * After a ? it says where the board or History is zoomed to: `in` names the groups that were zoomed into, one
+ * inside the other and the last the one in view. The Board also uses `zoom` for how many levels are open.
+ * #board?in=VIG-003/VIG-012&zoom=1 is the top level of VIG-012, reached through VIG-003.
  */
 function readRoute(address = location.hash) {
   const [, view, item, asks] = /^#(board|graph|history)(?:\/([^?]*))?(?:\?(.*))?$/.exec(address) ?? [];
@@ -1050,10 +1082,11 @@ function readRoute(address = location.hash) {
   // limit short of the numbers that can be counted with exactly. Anything else is no zoom.
   const levels = /^[1-9]\d*$/.test(asked.get("zoom") ?? "") ? Number(asked.get("zoom")) : NaN;
   const zoom = view !== "history" && Number.isSafeInteger(levels) ? levels : null;
-  const into = view === "history" ? [] : (asked.get("in") ?? "").split("/").map(decoded).filter(Boolean);
+  const into = (asked.get("in") ?? "").split("/").map(decoded).filter(Boolean);
   const project = decoded(asked.get("project") ?? "") || null;
   const projectZoom = view !== "history" && Boolean(project && asked.get("projectZoom") === "1");
   const historyFilters = {
+    text: truncateAtCodePointBoundary(decoded(asked.get("text") ?? "").trim(), 128) || null,
     kind: ["project", "task", "user"].includes(asked.get("kind")) ? asked.get("kind") : null,
     actor: decoded(asked.get("actor") ?? "") || null,
     action: decoded(asked.get("action") ?? "") || null,
@@ -1070,12 +1103,13 @@ function readRoute(address = location.hash) {
 function routeOf(view, open, zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom, historyFilters = state.historyFilters) {
   const asks = [
     project && `project=${encodeURIComponent(project)}`,
+    view === "history" && historyFilters.text && `text=${encodeURIComponent(historyFilters.text)}`,
     view === "history" && historyFilters.kind && `kind=${encodeURIComponent(historyFilters.kind)}`,
     view === "history" && historyFilters.actor && `actor=${encodeURIComponent(historyFilters.actor)}`,
     view === "history" && historyFilters.action && `action=${encodeURIComponent(historyFilters.action)}`,
     view === "history" && historyFilters.from && `from=${encodeURIComponent(historyFilters.from)}`,
     view === "history" && historyFilters.to && `to=${encodeURIComponent(historyFilters.to)}`,
-    view !== "history" && into.length > 0 && `in=${into.map(encodeURIComponent).join("/")}`,
+    into.length > 0 && `in=${into.map(encodeURIComponent).join("/")}`,
     view !== "history" && zoom !== null && `zoom=${zoom}`,
     view !== "history" && projectZoom && "projectZoom=1",
   ].filter(Boolean).join("&");
@@ -1230,7 +1264,7 @@ function trailTo(id) {
  */
 function zoomInto(id) {
   go(state.view, null, [], { into: trailTo(id) });
-  keyboardTo(placeOf(id));
+  keyboardTo(state.view === "history" ? () => $("history-zoom-out") : placeOf(id));
 }
 
 /**
@@ -1241,6 +1275,10 @@ function zoomInto(id) {
 function zoomOut(steps) {
   const left = state.into[steps];
   go(state.view, null, [], { into: state.into.slice(0, steps) });
+  if (state.view === "history") {
+    keyboardTo(() => $("history-scope").querySelector(`[data-depth="${steps}"]`));
+    return;
+  }
   keyboardTo(placeOf(left, ".zoom-into"));
 }
 
@@ -1263,8 +1301,9 @@ function sayZoom() {
   const project = state.projects.find((p) => projectRef(p) === state.project);
   const named = group ?? project;
   const where = named ? `${named.id} ${named.title.length > 60 ? `${named.title.slice(0, 59)}…` : named.title}` : "all projects";
-  const counts = $("summary").firstElementChild?.textContent ?? "";
-  $("zoom-said").textContent = `${state.view === "board" ? `${levelName(state.level)} in` : "Graph of"} ${where}: ${counts}.`;
+  const counts = state.view === "history" ? $("history-status").textContent : $("summary").firstElementChild?.textContent ?? "";
+  const view = state.view === "board" ? `${levelName(state.level)} in` : state.view === "history" ? "History in" : "Graph of";
+  $("zoom-said").textContent = `${view} ${where}: ${counts}.`;
   clearTimeout(said);
   said = setTimeout(() => ($("zoom-said").textContent = ""), 5000);
 }
@@ -1279,6 +1318,7 @@ function stepLevel(by) {
 $("level-out").addEventListener("click", () => stepLevel(-1));
 $("level-in").addEventListener("click", () => stepLevel(1));
 $("leave-group").addEventListener("click", () => state.projectZoom && state.into.length === 0 ? leaveProjectZoom() : zoomOut(Math.max(0, state.into.length - 1)));
+$("history-zoom-out").addEventListener("click", () => zoomOut(Math.max(0, state.into.length - 1)));
 
 /** Opens an item in the panel. Opened from inside the panel, it remembers the item it came from. */
 /** Finds the control the panel was opened from, as it is now, so that the keyboard can go back to it. */
@@ -1914,6 +1954,9 @@ async function renderDetail(more) {
         on && further(`links:${relation}`, "Show more"),
       );
     });
+  const took = item.kind === "task" && item.completed_at
+    ? elapsedDuration(Date.parse(item.completed_at) - Date.parse(item.created_at))
+    : null;
   const facts = [
     item.kind === "task" && ["Type", item.type],
     item.kind === "task" && item.progress && ["Progress", `${item.progress.finished} of ${item.progress.total} tasks inside finished`],
@@ -1923,6 +1966,7 @@ async function renderDetail(more) {
     item.kind === "task" && ["Assigned to", item.assigned_to.length ? `${item.assigned_to.join(", ")}${item.more?.assigned_to ? ` and ${item.more.assigned_to.total - item.assigned_to.length} more` : ""}` : "nobody"],
     item.kind === "project" && ["Progress", `${item.progress.finished} of ${item.progress.total} tasks finished`],
     item.completed_at && ["Completed", when(item.completed_at)],
+    took && ["Took", took],
     ["Created", `${when(item.created_at)} by ${item.created_by}`],
     ["Updated", when(item.updated_at)],
     item.deleted_at && ["Deleted", when(item.deleted_at)],
@@ -2133,6 +2177,8 @@ async function renderGraphView(tasks) {
 function historyQueryState() {
   return Object.fromEntries(Object.entries({
     project: state.project,
+    parent: state.group,
+    text: state.historyFilters.text,
     kind: state.historyFilters.kind,
     actor: state.historyFilters.actor,
     action: state.historyFilters.action,
@@ -2153,6 +2199,7 @@ function historyDateBound(day, end = false) {
 function historyInput() {
   const filters = historyQueryState();
   if (filters.project) filters.project = filters.project.trim();
+  if (filters.parent) filters.parent = filters.parent.trim();
   if (filters.actor) filters.actor = filters.actor.trim();
   if (filters.action) filters.action = filters.action.trim();
   return {
@@ -2176,31 +2223,37 @@ function renderHistoryList() {
   }
   const loadMore = $("history-more");
   const loadMoreFocused = document.activeElement === loadMore;
-  const focusedPlace = document.activeElement?.closest?.(".history-event-item")?.closest(".history-event")?.dataset.place;
+  const focusedItem = document.activeElement?.closest?.(".history-event-item, .history-zoom-into");
+  const focusedPlace = focusedItem?.closest(".history-event")?.dataset.place;
+  const focusedControl = focusedItem?.matches(".history-zoom-into") ? ".history-zoom-into" : ".history-event-item";
   list.replaceChildren(...state.historyEvents.map((event) => {
     const id = event.kind === "project" && /^\d+$/.test(event.id) ? `project:${event.id}` : event.id;
     const title = event.title || "Item no longer available";
+    const completed = event.kind === "task" && event.action === "status_changed" && event.data?.to === "done";
     const item = event.kind === "project" || event.kind === "task"
       ? el("button", { class: "history-event-item", type: "button", "data-id": event.id, "data-kind": event.kind, "aria-label": `Open ${event.kind} ${id}: ${title}`, onclick: () => openItem(event.kind, event.id) },
           el("span", { class: "id" }, id), el("span", { class: "history-event-title" }, title))
       : el("span", { class: "history-event-item passive" }, el("span", { class: "id" }, id), el("span", { class: "history-event-title" }, title));
+    const task = event.kind === "task" ? state.byId.get(taskIdentity(event.id)) : null;
+    const zoom = task && (heldBy().get(task.id)?.length ?? 0) > 0
+      ? el("button", { class: "history-zoom-into", type: "button", "data-id": task.id, "aria-label": `Zoom into ${task.id}: show the tasks it contains`, title: "Show only what this group holds", onclick: () => zoomInto(task.id) }, "Zoom in")
+      : null;
     const description = describeChange(event.data ?? {});
-    return el("li", { class: "history-event", "data-action": event.action, "data-kind": event.kind, "data-id": event.id, "data-place": event.place.join(".") },
+    return el("li", { class: `history-event${completed ? " completed" : ""}`, "data-action": event.action, "data-kind": event.kind, "data-id": event.id, "data-place": event.place.join(".") },
       el("div", { class: "history-event-top" },
-        el("span", { class: "history-event-action" }, HISTORY_ACTIONS[event.action] ?? label(event.action)),
+        el("span", { class: "history-event-action" }, completed ? "Completed" : HISTORY_ACTIONS[event.action] ?? label(event.action)),
         el("span", { class: "history-event-actor" }, `by ${event.by}`),
         el("time", { datetime: event.at }, when(event.at)),
       ),
-      item,
+      el("div", { class: "history-event-item-row" }, item, zoom),
       description && el("div", { class: "history-event-detail" }, description),
+      completed && elapsedDuration(event.duration_ms) && el("div", { class: "history-event-duration" }, `Took ${elapsedDuration(event.duration_ms)}`),
       el("span", { class: "history-event-kind" }, event.kind),
     );
   }));
   if (focusedPlace) {
-    [...list.querySelectorAll(".history-event")]
-      .find((event) => event.dataset.place === focusedPlace)
-      ?.querySelector(".history-event-item")
-      ?.focus({ preventScroll: true });
+    const restored = [...list.querySelectorAll(".history-event")].find((event) => event.dataset.place === focusedPlace);
+    (restored?.querySelector(focusedControl) ?? restored?.querySelector(".history-event-item"))?.focus({ preventScroll: true });
   }
   const filters = historyInput();
   $("history-status").textContent = state.historyError
@@ -2293,8 +2346,26 @@ async function loadHistory(reset = false, preservePages = false) {
   }
 }
 
-/** Shows the current feed and starts a fresh read when its project or History filters change. */
+/** Shows the current project/group trail in the History view, with a bookmarkable step back to each scope. */
+function renderHistoryScope() {
+  const nav = $("history-scope");
+  const project = state.projects.find((item) => projectRef(item) === state.project);
+  const root = project ? `${projectRef(project)} · ${project.title}` : state.project ? `${state.project} · project no longer available` : "All projects";
+  nav.replaceChildren(
+    el("button", { type: "button", "data-depth": "0", "aria-current": state.into.length ? undefined : "location", title: `Show History for ${root}`, onclick: () => go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: [] }) }, root),
+    ...state.into.map((id, index) => {
+      const task = state.byId.get(id);
+      const title = task?.title ?? "group no longer available";
+      return el("button", { type: "button", "data-depth": String(index + 1), "aria-current": index === state.into.length - 1 ? "location" : undefined, title: index === state.into.length - 1 ? `History inside ${id} · ${title}` : `Zoom out to ${id} · ${title}`, onclick: () => go("history", null, [], { into: state.into.slice(0, index + 1) }) }, `${id} · ${title}`);
+    }),
+  );
+  $("history-zoom-out").disabled = state.into.length === 0;
+  $("history-zoom-out").title = state.into.length ? `Zoom out of ${state.into.at(-1)}` : "History is showing the whole selected scope";
+}
+
+/** Shows the current feed and starts a fresh read when its project, group or History filters change. */
 function renderHistoryView() {
+  renderHistoryScope();
   const form = $("history-filters");
   if (!form.contains(document.activeElement)) syncHistoryControls();
   renderHistoryList();
@@ -2303,6 +2374,7 @@ function renderHistoryView() {
 
 /** Keeps bookmarkable filter controls in sync with route changes, including Back and Forward. */
 function syncHistoryControls() {
+  $("history-text").value = state.historyFilters.text ?? "";
   $("history-kind").value = state.historyFilters.kind ?? "";
   $("history-actor").value = state.historyFilters.actor ?? "";
   $("history-action").value = state.historyFilters.action ?? "";
@@ -2313,18 +2385,19 @@ function syncHistoryControls() {
 $("history-filters").addEventListener("submit", (event) => {
   event.preventDefault();
   const historyFilters = {
+    text: $("history-text").value.trim() || null,
     kind: $("history-kind").value || null,
     actor: $("history-actor").value.trim() || null,
     action: $("history-action").value || null,
     from: $("history-from").value || null,
     to: $("history-to").value || null,
   };
-  go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: [], historyFilters });
+  go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: state.into, historyFilters });
 });
 $("history-clear").addEventListener("click", () => {
-  for (const id of ["history-kind", "history-actor", "history-action", "history-from", "history-to"]) $(id).value = "";
-  const historyFilters = { kind: null, actor: null, action: null, from: null, to: null };
-  go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: [], historyFilters });
+  for (const id of ["history-text", "history-kind", "history-actor", "history-action", "history-from", "history-to"]) $(id).value = "";
+  const historyFilters = { text: null, kind: null, actor: null, action: null, from: null, to: null };
+  go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: state.into, historyFilters });
 });
 $("history-more").addEventListener("click", () => void loadHistory(Boolean(state.historyError), Boolean(state.historyError && state.historyPages)));
 
@@ -2423,6 +2496,15 @@ function keyboardPlace() {
   const at = document.activeElement;
   if (!at?.closest) return null;
   const ofBoard = (find, about = {}) => Object.assign(find, { ofBoard: true, ...about });
+  if (at.matches("#history-scope button")) {
+    const depth = at.dataset.depth;
+    return () => $("history-scope").querySelector(`button[data-depth="${depth}"]`);
+  }
+  if (at.matches("#history-zoom-out")) return () => $("history-zoom-out");
+  if (at.matches("#history-list .history-zoom-into")) {
+    const id = at.dataset.id;
+    return () => [...$("history-list").querySelectorAll(".history-zoom-into")].find((button) => button.dataset.id === id);
+  }
   if (at.matches("#board .card, #board .zoom-into")) {
     const id = at.dataset.id;
     const kind = at.matches(".card") ? ".card" : ".zoom-into";
@@ -2605,7 +2687,7 @@ function draw() {
     document.body.classList.remove("graph-view", "graph-full");
     document.body.classList.add("history-view");
     document.body.classList.toggle("focus", state.focus);
-    document.body.classList.toggle("scoped", Boolean(state.project || Object.values(state.historyFilters).some(Boolean)));
+    document.body.classList.toggle("scoped", Boolean(state.project || state.group || Object.values(state.historyFilters).some(Boolean)));
     $("focus").setAttribute("aria-pressed", String(state.focus));
     $("focus").setAttribute("aria-label", state.focus ? "Show everything above History again" : "Hide everything above History");
     $("focus").title = state.focus ? "Show the projects and controls above History" : "Hide the projects and controls above History";
@@ -2767,9 +2849,9 @@ function lockOut(refused = "") {
   Object.assign(state, { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, shown: null, drawn: null, item: null, have: null, further: null, troubled: false, openTitle: "", loadedAt: null, loadedMs: null, failed: true });
   $("instance").textContent = "";
   Object.assign(state, { project: null, projectZoom: false, zoom: null, into: [], group: null, open: null, trail: [] });
-  Object.assign(state, { historyFilters: { kind: null, actor: null, action: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null });
+  Object.assign(state, { historyFilters: { text: null, kind: null, actor: null, action: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null });
   historyRefreshPending = false;
-  for (const id of ["history-kind", "history-actor", "history-action", "history-from", "history-to"]) $(id).value = "";
+  for (const id of ["history-text", "history-kind", "history-actor", "history-action", "history-from", "history-to"]) $(id).value = "";
   $("history-list").replaceChildren();
   $("history-status").textContent = "";
   $("history-empty").textContent = "";
@@ -2806,6 +2888,9 @@ function lockOut(refused = "") {
   graphScope = null;
   showGraphStatus(null);
   render();
+  $("history-scope").replaceChildren();
+  $("history-zoom-out").disabled = true;
+  $("history-zoom-out").title = "History is showing the whole selected scope";
   showRefresh();
   // Cards on their way across the page are copies of tasks, attached to the page itself.
   for (const copy of document.querySelectorAll(".card-ghost")) {

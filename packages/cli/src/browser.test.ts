@@ -9991,6 +9991,83 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
   });
 
   browserSuite("history", () => {
+    it("filters History by task ID and title, and bookmarks the text", async () => {
+      const project = await run("create_project", { title: "History search", prefix: "HSTTXT" });
+      const match = await run("create_task", { title: "Needle work item", description: "The task ID should be searchable.", project: project.id });
+      await run("create_task", { title: "Unrelated item", description: "This should not match.", project: project.id });
+
+      await load(`/#history?project=${project.id}&text=${encodeURIComponent(match.id.toLowerCase())}`);
+      await page.until("return document.querySelectorAll('#history-list .history-event').length > 0", "History events matching a task ID");
+      assert.equal(await page.run("return document.getElementById('history-text')?.value"), match.id.toLowerCase());
+      assert.ok(await page.run<boolean>(`return [...document.querySelectorAll('.history-event')].every((event) => event.dataset.id === ${JSON.stringify(match.id)})`), "the task ID filter excludes unrelated items");
+
+      await load(`/#history?project=${project.id}&text=NEEDLE`);
+      await page.until("return document.querySelectorAll('#history-list .history-event').length > 0", "History events matching a title");
+      assert.equal(await page.run("return document.getElementById('history-text')?.value"), "NEEDLE");
+      assert.ok(await page.run<boolean>(`return [...document.querySelectorAll('.history-event')].every((event) => event.dataset.id === ${JSON.stringify(match.id)})`), "the title filter excludes unrelated items");
+      await page.click("#history-clear");
+      await page.until(`return location.hash === '#history?project=${project.id}' && document.getElementById('history-text').value === ''`, "clearing the History text filter");
+
+      const bookmarkedText = `${"a".repeat(127)}😀`;
+      const safePrefix = "a".repeat(127);
+      await load(`/#history?project=${project.id}&text=${encodeURIComponent(bookmarkedText)}`);
+      await page.until("return !document.getElementById('history-panel').hidden", "History after a bookmark with a supplementary character at the length limit");
+      assert.deepEqual(await page.run("return [location.hash, document.getElementById('history-text').value]"), [`#history?project=${project.id}&text=${encodeURIComponent(safePrefix)}`, safePrefix]);
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("labels task completions and shows elapsed duration in History and task details", async () => {
+      const project = await run("create_project", { title: "History duration", prefix: "HSTDUR" });
+      const made = await run("create_task", { title: "Measured work", description: "Finish to see its duration.", project: project.id });
+      const started = await run("set_task_status", { id: made.id, version: made.version, status: "in_progress" });
+      const done = await run("set_task_status", { id: made.id, version: started.version, status: "done" });
+      const createdAt = new Date(Date.parse(done.completed_at) - (2 * 24 + 3) * 60 * 60 * 1000).toISOString();
+      await run("override_timestamp", { id: made.id, version: done.version, name: "created_at", value: createdAt });
+
+      await load(`/#history?project=${project.id}&text=${made.id}`);
+      await page.until(`return [...document.querySelectorAll('.history-event[data-id="${made.id}"] .history-event-action')].some((action) => action.textContent === 'Completed')`, "the completed task event in History");
+      assert.equal(await page.run<string>(`return [...document.querySelectorAll('.history-event[data-id="${made.id}"]')].find((event) => event.querySelector('.history-event-action')?.textContent === 'Completed')?.querySelector('.history-event-duration')?.textContent ?? ''`), "Took 2 days, 3 hours");
+
+      await page.click(`.history-event[data-id="${made.id}"] .history-event-item`);
+      await page.until("return !document.getElementById('panel').hidden", "the completed task's detail panel");
+      assert.ok(await page.run<boolean>("return document.getElementById('detail').textContent.includes('Took') && document.getElementById('detail').textContent.includes('2 days, 3 hours')"));
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("zooms into History groups, bookmarks the trail, and zooms back out", async () => {
+      const project = await run("create_project", { title: "History zoom", prefix: "HSTZOM" });
+      const outer = await run("create_task", { title: "Outer group", description: "Contains a group.", project: project.id });
+      const inner = await run("create_task", { title: "Inner group", description: "Contains work.", project: project.id, parent: outer.id });
+      const child = await run("create_task", { title: "Nested work", description: "Inside the group.", project: project.id, parent: inner.id });
+      const outside = await run("create_task", { title: "Sibling work", description: "Outside both groups.", project: project.id });
+
+      await load(`/#history?project=${project.id}`);
+      await page.until(`return Boolean(document.querySelector('.history-event[data-id="${outer.id}"]'))`, "the outer group event");
+      assert.equal(await count(`.history-event[data-id="${outside.id}"]`), 1);
+      await page.click(`.history-event[data-id="${outer.id}"] .history-zoom-into`);
+      await page.until(`return location.hash.includes('in=${encodeURIComponent(outer.id)}') && document.querySelectorAll('#history-list .history-event').length > 0`, "History zoomed into the outer group");
+      const firstScope = await page.run<string[]>("return [...document.querySelectorAll('.history-event')].map((event) => event.dataset.id)");
+      assert.ok(firstScope.includes(inner.id));
+      assert.ok(firstScope.includes(child.id));
+      assert.ok(!firstScope.includes(outer.id));
+      assert.ok(!firstScope.includes(outside.id));
+      assert.ok(await page.run<boolean>(`return document.getElementById('history-scope').textContent.includes(${JSON.stringify(outer.id)})`));
+
+      await page.click(`.history-event[data-id="${inner.id}"] .history-zoom-into`);
+      await page.until(`return location.hash.includes('in=${outer.id}/${inner.id}')`, "History zoomed into the nested group");
+      await page.run("history.back()");
+      await page.until(`return location.hash === '#history?project=${project.id}&in=${outer.id}'`, "Back zoomed out one group");
+      await page.run("history.forward()");
+      await page.until(`return location.hash === '#history?project=${project.id}&in=${outer.id}/${inner.id}'`, "Forward restored the nested group scope");
+      await load(await page.run<string>("return location.hash"));
+      const nested = await page.run<string[]>("return [...document.querySelectorAll('.history-event')].map((event) => event.dataset.id)");
+      assert.deepEqual([...new Set(nested)], [child.id]);
+
+      await page.click("#history-zoom-out");
+      await page.until(`return location.hash === '#history?project=${project.id}&in=${encodeURIComponent(outer.id)}'`, "History zoomed back out one group");
+      assert.deepEqual(page.errors, []);
+    });
+
     it("adds a third, project-filtered view with bookmarked event filters and item links", async () => {
       await load("/#board?project=WEB");
       await page.click("#view-history");
@@ -10157,12 +10234,16 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     });
 
     it("shows the connection form and clears retained History content after the feed is rejected", async () => {
+      const group = await run("create_task", { title: "Private History group", description: "Contains private work.", project: "WEB" });
+      await run("create_task", { title: "Private nested work", description: "Inside a scoped group.", project: "WEB", parent: group.id });
       await load("/#history?project=WEB&kind=task&actor=agent1");
       await page.until("return document.querySelectorAll('#history-list .history-event').length > 0", "the private History entries");
+      await page.click(`.history-event[data-id="${group.id}"] .history-zoom-into`);
+      await page.until(`return location.hash.includes('in=${group.id}') && document.getElementById('history-scope').textContent.includes('Private History group')`, "the private History group scope");
       await page.run("window.historyRealFetch = window.fetch; window.fetch = async (...args) => String(args[0]).endsWith('/api/list-history') ? new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'History key was refused' } }), { status: 401, headers: { 'content-type': 'application/json' } }) : window.historyRealFetch(...args)");
-      await page.run("document.getElementById('history-action').value = 'updated'; document.getElementById('history-filters').requestSubmit()");
+      await page.run("document.getElementById('history-text').value = 'checkout'; document.getElementById('history-action').value = 'updated'; document.getElementById('history-filters').requestSubmit()");
       await page.until("return document.getElementById('main').hidden && Boolean(document.querySelector('#notice input'))", "the connection form after History is refused");
-      assert.deepEqual(await page.run("return [document.querySelectorAll('#history-list .history-event').length, document.getElementById('history-status').textContent, ...['history-kind','history-actor','history-action','history-from','history-to'].map(id => document.getElementById(id).value)]"), [0, "", "", "", "", "", ""]);
+      assert.deepEqual(await page.run("return [document.querySelectorAll('#history-list .history-event').length, document.getElementById('history-status').textContent, ...['history-text','history-kind','history-actor','history-action','history-from','history-to'].map(id => document.getElementById(id).value), document.getElementById('history-scope').textContent, document.getElementById('history-zoom-out').disabled, document.getElementById('history-zoom-out').title]"), [0, "", "", "", "", "", "", "", "", true, "History is showing the whole selected scope"]);
       assert.deepEqual(page.errors, []);
     });
   }, { concurrency: false });
