@@ -191,6 +191,8 @@ export class MemoryStorage implements StorageAdapter {
       if (page.kind !== undefined && record.kind !== page.kind) return false;
       if (page.actor !== undefined && record.actor !== page.actor) return false;
       if (page.action !== undefined && record.action !== page.action) return false;
+      if (page.statusFrom !== undefined && (record.action !== "status_changed" || record.data.from !== page.statusFrom)) return false;
+      if (page.statusTo !== undefined && (record.action !== "status_changed" || record.data.to !== page.statusTo)) return false;
       if (page.from !== undefined && record.at < page.from) return false;
       if (page.to !== undefined && record.at > page.to) return false;
       return true;

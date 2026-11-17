@@ -330,11 +330,11 @@ describe("command line", () => {
     assert.equal(user.includes("undefined"), false, user);
   });
 
-  it("lists tenant history from the CLI with the same project and event filters", async () => {
+  it("lists tenant history from the CLI with project, event and status filters", async () => {
     await cli("create-project", "--title", "History CLI project", "--prefix", "HISCLI", "--as", "agent1");
     const made = JSON.parse((await cli("create-task", "--title", "History CLI", "--description", "inspect changes", "--project", "HISCLI", "--as", "agent1", "--json")).out);
     await cli("set-task-status", made.id, "--version", "1", "--status", "in_progress", "--as", "agent1");
-    const listed = await cli("list-history", "--project", "HISCLI", "--kind", "task", "--actor", "agent1", "--action", "status_changed", "--as", "agent1", "--json");
+    const listed = await cli("list-history", "--project", "HISCLI", "--kind", "task", "--actor", "agent1", "--action", "status_changed", "--status-from", "open", "--status-to", "in_progress", "--as", "agent1", "--json");
     assert.equal(listed.code, 0, listed.err);
     assert.deepEqual(JSON.parse(listed.out).changes.map((event: any) => [event.id, event.action, event.by]), [[made.id, "status_changed", "agent1"]]);
   });

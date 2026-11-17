@@ -296,6 +296,9 @@ main { padding: 18px clamp(14px, 3vw, 28px) 76px; display: grid; grid-template-c
 .history-scope-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: end; gap: 6px; min-width: 0; }
 .history-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; color: var(--muted); font-size: 12px; }
 .history-scope button, .history-zoom-out { min-height: 34px; padding: 5px 9px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--surface); color: var(--text); cursor: pointer; font: inherit; }
+.history-zoom-select select { min-width: 150px; max-width: min(280px, 42vw); min-height: 34px; padding: 5px 9px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--surface); color: var(--text); cursor: pointer; font: inherit; font-size: 12px; }
+.history-zoom-select select:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+.history-zoom-select select:disabled { color: var(--muted); cursor: default; opacity: 0.65; }
 .history-scope button[aria-current="location"] { border-color: var(--busy); background: var(--busy-soft); font-weight: 650; }
 .history-scope button:focus-visible, .history-zoom-out:focus-visible, .history-zoom-into:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
 .history-zoom-out:disabled { color: var(--muted); cursor: default; opacity: 0.65; }
@@ -325,7 +328,7 @@ main { padding: 18px clamp(14px, 3vw, 28px) 76px; display: grid; grid-template-c
 .history-event-duration { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .history-event-item { display: inline-flex; align-items: baseline; gap: 7px; justify-self: start; max-width: 100%; padding: 2px 0; border: 0; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
 .history-event-item-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
-.history-zoom-into { min-height: 28px; padding: 3px 9px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--surface); color: var(--muted); cursor: pointer; font: inherit; font-size: 12px; }
+.history-zoom-into { min-height: 28px; padding: 3px 9px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--surface); color: var(--text); cursor: pointer; font: inherit; font-size: 12px; }
 .history-zoom-into:hover { border-color: var(--busy); color: var(--text); }
 .history-event-item:hover .history-event-title { text-decoration: underline; text-underline-offset: 3px; }
 .history-event-item.passive { cursor: default; }

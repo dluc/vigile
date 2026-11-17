@@ -219,6 +219,7 @@ const HISTORY_ACTIONS = {
   key_reset: "Key reset",
   timestamp_overridden: "Timestamp overridden",
 };
+const HISTORY_STATUSES = ["draft", "open", "in_progress", "paused", "in_review", "done", "cancelled", "in_preview", "ready", "broken"];
 
 const label = (status) => status.replaceAll("_", " ");
 
@@ -237,7 +238,7 @@ const isOpenTrouble = (task) => isTrouble(task) && !FINISHED.includes(task.statu
  */
 const boardColumn = (task) => (state.bugsApart && isOpenTrouble(task) ? "trouble" : columnOf(task));
 
-const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, historyFilters: { text: null, kind: null, actor: null, action: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
+const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, historyFilters: { text: null, kind: null, actor: null, action: null, status_from: null, status_to: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
 let historyTurn = 0;
 let historyLoadingTurn = 0;
 
@@ -1090,6 +1091,8 @@ function readRoute(address = location.hash) {
     kind: ["project", "task", "user"].includes(asked.get("kind")) ? asked.get("kind") : null,
     actor: decoded(asked.get("actor") ?? "") || null,
     action: decoded(asked.get("action") ?? "") || null,
+    status_from: HISTORY_STATUSES.includes(asked.get("fromStatus")) ? asked.get("fromStatus") : null,
+    status_to: HISTORY_STATUSES.includes(asked.get("toStatus")) ? asked.get("toStatus") : null,
     from: validHistoryDate(decoded(asked.get("from") ?? "")),
     to: validHistoryDate(decoded(asked.get("to") ?? "")),
   };
@@ -1107,6 +1110,8 @@ function routeOf(view, open, zoom = state.zoom, into = state.into, project = sta
     view === "history" && historyFilters.kind && `kind=${encodeURIComponent(historyFilters.kind)}`,
     view === "history" && historyFilters.actor && `actor=${encodeURIComponent(historyFilters.actor)}`,
     view === "history" && historyFilters.action && `action=${encodeURIComponent(historyFilters.action)}`,
+    view === "history" && historyFilters.status_from && `fromStatus=${encodeURIComponent(historyFilters.status_from)}`,
+    view === "history" && historyFilters.status_to && `toStatus=${encodeURIComponent(historyFilters.status_to)}`,
     view === "history" && historyFilters.from && `from=${encodeURIComponent(historyFilters.from)}`,
     view === "history" && historyFilters.to && `to=${encodeURIComponent(historyFilters.to)}`,
     into.length > 0 && `in=${into.map(encodeURIComponent).join("/")}`,
@@ -2182,6 +2187,8 @@ function historyQueryState() {
     kind: state.historyFilters.kind,
     actor: state.historyFilters.actor,
     action: state.historyFilters.action,
+    status_from: state.historyFilters.status_from,
+    status_to: state.historyFilters.status_to,
     from: state.historyFilters.from,
     to: state.historyFilters.to,
   }).filter(([, value]) => value));
@@ -2359,9 +2366,30 @@ function renderHistoryScope() {
       return el("button", { type: "button", "data-depth": String(index + 1), "aria-current": index === state.into.length - 1 ? "location" : undefined, title: index === state.into.length - 1 ? `History inside ${id} · ${title}` : `Zoom out to ${id} · ${title}`, onclick: () => go("history", null, [], { into: state.into.slice(0, index + 1) }) }, `${id} · ${title}`);
     }),
   );
+  const zoomTarget = $("history-zoom-target");
+  const selected = zoomTarget.value;
+  const held = heldBy();
+  let groups = state.tasks;
+  for (const ref of [state.project, state.group]) {
+    if (!ref) continue;
+    const inside = heldIn(ref);
+    groups = groups.filter((task) => inside.has(task.id));
+  }
+  groups = groups.filter((task) => (held.get(task.id)?.length ?? 0) > 0);
+  zoomTarget.replaceChildren(
+    el("option", { value: "" }, groups.length ? "Choose a group…" : "No groups in this scope"),
+    ...groups.map((task) => el("option", { value: task.id }, `${task.id} · ${task.title}`)),
+  );
+  zoomTarget.disabled = groups.length === 0;
+  zoomTarget.value = groups.some((task) => task.id === selected) ? selected : "";
   $("history-zoom-out").disabled = state.into.length === 0;
   $("history-zoom-out").title = state.into.length ? `Zoom out of ${state.into.at(-1)}` : "History is showing the whole selected scope";
 }
+
+$("history-zoom-target").addEventListener("change", () => {
+  const id = $("history-zoom-target").value;
+  if (id) zoomInto(id);
+});
 
 /** Shows the current feed and starts a fresh read when its project, group or History filters change. */
 function renderHistoryView() {
@@ -2378,6 +2406,8 @@ function syncHistoryControls() {
   $("history-kind").value = state.historyFilters.kind ?? "";
   $("history-actor").value = state.historyFilters.actor ?? "";
   $("history-action").value = state.historyFilters.action ?? "";
+  $("history-status-from").value = state.historyFilters.status_from ?? "";
+  $("history-status-to").value = state.historyFilters.status_to ?? "";
   $("history-from").value = state.historyFilters.from ?? "";
   $("history-to").value = state.historyFilters.to ?? "";
 }
@@ -2389,14 +2419,16 @@ $("history-filters").addEventListener("submit", (event) => {
     kind: $("history-kind").value || null,
     actor: $("history-actor").value.trim() || null,
     action: $("history-action").value || null,
+    status_from: $("history-status-from").value || null,
+    status_to: $("history-status-to").value || null,
     from: $("history-from").value || null,
     to: $("history-to").value || null,
   };
   go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: state.into, historyFilters });
 });
 $("history-clear").addEventListener("click", () => {
-  for (const id of ["history-text", "history-kind", "history-actor", "history-action", "history-from", "history-to"]) $(id).value = "";
-  const historyFilters = { text: null, kind: null, actor: null, action: null, from: null, to: null };
+  for (const id of ["history-text", "history-kind", "history-actor", "history-action", "history-status-from", "history-status-to", "history-from", "history-to"]) $(id).value = "";
+  const historyFilters = { text: null, kind: null, actor: null, action: null, status_from: null, status_to: null, from: null, to: null };
   go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: state.into, historyFilters });
 });
 $("history-more").addEventListener("click", () => void loadHistory(Boolean(state.historyError), Boolean(state.historyError && state.historyPages)));
@@ -2849,9 +2881,9 @@ function lockOut(refused = "") {
   Object.assign(state, { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, shown: null, drawn: null, item: null, have: null, further: null, troubled: false, openTitle: "", loadedAt: null, loadedMs: null, failed: true });
   $("instance").textContent = "";
   Object.assign(state, { project: null, projectZoom: false, zoom: null, into: [], group: null, open: null, trail: [] });
-  Object.assign(state, { historyFilters: { text: null, kind: null, actor: null, action: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null });
+  Object.assign(state, { historyFilters: { text: null, kind: null, actor: null, action: null, status_from: null, status_to: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null });
   historyRefreshPending = false;
-  for (const id of ["history-text", "history-kind", "history-actor", "history-action", "history-from", "history-to"]) $(id).value = "";
+  for (const id of ["history-text", "history-kind", "history-actor", "history-action", "history-status-from", "history-status-to", "history-from", "history-to"]) $(id).value = "";
   $("history-list").replaceChildren();
   $("history-status").textContent = "";
   $("history-empty").textContent = "";
@@ -2889,6 +2921,8 @@ function lockOut(refused = "") {
   showGraphStatus(null);
   render();
   $("history-scope").replaceChildren();
+  $("history-zoom-target").replaceChildren(el("option", { value: "" }, "No groups in this scope"));
+  $("history-zoom-target").disabled = true;
   $("history-zoom-out").disabled = true;
   $("history-zoom-out").title = "History is showing the whole selected scope";
   showRefresh();

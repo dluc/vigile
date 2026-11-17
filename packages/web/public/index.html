@@ -134,6 +134,7 @@
         </div>
         <div class="history-scope-row">
           <nav id="history-scope" class="history-scope" aria-label="History scope"></nav>
+          <label class="history-zoom-select"><span class="visually-hidden">Zoom into a group</span><select id="history-zoom-target" aria-label="Zoom into a group"><option value="">Choose a group…</option></select></label>
           <button id="history-zoom-out" class="history-zoom-out" type="button" aria-label="Zoom out of History group" disabled>− Zoom out</button>
         </div>
       </div>
@@ -153,6 +154,32 @@
           <option value="timestamp_overridden">Timestamp overridden</option>
         </select></label>
         <label><span>Actor</span><input id="history-actor" type="search" maxlength="128" placeholder="Username or USER ID" autocomplete="off"></label>
+        <label><span>From status</span><select id="history-status-from">
+          <option value="">Any status</option>
+          <option value="draft">Draft</option>
+          <option value="open">Open</option>
+          <option value="in_progress">In progress</option>
+          <option value="paused">Paused</option>
+          <option value="in_review">In review</option>
+          <option value="done">Done</option>
+          <option value="cancelled">Cancelled</option>
+          <option value="in_preview">In preview</option>
+          <option value="ready">Ready</option>
+          <option value="broken">Broken</option>
+        </select></label>
+        <label><span>To status</span><select id="history-status-to">
+          <option value="">Any status</option>
+          <option value="draft">Draft</option>
+          <option value="open">Open</option>
+          <option value="in_progress">In progress</option>
+          <option value="paused">Paused</option>
+          <option value="in_review">In review</option>
+          <option value="done">Done</option>
+          <option value="cancelled">Cancelled</option>
+          <option value="in_preview">In preview</option>
+          <option value="ready">Ready</option>
+          <option value="broken">Broken</option>
+        </select></label>
         <label><span>From</span><input id="history-from" type="date"></label>
         <label><span>Through</span><input id="history-to" type="date"></label>
         <div class="history-filter-actions"><button class="history-apply" type="submit">Apply filters</button><button id="history-clear" class="history-clear" type="button">Clear</button></div>

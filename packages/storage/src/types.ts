@@ -85,6 +85,10 @@ export interface HistoryFeedFilters {
   /** A stored user ID. */
   actor?: string;
   action?: string;
+  /** Only status changes whose previous status is this task or project status. */
+  statusFrom?: string;
+  /** Only status changes whose new status is this task or project status. */
+  statusTo?: string;
   /** Inclusive ISO timestamp bounds. */
   from?: string;
   to?: string;

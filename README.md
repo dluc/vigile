@@ -72,7 +72,8 @@ The pictures in this file show made-up data.
   and controls in a task's panel to raise or lower its priority.
 - **History.** Who changed what and when, for every item, and every status a
   task went through. Created and completed work is easy to spot, with the time
-  from creation to completion in the feed and task details.
+  from creation to completion in the feed and task details. Filter status
+  changes by their previous or new status.
 - **Storage you can trust and move.** A confirmed write survives a power cut. An
   instance is one folder; back it up while the service runs.
 - **Nothing to compile.** It uses the SQLite built into Node.js.
@@ -239,7 +240,8 @@ the task appears in `list_next_tasks`.
 - **History.** Retained events from across the plan, newest first. Each row says
   what changed, when, who did it and which item it affected. Open a project or
   task from its row. Created and completed events are labeled clearly, and a
-  completion says how long the task took. Load older changes a page at a time.
+  completion says how long the task took. Filter status changes by their
+  previous or new status, and load older changes a page at a time.
 
 ![The graph: a box for each project and each group, tasks coloured by state, and arrows from each task to the ones that wait for it](images/graph.webp)
 
@@ -274,9 +276,10 @@ bar without a finished-task count, in both expanded cards and the folded row.
 On expanded cards, the problem indicator is at the bottom left and "Zoom in" is
 at the bottom right.
 In History, the project selection works the same way. Filters narrow events by
-text, item kind, actor, action or time range; the address keeps those choices
-when the view is reloaded or shared. The scope bar and each group event let you
-zoom into nested work and back out, with the group path kept in the address.
+text, item kind, actor, action, previous or new status, or time range; the
+address keeps those choices when the view is reloaded or shared. Choose a group
+from the scope bar or use a group event to zoom into nested work. Zoom out or
+use the breadcrumb to return, with the group path kept in the address.
 Following a link in the
 panel opens the linked item, with a button back to the one you came from. The
 item ID is a copy button. Moving over the description reveals a small copy
@@ -1002,7 +1005,7 @@ act as `admin` unless given `--as <username>`.
 | `vigile update-task` | Changes a task's title, type, description, reason, priority, value or size. |
 | `vigile set-task-status` | Changes a task's status, within the allowed moves and only when its dependencies allow. |
 | `vigile list-tasks` | Lists tasks, filtered by project, group, top level, status, type, user or problems. |
-| `vigile list-history` | Lists retained changes newest first; filter by project, group (`--parent`), text (`--text`), item kind, actor, action or time range, and continue with `--continuation`. |
+| `vigile list-history` | Lists retained changes newest first; filter by project, group (`--parent`), text (`--text`), item kind, actor, action, previous status (`--status-from`), new status (`--status-to`) or time range, and continue with `--continuation`. |
 | `vigile list-next-tasks` | Lists the tasks that can start now, most important first. |
 | `vigile get` | Reads one project, task or user in full; `--history` adds the recorded changes. A list of more than 100 entries says so and gives the `--continuation` that reads on. |
 | `vigile delete` | Deletes a project, task or user. |
