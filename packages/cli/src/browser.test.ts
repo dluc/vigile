@@ -10016,6 +10016,25 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.deepEqual(page.errors, []);
     });
 
+    it("filters status changes by their source and destination statuses, and bookmarks both", async () => {
+      const project = await run("create_project", { title: "History status filters", prefix: "HSTSTA" });
+      const made = await run("create_task", { title: "Status transition work", description: "Move through work and review.", project: project.id });
+      const started = await run("set_task_status", { id: made.id, version: made.version, status: "in_progress" });
+      const reviewed = await run("set_task_status", { id: made.id, version: started.version, status: "in_review" });
+      await run("set_task_status", { id: made.id, version: reviewed.version, status: "done" });
+
+      const bookmark = `/#history?project=${project.id}&fromStatus=in_progress&toStatus=in_review`;
+      await load(bookmark);
+      await page.until(`return [...document.querySelectorAll('.history-event[data-id="${made.id}"] .history-event-detail')].some((detail) => detail.textContent === 'in progress → in review')`, "the filtered status-change event");
+      assert.deepEqual(await page.run("return { hash: location.hash, from: document.getElementById('history-status-from')?.value, to: document.getElementById('history-status-to')?.value, events: [...document.querySelectorAll('.history-event[data-action=\"status_changed\"]')].map((event) => [event.dataset.id, event.querySelector('.history-event-detail')?.textContent]) }"), {
+        hash: `#history?project=${project.id}&fromStatus=in_progress&toStatus=in_review`,
+        from: "in_progress",
+        to: "in_review",
+        events: [[made.id, "in progress → in review"]],
+      });
+      assert.deepEqual(page.errors, []);
+    });
+
     it("labels task completions and shows elapsed duration in History and task details", async () => {
       const project = await run("create_project", { title: "History duration", prefix: "HSTDUR" });
       const made = await run("create_task", { title: "Measured work", description: "Finish to see its duration.", project: project.id });
@@ -10044,6 +10063,12 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await load(`/#history?project=${project.id}`);
       await page.until(`return Boolean(document.querySelector('.history-event[data-id="${outer.id}"]'))`, "the outer group event");
       assert.equal(await count(`.history-event[data-id="${outside.id}"]`), 1);
+      assert.deepEqual(await page.run("const select = document.getElementById('history-zoom-target'); return select && { disabled: select.disabled, values: [...select.options].map((option) => option.value) }"), { disabled: false, values: ["", outer.id, inner.id] });
+      await page.run(`const select = document.getElementById('history-zoom-target'); select.value = ${JSON.stringify(outer.id)}; select.dispatchEvent(new Event('change', { bubbles: true }))`);
+      await page.until(`return location.hash.includes('in=${encodeURIComponent(outer.id)}') && !document.getElementById('history-zoom-out').disabled`, "the toolbar zoomed into the selected group");
+      await page.click("#history-zoom-out");
+      await page.until(`return location.hash === '#history?project=${project.id}' && document.getElementById('history-zoom-out').disabled`, "the toolbar zoomed back out to the project");
+      await page.until(`return Boolean(document.querySelector('.history-event[data-id="${outer.id}"] .history-zoom-into'))`, "the outer group event after zooming out");
       await page.click(`.history-event[data-id="${outer.id}"] .history-zoom-into`);
       await page.until(`return location.hash.includes('in=${encodeURIComponent(outer.id)}') && document.querySelectorAll('#history-list .history-event').length > 0`, "History zoomed into the outer group");
       const firstScope = await page.run<string[]>("return [...document.querySelectorAll('.history-event')].map((event) => event.dataset.id)");
@@ -10052,6 +10077,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.ok(!firstScope.includes(outer.id));
       assert.ok(!firstScope.includes(outside.id));
       assert.ok(await page.run<boolean>(`return document.getElementById('history-scope').textContent.includes(${JSON.stringify(outer.id)})`));
+      assert.deepEqual(await page.run("const select = document.getElementById('history-zoom-target'); return { disabled: select.disabled, values: [...select.options].map((option) => option.value) }"), { disabled: false, values: ["", inner.id] });
 
       await page.click(`.history-event[data-id="${inner.id}"] .history-zoom-into`);
       await page.until(`return location.hash.includes('in=${outer.id}/${inner.id}')`, "History zoomed into the nested group");
@@ -10062,6 +10088,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await load(await page.run<string>("return location.hash"));
       const nested = await page.run<string[]>("return [...document.querySelectorAll('.history-event')].map((event) => event.dataset.id)");
       assert.deepEqual([...new Set(nested)], [child.id]);
+      assert.equal(await page.run<boolean>("return document.getElementById('history-zoom-target').disabled"), true);
 
       await page.click("#history-zoom-out");
       await page.until(`return location.hash === '#history?project=${project.id}&in=${encodeURIComponent(outer.id)}'`, "History zoomed back out one group");
@@ -10241,9 +10268,9 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.click(`.history-event[data-id="${group.id}"] .history-zoom-into`);
       await page.until(`return location.hash.includes('in=${group.id}') && document.getElementById('history-scope').textContent.includes('Private History group')`, "the private History group scope");
       await page.run("window.historyRealFetch = window.fetch; window.fetch = async (...args) => String(args[0]).endsWith('/api/list-history') ? new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'History key was refused' } }), { status: 401, headers: { 'content-type': 'application/json' } }) : window.historyRealFetch(...args)");
-      await page.run("document.getElementById('history-text').value = 'checkout'; document.getElementById('history-action').value = 'updated'; document.getElementById('history-filters').requestSubmit()");
+      await page.run("document.getElementById('history-text').value = 'checkout'; document.getElementById('history-action').value = 'updated'; document.getElementById('history-status-from').value = 'open'; document.getElementById('history-status-to').value = 'in_review'; document.getElementById('history-filters').requestSubmit()");
       await page.until("return document.getElementById('main').hidden && Boolean(document.querySelector('#notice input'))", "the connection form after History is refused");
-      assert.deepEqual(await page.run("return [document.querySelectorAll('#history-list .history-event').length, document.getElementById('history-status').textContent, ...['history-text','history-kind','history-actor','history-action','history-from','history-to'].map(id => document.getElementById(id).value), document.getElementById('history-scope').textContent, document.getElementById('history-zoom-out').disabled, document.getElementById('history-zoom-out').title]"), [0, "", "", "", "", "", "", "", "", true, "History is showing the whole selected scope"]);
+      assert.deepEqual(await page.run("return { events: document.querySelectorAll('#history-list .history-event').length, status: document.getElementById('history-status').textContent, filters: ['history-text','history-kind','history-actor','history-action','history-status-from','history-status-to','history-from','history-to'].map(id => document.getElementById(id).value), scope: document.getElementById('history-scope').textContent, zoomOutDisabled: document.getElementById('history-zoom-out').disabled, zoomOutTitle: document.getElementById('history-zoom-out').title, zoomTargets: [...document.querySelectorAll('#history-zoom-target option')].map(option => option.textContent), zoomInDisabled: document.getElementById('history-zoom-target').disabled }"), { events: 0, status: "", filters: ["", "", "", "", "", "", "", ""], scope: "", zoomOutDisabled: true, zoomOutTitle: "History is showing the whole selected scope", zoomTargets: ["No groups in this scope"], zoomInDisabled: true });
       assert.deepEqual(page.errors, []);
     });
   }, { concurrency: false });

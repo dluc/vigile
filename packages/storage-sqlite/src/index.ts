@@ -636,6 +636,14 @@ export class SqliteStorage implements StorageAdapter {
       filters.push(`h.${column} ${field === "from" ? ">=" : field === "to" ? "<=" : "="} ?`);
       values.push(value);
     }
+    if (page.statusFrom !== undefined) {
+      filters.push("h.action = 'status_changed' AND json_extract(h.data, '$.from') = ?");
+      values.push(page.statusFrom);
+    }
+    if (page.statusTo !== undefined) {
+      filters.push("h.action = 'status_changed' AND json_extract(h.data, '$.to') = ?");
+      values.push(page.statusTo);
+    }
     if (page.before) {
       filters.push("(h.revision, h.seq) < (?, ?)");
       values.push(page.before.revision, page.before.seq);

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { LIMITS, KINDS, type Kind } from "../model.js";
+import { LIMITS, KINDS, PROJECT_STATUSES, TASK_STATUSES, type Kind, type ProjectStatus, type TaskStatus } from "../model.js";
 import { isMoment } from "../shape.js";
 import { displayId, storageId } from "../records.js";
 import { resolveRef } from "../rules.js";
@@ -28,6 +28,10 @@ const historyBound = z.string().refine((value) => {
 const bound = (value: string, endOfDate: boolean): string =>
   dateOnly.test(value) ? `${value}T${endOfDate ? "23:59:59.999" : "00:00:00.000"}Z` : new Date(value).toISOString();
 
+type HistoryStatus = TaskStatus | ProjectStatus;
+const historyStatuses = [...new Set([...TASK_STATUSES, ...PROJECT_STATUSES])] as [HistoryStatus, ...HistoryStatus[]];
+const historyStatus = z.enum(historyStatuses);
+
 const input = z.strictObject({
   project: z.string().trim().min(1).optional().describe("Only events for this project and items it contains."),
   parent: z.string().trim().min(1).optional().describe("Only events for tasks contained in this group at any depth, not the group itself."),
@@ -35,6 +39,8 @@ const input = z.strictObject({
   kind: z.enum(KINDS).optional().describe("Only events about projects, tasks or users of this kind."),
   actor: z.string().trim().min(1).max(128).optional().describe("Only events recorded by this user's username or ID."),
   action: z.string().trim().min(1).max(64).optional().describe("Only this kind of event, such as status_changed or link_added."),
+  status_from: historyStatus.optional().describe("Only status_changed events whose previous status is this task or project status."),
+  status_to: historyStatus.optional().describe("Only status_changed events whose new status is this task or project status."),
   from: historyBound.optional().describe("Only events on or after this date or timestamp."),
   to: historyBound.optional().describe("Only events on or before this date or timestamp."),
   continuation,
@@ -49,7 +55,7 @@ const input = z.strictObject({
 export const listHistory = defineRead({
   name: "list_history",
   description:
-    "List retained changes across the plan, newest first. Filter by project, group, item ID, current title or username, item kind, actor, action or time range. A project includes events for items it currently contains, including items in nested groups. A group includes events for tasks it contains at any depth, not the group's own events. Each entry names its item, actor, action and data, and task completion events include elapsed wall-clock duration from creation. Returns at most 100 per call; pass the continuation token unchanged with the same filters to read older changes.",
+    "List retained changes across the plan, newest first. Filter by project, group, item ID, current title or username, item kind, actor, action, previous or new task/project status, or time range. A project includes events for items it currently contains, including items in nested groups. A group includes events for tasks it contains at any depth, not the group's own events. Each entry names its item, actor, action and data, and task completion events include elapsed wall-clock duration from creation. Returns at most 100 per call; pass the continuation token unchanged with the same filters to read older changes.",
   access: "all",
   input,
   run(ctx, filters) {
@@ -76,6 +82,8 @@ export const listHistory = defineRead({
         ...(filters.kind === undefined ? {} : { kind: filters.kind }),
         ...(actor === undefined ? {} : { actor }),
         ...(filters.action === undefined ? {} : { action: filters.action }),
+        ...(filters.status_from === undefined ? {} : { statusFrom: filters.status_from }),
+        ...(filters.status_to === undefined ? {} : { statusTo: filters.status_to }),
         ...(filters.from === undefined ? {} : { from: bound(filters.from, false) }),
         ...(filters.to === undefined ? {} : { to: bound(filters.to, true) }),
         ...(before === undefined ? {} : { before: { revision: before[0], seq: before[1] } }),

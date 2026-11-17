@@ -331,6 +331,41 @@ export function runStorageContractTests(name: string, factory: () => AdapterFact
         assert.deepEqual(byUnicodeTitle.records.map(({ id }) => id), ["UNICODE-001"]);
       }));
 
+    it("filters status changes by their source and destination statuses", () =>
+      withStore(async (store) => {
+        const statusChange = (kind: string, id: string, from: string, to: string, at: string): Change => ({
+          op: "add_history",
+          record: { kind, id, at, actor: "1", action: "status_changed", data: { from, to } },
+        });
+        await store.commit("default", {
+          expectedRevision: null,
+          counters: {},
+          changes: [
+            task("ABC-001", 1, "Transition work"),
+            { op: "put_object", record: { kind: "project", id: "P", version: 1, data: { title: "Project transition" } } },
+            { op: "add_history", record: { kind: "task", id: "ABC-001", at: "2026-01-01T00:00:00.000Z", actor: "1", action: "created", data: { status: "open" } } },
+            { op: "add_history", record: { kind: "project", id: "P", at: "2026-01-01T00:00:00.000Z", actor: "1", action: "created", data: { status: "open" } } },
+            statusChange("task", "ABC-001", "open", "in_progress", "2026-01-01T00:00:01.000Z"),
+            statusChange("task", "ABC-001", "in_progress", "in_review", "2026-01-01T00:00:02.000Z"),
+            statusChange("task", "ABC-001", "in_review", "done", "2026-01-01T00:00:03.000Z"),
+            statusChange("project", "P", "open", "ready", "2026-01-01T00:00:04.000Z"),
+          ],
+        });
+        const read = store.readHistoryFeedPage.bind(store) as unknown as (
+          tenant: string,
+          page: { statusFrom?: string; statusTo?: string; limit: number },
+        ) => Promise<{ records: Array<{ kind: string; id: string; data: { from?: string; to?: string } }>; hasMore: boolean }>;
+
+        const toReview = await read("default", { statusTo: "in_review", limit: 10 });
+        assert.deepEqual(toReview.records.map(({ kind, id, data }) => [kind, id, data.from, data.to]), [["task", "ABC-001", "in_progress", "in_review"]]);
+        const fromReview = await read("default", { statusFrom: "in_review", limit: 10 });
+        assert.deepEqual(fromReview.records.map(({ id, data }) => [id, data.from, data.to]), [["ABC-001", "in_review", "done"]]);
+        const both = await read("default", { statusFrom: "open", statusTo: "in_review", limit: 10 });
+        assert.deepEqual(both.records, []);
+        const projectStatus = await read("default", { statusTo: "ready", limit: 10 });
+        assert.deepEqual(projectStatus.records.map(({ kind, id, data }) => [kind, id, data.from, data.to]), [["project", "P", "open", "ready"]]);
+      }));
+
     it("scopes the history feed to a group's descendants and intersects the selected project", () =>
       withStore(async (store) => {
         const change = (id: string, at: string): Change => ({
