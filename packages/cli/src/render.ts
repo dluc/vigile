@@ -290,10 +290,35 @@ const linkText = (result: any): string => `${result.link.from} ${result.link.typ
 const linked: Printer = (ui, result) => note(ui, "ok", result.created === true ? `Linked: ${linkText(result)}` : `Already linked: ${linkText(result)}`);
 const unlinked: Printer = (ui, result) => note(ui, "ok", `Removed: ${linkText(result)}`);
 
+function elapsedDuration(milliseconds: number): string {
+  if (milliseconds < 60_000) return "less than a minute";
+  const units: Array<[number, string]> = [
+    [365 * 24 * 60 * 60 * 1000, "year"],
+    [30 * 24 * 60 * 60 * 1000, "month"],
+    [7 * 24 * 60 * 60 * 1000, "week"],
+    [24 * 60 * 60 * 1000, "day"],
+    [60 * 60 * 1000, "hour"],
+    [60 * 1000, "minute"],
+  ];
+  let rest = Math.floor(milliseconds);
+  const parts: string[] = [];
+  for (const [size, name] of units) {
+    const count = Math.floor(rest / size);
+    if (!count) continue;
+    parts.push(`${count} ${name}${count === 1 ? "" : "s"}`);
+    rest -= count * size;
+    if (parts.length === 2) break;
+  }
+  return parts.join(", ") || "less than a minute";
+}
+
 const historyChanges: Printer = (ui, result) => {
   for (const change of result.changes) {
     const item = change.title ? `${change.kind} ${change.id} · ${change.title}` : `${change.kind} ${change.id}`;
-    ui.out(`${change.at}  ${change.action.replaceAll("_", " ")}  ${item}  by ${change.by}`);
+    const completed = change.kind === "task" && change.action === "status_changed" && change.data?.to === "done";
+    const action = completed ? "completed" : change.action.replaceAll("_", " ");
+    const duration = completed && Number.isSafeInteger(change.duration_ms) && change.duration_ms >= 0 ? ` · took ${elapsedDuration(change.duration_ms)}` : "";
+    ui.out(`${change.at}  ${action}  ${item}  by ${change.by}${duration}`);
     if (Object.keys(change.data).length) ui.out(`  ${JSON.stringify(change.data)}`);
   }
   // `more` says to add the continuation to the command that produced this page, so its original filters stay in place.

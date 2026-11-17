@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, realpathSync, mkdtempSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, uptime } from "node:os";
 import { basename, join, relative } from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -4260,6 +4260,9 @@ describe("at the command line", () => {
 
     // With one taken half an hour ago, and the setting that the instances get.
     one.clock.now = Math.floor(Date.now() - 30 * MINUTE);
+    // The restarted CLI uses the machine's uptime as its monotonic clock. Simulate an uptime reset so it
+    // measures the age of this backup from the wall clock, independent of how long the runner has been up.
+    one.clock.mono = uptime() * 1000 + HOUR;
     await one.start();
     await one.pass(0);
     await one.service.stop();

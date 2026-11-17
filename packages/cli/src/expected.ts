@@ -197,6 +197,7 @@ const HISTORY_FEED = {
   by: WHO,
   action: TEXT,
   data: OBJECT,
+  duration_ms: optional(COUNT),
   place: { is: (value: unknown) => Array.isArray(value) && value.length === 2 && value.every((part) => COUNT.is(part)), called: "a place" },
 };
 /**

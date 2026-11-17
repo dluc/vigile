@@ -182,7 +182,7 @@ export function questionOfList(operation: string, input: Record<string, unknown>
     .filter(([name, value]) => name !== "continuation" && value !== undefined)
     .map(([name, value]) => [
       name,
-      operation === "list_history" && ["project", "actor", "action"].includes(name) && typeof value === "string" ? value.trim() : value,
+      operation === "list_history" && ["project", "parent", "text", "actor", "action"].includes(name) && typeof value === "string" ? value.trim() : value,
     ] as const);
   return [operation, Object.fromEntries(filters.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))];
 }

@@ -30,6 +30,8 @@ const bound = (value: string, endOfDate: boolean): string =>
 
 const input = z.strictObject({
   project: z.string().trim().min(1).optional().describe("Only events for this project and items it contains."),
+  parent: z.string().trim().min(1).optional().describe("Only events for tasks contained in this group at any depth, not the group itself."),
+  text: z.string().trim().min(1).max(128).optional().describe("Only events for items whose ID, current title or username contains this text."),
   kind: z.enum(KINDS).optional().describe("Only events about projects, tasks or users of this kind."),
   actor: z.string().trim().min(1).max(128).optional().describe("Only events recorded by this user's username or ID."),
   action: z.string().trim().min(1).max(64).optional().describe("Only this kind of event, such as status_changed or link_added."),
@@ -47,7 +49,7 @@ const input = z.strictObject({
 export const listHistory = defineRead({
   name: "list_history",
   description:
-    "List retained changes across the plan, newest first. Filter by project, item kind, actor, action or time range. A project includes events for items it currently contains, including items in nested groups. Each entry names its item, actor, action and data. Returns at most 100 per call; pass the continuation token unchanged with the same filters to read older changes.",
+    "List retained changes across the plan, newest first. Filter by project, group, item ID, current title or username, item kind, actor, action or time range. A project includes events for items it currently contains, including items in nested groups. A group includes events for tasks it contains at any depth, not the group's own events. Each entry names its item, actor, action and data, and task completion events include elapsed wall-clock duration from creation. Returns at most 100 per call; pass the continuation token unchanged with the same filters to read older changes.",
   access: "all",
   input,
   run(ctx, filters) {
@@ -55,6 +57,7 @@ export const listHistory = defineRead({
     const before = filters.continuation === undefined ? undefined : tokens.place(filters.continuation, () => []);
     return readSteady(ctx, async (graph) => {
       const project = filters.project === undefined ? undefined : storageId("project", resolveRef(graph, filters.project, ["project"]).id);
+      const parent = filters.parent === undefined ? undefined : storageId("task", resolveRef(graph, filters.parent, ["task"]).id);
       let actor: string | undefined;
       if (filters.actor !== undefined) {
         try {
@@ -68,6 +71,8 @@ export const listHistory = defineRead({
       }
       const page = await ctx.readHistoryFeedPage({
         ...(project === undefined ? {} : { project }),
+        ...(parent === undefined ? {} : { parent }),
+        ...(filters.text === undefined ? {} : { text: filters.text }),
         ...(filters.kind === undefined ? {} : { kind: filters.kind }),
         ...(actor === undefined ? {} : { actor }),
         ...(filters.action === undefined ? {} : { action: filters.action }),
@@ -81,6 +86,11 @@ export const listHistory = defineRead({
         const id = displayId(kind, record.id);
         const item = (KINDS as readonly string[]).includes(kind) ? graph.get(kind, id) : undefined;
         const by = username(graph, displayId("user", record.actor));
+        const start = item?.kind === "task" ? Date.parse(item.created_at) : NaN;
+        const completedAt = Date.parse(record.completion_at ?? record.at);
+        const duration_ms = item?.kind === "task" && record.action === "status_changed" && record.data.to === "done" && Number.isFinite(start) && completedAt >= start
+          ? completedAt - start
+          : undefined;
         return {
           kind: record.kind,
           id,
@@ -89,6 +99,7 @@ export const listHistory = defineRead({
           by,
           action: record.action,
           data: record.data,
+          ...(duration_ms === undefined ? {} : { duration_ms }),
           place: [record.revision, record.seq] as const,
         };
       });

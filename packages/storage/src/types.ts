@@ -77,6 +77,10 @@ export interface HistoryPage {
 export interface HistoryFeedFilters {
   /** A stored project ID; includes that project's events and events for items it contains. */
   project?: string;
+  /** A stored task ID; includes events for its current contents at any depth, not the group itself. */
+  parent?: string;
+  /** A case-insensitive substring of an item's ID, title or username. */
+  text?: string;
   kind?: string;
   /** A stored user ID. */
   actor?: string;
@@ -92,9 +96,14 @@ export interface HistoryFeedPageRequest extends HistoryFeedFilters {
   limit: number;
 }
 
+/** A feed entry with the effective timeline moment for a completed task event, when available. */
+export interface HistoryFeedRecord extends HistoryRecord {
+  completion_at?: string;
+}
+
 export interface HistoryFeedPage {
   /** Newest first, ordered by the revision and sequence that recorded each event. */
-  records: HistoryRecord[];
+  records: HistoryFeedRecord[];
   /** Whether another matching event exists before this page. */
   hasMore: boolean;
 }
