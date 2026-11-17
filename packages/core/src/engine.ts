@@ -188,7 +188,7 @@ export class Engine {
     let rule: string | undefined;
     let cause: unknown;
     try {
-      if (!operation) throw notFound(`There is no operation called "${echo(name)}".`);
+      if (!operation) throw notFound(`There is no operation called "${echo(name)}".`, ["Read GET /api/operations or MCP tools/list for the operations available to your connection; on the command line, run vigile help."]);
       return operation.kind === "read"
         ? await this.run(operation, username, letInAs, input, null, this.clock.now().toISOString())
         : await this.enqueue(() => this.write(operation, username, letInAs, input));
@@ -281,14 +281,18 @@ export class Engine {
   /** Checks who is calling and what they sent, then runs the operation. `plan` is null for reads. */
   private async run(operation: Operation, username: string, letInAs: string | undefined, input: unknown, plan: Plan | null, now: string): Promise<any> {
     const caller = this.user(username);
-    if (!caller) throw new VigileError("unauthorized", `There is no user called "${echo(username)}".`);
+    if (!caller) throw new VigileError("unauthorized", `There is no user called "${echo(username)}".`, {
+      actions: ["Ask an admin for access as an existing user, then send the request again with that user's API key."],
+    });
     if (letInAs !== undefined && caller.id !== letInAs) {
       throw new VigileError("unauthorized", `The user "${username}" this request was let in as has been deleted since, and the name belongs to someone else now.`, {
         actions: ["Send the request again with an API key of the present user."],
       });
     }
     if (!mayCall(operation, caller.type)) {
-      throw forbidden(`${operation.name} is for ${(operation.access as readonly string[]).join(" or ")} users; you are connected as ${caller.username}, a${caller.type === "agent" ? "n" : ""} ${caller.type}.`);
+      throw forbidden(`${operation.name} is for ${(operation.access as readonly string[]).join(" or ")} users; you are connected as ${caller.username}, a${caller.type === "agent" ? "n" : ""} ${caller.type}.`, [
+        `Ask a user of type ${(operation.access as readonly string[]).join(" or ")} to perform ${operation.name}.`,
+      ]);
     }
     const parsed = operation.input.safeParse(input ?? {});
     if (!parsed.success) {

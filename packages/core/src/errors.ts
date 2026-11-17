@@ -65,7 +65,7 @@ export function echo(value: string, most = ECHOED): string {
   return `${value.slice(0, most).replace(/[\uD800-\uDBFF]$/, "")}… (${value.length} characters)`;
 }
 
-export const invalidInput = (message: string, actions?: string[]) => new VigileError("invalid_input", message, { actions });
+export const invalidInput = (message: string, actions: string[] = ["Correct the input described in the message, then send the request again."]) => new VigileError("invalid_input", message, { actions });
 
 export const notFound = (message: string, actions?: string[]) => new VigileError("not_found", message, { actions });
 

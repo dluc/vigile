@@ -37,7 +37,7 @@ export function pathText(path: Ref[]): string {
 export function resolveRef<K extends Kind>(graph: GraphView, input: string, kinds: readonly K[]): NodeOf<K> {
   const { kind: stated, rest } = splitRef(input);
   if (stated && !(kinds as readonly Kind[]).includes(stated)) {
-    throw invalidInput(`"${echo(input)}" is a ${stated}, but a ${list(kinds)} is expected here.`);
+    throw invalidInput(`"${echo(input)}" is a ${stated}, but a ${list(kinds)} is expected here.`, [`Supply the ID of a ${list(kinds)} instead.`]);
   }
   const candidates = stated ? [stated] : kinds;
   const found: Node[] = [];
@@ -114,8 +114,14 @@ export function checkContainerAcceptsWork(graph: GraphView, holder: Node): void 
 /** Refuses a status change the rules do not allow, saying what is in the way and what can be done. */
 export function checkTaskMove(graph: GraphView, task: TaskNode, to: TaskStatus, caller?: UserNode): void {
   if (task.status === to) {
+    const assigned = assignees(graph, task);
+    const mine = caller && assigned.some((user) => user.id === caller.id);
     throw refused("same_status", `${describe(task)} is already ${to}.`, {
-      actions: to === "in_progress" ? ["Someone is already working on it. Call list_next_tasks to pick other work."] : undefined,
+      actions: to === "in_progress"
+        ? [mine
+          ? `This task is already assigned to you and in progress. Call get with kind "task" and id "${task.id}" to read it and continue the work.`
+          : `This task is already in progress${assigned.length ? " and assigned to other users" : " with no assignee recorded"}. Call list_next_tasks to pick other work.`]
+        : [`Call get with kind "task" and id "${task.id}" to read its current state; no status change is needed.`],
     });
   }
   // A status that is none of those there are, in a record that was damaged, may move nowhere.
@@ -225,7 +231,9 @@ export function checkNewLink(graph: GraphView, linkType: LinkType, from: Node, t
       ["Call list_link_types to see what each type connects."],
     );
   }
-  if (sameRef(from, to)) throw refused("self_link", `${describe(from)} cannot be linked to itself.`);
+  if (sameRef(from, to)) throw refused("self_link", `${describe(from)} cannot be linked to itself.`, {
+    actions: ["Choose different items for from and to; call list_projects, list_tasks or list_users to find their IDs."],
+  });
   if (linkType.type === CONTAINS) checkContainerAcceptsWork(graph, from);
   if (linkType.effect === "groups" || linkType.effect === "holds_back") {
     const path = loopPath(graph, from, to);

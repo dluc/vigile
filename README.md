@@ -56,6 +56,11 @@ The pictures in this file show made-up data.
   progress, and every list can show the top level or one group.
 - **Refusals that say what to do.** A change that breaks a rule is refused with
   what is in the way and the actions that would resolve it.
+  An unchanged status or an item that is already restored needs no change:
+  the refusal says how to read its current state. A repeated start distinguishes
+  work assigned to you from work assigned elsewhere or with no assignee.
+  Invalid input says to correct the reported input; restricted operations say
+  which role can perform them, and built-in users must stay in place.
 - **No silent overwrites.** Every change names the version it was based on. If
   someone else changed the item first, the call fails and returns the current
   item.
