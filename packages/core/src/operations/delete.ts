@@ -61,10 +61,13 @@ export const deleteItem = defineWrite({
     if (ctx.caller.type !== "admin" && (permanent || node.kind === "user")) {
       throw forbidden(permanent ? "Only an admin can delete permanently." : "Only an admin can delete users.", [
         ...(permanent && node.kind !== "user" ? ["Call delete without permanent to hide the item instead."] : []),
+        "Ask an admin to perform this deletion.",
       ]);
     }
     if (node.kind === "user" && node.built_in) {
-      throw refused("built_in", `${describe(node)} is built in and cannot be deleted.`);
+      throw refused("built_in", `${describe(node)} is built in and cannot be deleted.`, {
+        actions: ["Leave this built-in user in place. Call list_users to find a non-built-in user if you meant to delete a different account."],
+      });
     }
     requireVersion(node, input.version, () => summary(ctx.graph, node));
     if (!permanent && !isLive(node)) {

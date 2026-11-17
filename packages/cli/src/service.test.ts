@@ -86,6 +86,21 @@ describe("service over HTTP", () => {
   before(async () => (running = await start()));
   after(() => running.stop());
 
+  it("gives keyless callers accurate guidance and an API key recovers access", async () => {
+    const isolated = await start();
+    try {
+      setValue(isolated.config, "auth.keyless_user", "ghost");
+      const denied = await isolated.call("/api/list-tasks", {});
+      assert.equal(denied.status, 401);
+      assert.match(denied.body.error.message, /connection without a key.*ghost.*no such user/);
+      assert.doesNotMatch(denied.body.error.message, /key belongs/);
+      assert.match(denied.body.error.actions[0], /Authorization: Bearer/);
+      assert.equal((await isolated.call("/api/list-tasks", {}, isolated.adminKey)).status, 200);
+    } finally {
+      await isolated.stop();
+    }
+  });
+
   it("answers /health without a key", async () => {
     const { status, body } = await running.call("/health");
     assert.equal(status, 200);
@@ -151,6 +166,11 @@ describe("service over HTTP", () => {
   });
 
   it("lists operations with their input schemas, by caller", async () => {
+    await assert.rejects(running.service.engine.execute("not_an_operation", "agent1", {}), (error: unknown) => {
+      assert.ok(error instanceof VigileError);
+      assert.match(error.details.actions![0]!, /GET \/api\/operations.*MCP tools\/list/);
+      return true;
+    });
     const agent = await running.call("/api/operations");
     const admin = await running.call("/api/operations", undefined, running.adminKey);
     assert.equal(agent.body.operations.length, 19);
@@ -1933,7 +1953,11 @@ describe("a data file that the version before wrote, with each item's timeline i
           (answer) => ({ answer }),
           (error: unknown) => ({ refusal: (error as { toJSON(): unknown }).toJSON() }),
         );
-        assert.deepEqual("answer" in outcome ? { answer: linksInOrder(outcome.answer) } : outcome, "refusal" in call ? { refusal: call.refusal } : { answer: linksInOrder(call.answer) }, what);
+        // The old same-status refusal now also explains how to read the unchanged project.
+        const expected = call.refusal?.rule === "same_status"
+          ? { ...call.refusal, actions: [`Call get with kind "project" and id "${call.input.id}" to read its current state; no status change is needed.`] }
+          : call.refusal;
+        assert.deepEqual("answer" in outcome ? { answer: linksInOrder(outcome.answer) } : outcome, "refusal" in call ? { refusal: expected } : { answer: linksInOrder(call.answer) }, what);
       }
       assert.deepEqual([engine.checkConsistency(), await engine.checkTimelines()], [[], []]);
       // The task that was deleted for good took its timeline with it.

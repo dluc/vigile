@@ -35,6 +35,10 @@ async function refusal(promise: Promise<unknown>): Promise<ReturnType<VigileErro
     await promise;
   } catch (error) {
     assert.ok(error instanceof VigileError, `expected a VigileError, got ${error}`);
+    if (error.code !== "internal") {
+      assert.ok(error.details.actions?.length, `refusal has no next action: ${error.message}`);
+      assert.ok(error.details.actions.every((action) => action.trim().length > 0), "every action has text");
+    }
     return error.toJSON();
   }
   assert.fail("expected the operation to be refused");
@@ -850,6 +854,60 @@ describe("tasks", () => {
     assert.notEqual(again.completed_at, done.completed_at);
     const read = await agent("get", { id: t.id });
     assert.equal(read.timeline.filter((e: any) => e.status === "done").length, 2);
+  });
+});
+
+describe("actionable refusals", () => {
+  it("distinguishes the caller's active work, other assignees and no assignee", async () => {
+    const { agent, person } = await setup();
+    const created = await agent("create_task", task("Active"));
+    const started = await agent("set_task_status", { id: created.id, version: 1, status: "in_progress" });
+    const repeat = { id: created.id, version: started.version, status: "in_progress" };
+    const mine = await refusal(agent("set_task_status", repeat));
+    assert.match(mine.actions![0]!, /assigned to you.*Call get.*continue/);
+    assert.doesNotMatch(mine.actions![0]!, /Someone|other users/);
+    assert.equal((await agent("get", { kind: "task", id: created.id })).status, "in_progress");
+    const theirs = await refusal(person("set_task_status", repeat));
+    assert.match(theirs.actions![0]!, /assigned to other users.*list_next_tasks/);
+    assert.ok(!(await person("list_next_tasks")).tasks.some((t: any) => t.id === created.id));
+    await agent("add_link", { from: created.id, type: "assigned to", to: "user" });
+    const shared = await agent("get", { id: created.id });
+    assert.match((await refusal(person("set_task_status", { ...repeat, version: shared.version }))).actions![0]!, /assigned to you/);
+    for (const to of ["agent1", "user"]) await agent("remove_link", { from: created.id, type: "assigned to", to });
+    const unassigned = await agent("get", { id: created.id });
+    assert.match((await refusal(agent("set_task_status", { ...repeat, version: unassigned.version }))).actions![0]!, /no assignee recorded/);
+  });
+
+  it("gives usable next steps for unchanged state, self-links, permissions and invalid input", async () => {
+    const { agent, admin, engine } = await setup();
+    const project = await agent("create_project", { title: "Project", prefix: "ACT" });
+    const a = await agent("create_task", task("First", { project: project.id }));
+    const b = await agent("create_task", task("Second", { project: project.id }));
+    for (const [operation, input, kind, id] of [
+      ["set_task_status", { id: a.id, version: a.version, status: "open" }, "task", a.id],
+      ["set_project_status", { id: project.id, version: project.version, status: "open" }, "project", project.id],
+      ["restore", { id: a.id }, "task", a.id],
+    ] as const) {
+      const error = await refusal(agent(operation, input));
+      assert.ok(error.actions![0]!.includes(`Call get with kind "${kind}" and id "${id}"`));
+      assert.equal((await agent("get", { kind, id })).id, id);
+    }
+    assert.match((await refusal(agent("add_link", { from: a.id, type: "depends on", to: a.id }))).actions![0]!, /different items/);
+    await agent("list_tasks");
+    assert.equal((await agent("add_link", { from: a.id, type: "depends on", to: b.id })).created, true);
+    assert.match((await refusal(admin("delete", { kind: "user", id: "agent1", version: 1 }))).actions![0]!, /Leave this built-in user/);
+    await admin("list_users");
+    assert.match((await refusal(agent("create_user", { username: "helper", type: "agent" }))).actions![0]!, /Ask a user of type admin/);
+    const { user: helper } = await admin("create_user", { username: "helper", type: "agent" });
+    assert.match((await refusal(agent("delete", { kind: "user", id: helper.id, version: helper.version }))).actions!.join(" "), /Ask an admin/);
+    await admin("delete", { kind: "user", id: helper.id, version: helper.version });
+    assert.match((await refusal(agent("restore", { kind: "user", id: helper.id }))).actions![0]!, /Ask an admin/);
+    await admin("restore", { kind: "user", id: helper.id });
+    assert.match((await refusal(agent("create_task", { title: "Missing description" }))).actions![0]!, /Correct the input/);
+    await agent("create_task", task("Missing description"));
+    assert.match((await refusal(agent("not_an_operation"))).actions![0]!, /GET \/api\/operations.*MCP tools\/list.*vigile help/);
+    assert.match((await refusal(engine.execute("list_tasks", "absent", {}))).actions![0]!, /existing user/);
+    await agent("list_tasks");
   });
 });
 

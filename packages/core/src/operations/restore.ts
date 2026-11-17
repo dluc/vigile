@@ -18,8 +18,10 @@ export const restore = defineWrite({
   }),
   run(ctx, input) {
     const node = resolveRef(ctx.graph, input.id, input.kind ? [input.kind] : KINDS);
-    if (node.kind === "user" && ctx.caller.type !== "admin") throw forbidden("Only an admin can restore users.");
-    if (isLive(node)) throw refused("not_deleted", `${describe(node)} is not deleted.`);
+    if (node.kind === "user" && ctx.caller.type !== "admin") throw forbidden("Only an admin can restore users.", ["Ask an admin to restore this user."]);
+    if (isLive(node)) throw refused("not_deleted", `${describe(node)} is not deleted.`, {
+      actions: [`Call get with kind "${node.kind}" and id "${node.id}" to read it; no restore is needed.`],
+    });
     // A user comes back as one that no key counts for, as the description says: not the key it had, should
     // that still be where keys are kept, nor any other, until one is issued.
     ctx.plan.put(node.kind === "user" && !node.built_in ? touch(node, ctx, { deleted_at: null, key_marks: [] }) : touch(node, ctx, { deleted_at: null }));
