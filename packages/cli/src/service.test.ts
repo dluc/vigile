@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { connect as openSocket, createServer } from "node:net";
+import { networkInterfaces } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,7 +18,8 @@ import { SqliteStorage, backupTenantFile, folderIsHeld, historyOwners, inspectTe
 import { webRoot } from "@vigile/web";
 import { FORMAT_1_ANSWERS, FORMAT_1_SQL, FORMAT_1_THEN, FORMAT_1_THEN_FROM } from "./format-1-data.js";
 import { openAsPlan } from "./restore.js";
-import { StartupError, isLoopback, namedFromOutside, startService, type Service, type ServiceOptions } from "./service.js";
+import { PING_MS } from "@vigile/http-api";
+import { LIMITS, StartupError, isLoopback, namedFromOutside, startService, type Service, type ServiceOptions } from "./service.js";
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -599,7 +601,7 @@ describe("requests nobody should send", () => {
 });
 
 describe("what one client may hold of the service", () => {
-  it("lets go of a request that does not arrive in full, and of connections beyond the limit", async () => {
+  it("lets go of a request that does not arrive in full, and answers while every connection is taken by one that says nothing", async () => {
     const running = await start({}, { requestMs: 400, headersMs: 400, checkMs: 100, connections: 12 });
     const { port, hostname } = new URL(running.service.urls.base);
     const sockets: Array<ReturnType<typeof openSocket>> = [];
@@ -621,7 +623,8 @@ describe("what one client may hold of the service", () => {
       const noHeaders = await ended("GET /health HTTP/1.1\r\nHost: x\r\n");
       assert.ok(noHeaders.ms < 3000, `a request whose headers never end is let go too, after ${noHeaders.ms} ms`);
 
-      // More connections than the limit: the further ones are closed at once, and the service still answers after.
+      // More connections than there are, none of which says anything: each further one takes the place of the
+      // one that has waited the longest, so that no more than the limit are open.
       const open = (): Promise<boolean> =>
         new Promise((resolve) => {
           const socket = openSocket(Number(port), hostname);
@@ -636,11 +639,314 @@ describe("what one client may hold of the service", () => {
       const stayed = (await Promise.all(Array.from({ length: 30 }, open))).filter(Boolean).length;
       assert.ok(stayed <= 12, `${stayed} of 30 connections were kept`);
       assert.ok(stayed >= 8, `${stayed} of 30 connections were kept`);
-      for (const socket of sockets) socket.destroy();
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // And the service answers while they are all held: the request that comes now gets the place of one of them.
+      const silent = await Promise.all(Array.from({ length: 12 }, open));
+      assert.deepEqual(silent, Array(12).fill(true));
       assert.equal((await running.call("/health")).status, 200);
+      assert.match(running.warnings.join("\n"), /^The service has no connection left to give: since this was last said, 1 idle or stalled connection was closed to make room, and 0 new ones were refused\.$/m);
+      assert.equal(running.warnings.filter((line) => line.startsWith("The service has no connection left")).length, 1, "said once, not for each of them");
     } finally {
       for (const socket of sockets) socket.destroy();
+      await running.stop();
+    }
+  });
+
+  /** How many connections the service has open, as the service counts them. */
+  const openAt = (running: Running): Promise<number> => new Promise((resolve, reject) => running.service.server.getConnections((error, count) => (error ? reject(error) : resolve(count))));
+  const until = async (what: () => Promise<boolean>, ms = 5000): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (await what()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return what();
+  };
+  /** Sends what a client would, and gives what comes back until the service closes the connection or `ms` have passed. */
+  const exchange = (running: Running, parts: string[], ms = 1500): Promise<{ answer: string; closed: boolean }> =>
+    new Promise((resolve, reject) => {
+      const { port, hostname } = new URL(running.service.urls.base);
+      let answer = "";
+      const socket = openSocket(Number(port), hostname, () => {
+        socket.write(parts[0]!);
+        // The rest only once the service has said to go ahead.
+        socket.on("data", (chunk) => {
+          answer += chunk;
+          if (parts.length > 1 && answer.startsWith("HTTP/1.1 100 Continue\r\n\r\n") && parts[1] !== "") socket.write(parts.splice(1, 1)[0]!);
+        });
+      });
+      const over = setTimeout(() => (socket.destroy(), resolve({ answer, closed: false })), ms);
+      socket.on("close", () => (clearTimeout(over), resolve({ answer, closed: true })));
+      socket.on("error", reject);
+    });
+
+  it("gives the place of a connection that does not read its answer to a new one, and closes it in the end", async () => {
+    const running = await start({}, { connections: 6, idleMs: 1500 });
+    const { port, hostname } = new URL(running.service.urls.base);
+    const sockets: Array<ReturnType<typeof openSocket>> = [];
+    try {
+      // Six connections ask for the largest file of the page, several times over, so that it is more than the
+      // system takes off the service's hands by itself, and read none of it.
+      await Promise.all(
+        Array.from(
+          { length: 6 },
+          () =>
+            new Promise<void>((resolve) => {
+              const socket = openSocket(Number(port), hostname, () => {
+                socket.pause();
+                socket.write("GET /vendor/elk-worker.min.js HTTP/1.1\r\nHost: localhost\r\n\r\n".repeat(8), () => resolve());
+              });
+              sockets.push(socket);
+              socket.on("error", () => {});
+            }),
+        ),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(await openAt(running), 6, "all of them are held, with an answer nobody takes");
+      // The next request is answered: one of them gave way to it.
+      const began = Date.now();
+      assert.equal((await running.call("/health")).status, 200);
+      assert.ok(Date.now() - began < 1000, "at once, and not when the limit of time has let one of them go");
+      assert.equal(await openAt(running), 6);
+      // And none of them is kept for good, although their clients hold on: nothing moves on them.
+      assert.equal(await until(async () => (await openAt(running)) <= 1, 8000), true, `${await openAt(running)} connections are still open`);
+      assert.equal(sockets.every((socket) => !socket.destroyed), true, "the clients did not let go themselves");
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await running.stop();
+    }
+  });
+
+  it("does not cut short an answer that is read on with pauses shorter than the limit, however long all of it takes", async () => {
+    const running = await start({}, { idleMs: 2000 });
+    const { port, hostname } = new URL(running.service.urls.base);
+    try {
+      const whole = (await (await fetch(`${running.service.urls.base}/vendor/elk-worker.min.js`)).arrayBuffer()).byteLength;
+      assert.ok(whole > 1_000_000, "a file that does not go out in one piece");
+      // The largest file of the page eight times over on one connection, which is more than the system takes
+      // off the service's hands by itself: the service hands the rest on as the client reads.
+      const ask = (more = "") => `GET /vendor/elk-worker.min.js HTTP/1.1\r\nHost: localhost\r\n${more}\r\n`;
+      const began = Date.now();
+      const read = await new Promise<number>((resolve, reject) => {
+        let [size, sincePause] = [0, 0];
+        const socket = openSocket(Number(port), hostname, () => socket.write(ask().repeat(7) + ask("Connection: close\r\n")));
+        // A megabyte, then a pause a quarter of the limit long, over and over.
+        socket.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if ((sincePause += chunk.length) < 1_000_000) return;
+          sincePause = 0;
+          socket.pause();
+          setTimeout(() => socket.resume(), 500);
+        });
+        socket.on("close", () => resolve(size));
+        socket.on("error", reject);
+      });
+      assert.ok(read > 8 * whole, `${read} bytes of eight answers of ${whole} each`);
+      assert.ok(Date.now() - began > 4000, `it took ${Date.now() - began} ms, more than twice the limit`);
+      // The limit is well above the time between two lines sent to a client that listens for changes.
+      assert.ok(LIMITS.idleMs >= 2 * PING_MS, `${LIMITS.idleMs} ms against a line every ${PING_MS} ms`);
+    } finally {
+      await running.stop();
+    }
+  });
+
+  it("takes a client that reads too little for more of its answer to be sent for one that does not read", async () => {
+    const running = await start({}, { idleMs: 1000 });
+    const { port, hostname } = new URL(running.service.urls.base);
+    let taking: NodeJS.Timeout | undefined;
+    const socket = openSocket(Number(port), hostname);
+    try {
+      socket.on("error", () => {});
+      socket.pause();
+      await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+      socket.write("GET /vendor/elk-worker.min.js HTTP/1.1\r\nHost: localhost\r\n\r\n".repeat(8));
+      // A byte every tenth of the limit, for as long as the connection lasts: the client is there and reads,
+      // and megabytes wait of which the service can hand on no more.
+      let taken = 0;
+      taking = setInterval(() => (taken += socket.read(1)?.length ?? 0), 100);
+      const began = Date.now();
+      assert.equal(await until(async () => (await openAt(running)) === 0, 8000), true, "the connection was kept although no more of the answer could be sent");
+      assert.ok(Date.now() - began >= 1000, `closed after ${Date.now() - began} ms, not before the limit`);
+      assert.ok(taken >= 5, `the client took ${taken} bytes meanwhile`);
+      assert.equal(socket.destroyed, false, "the client did not let go itself");
+    } finally {
+      clearInterval(taking);
+      socket.destroy();
+      await running.stop();
+    }
+  });
+
+  it("never closes a connection that is at work to make room: the new one is refused until one is free", async () => {
+    const running = await start({}, { connections: 4 });
+    const aborts: AbortController[] = [];
+    try {
+      // Four clients listen for changes: each has a connection, and each is sent all there is. Their answers are
+      // kept here: one that nothing refers to any more has its connection closed for it.
+      const listening: Response[] = [];
+      for (let i = 0; i < 4; i++) {
+        const abort = new AbortController();
+        aborts.push(abort);
+        listening.push(await fetch(`${running.service.urls.base}/api/events`, { signal: abort.signal }));
+        assert.equal(listening[i]!.status, 200);
+      }
+      assert.equal(await openAt(running), 4);
+      const refused = await exchange(running, ["GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"]);
+      assert.deepEqual(refused, { answer: "", closed: true });
+      assert.equal(await openAt(running), 4, "the four that listen were left alone");
+      assert.equal(listening.length, 4);
+      // One of them leaves, and its place is there for the next.
+      aborts[0]!.abort();
+      assert.equal(await until(async () => (await openAt(running)) === 3), true);
+      assert.equal((await running.call("/health")).status, 200);
+      assert.match(running.warnings.join("\n"), /^The service has no connection left to give: since this was last said, 0 idle or stalled connections were closed to make room, and 1 new one was refused\.$/m);
+    } finally {
+      for (const abort of aborts) abort.abort();
+      await running.stop();
+    }
+  });
+
+  it("leaves a connection alone while something is worked out for it, although another request of its is still arriving", async () => {
+    const running = await start({}, { connections: 1 });
+    const { port, hostname } = new URL(running.service.urls.base);
+    const socket = openSocket(Number(port), hostname);
+    try {
+      // One connection, and that is all there are. It listens for changes, and has begun to send a change as
+      // well, of which most is still to come.
+      let got = "";
+      socket.on("data", (chunk) => (got += chunk));
+      socket.on("error", () => {});
+      await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+      socket.write('GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\nPOST /api/create-task HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{"title":');
+      assert.equal(await until(async () => got.includes("event: hello")), true);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The next connection is refused, and the one at work stays.
+      assert.deepEqual(await exchange(running, ["GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"]), { answer: "", closed: true });
+      assert.deepEqual([socket.destroyed, await openAt(running)], [false, 1]);
+    } finally {
+      socket.destroy();
+      await running.stop();
+    }
+  });
+
+  it("takes the command line for this machine when the service listens on an address of a network", async (t) => {
+    // An address this machine has on a network, where it has one: a connection from the machine to that address
+    // comes from that address, and not from one that is the machine's own on every machine.
+    const address = Object.values(networkInterfaces())
+      .flat()
+      .find((one) => one && !one.internal && one.family === "IPv4")?.address;
+    if (!address) return void t.skip("this machine has no address on a network");
+    // One connection for each address beyond the machine, and no more than that for all of them.
+    const running = await start({ VIGILE_LISTEN_ADDRESS: address }, { connections: 4, connectionsPerAddress: 1, connectionsKeptForHere: 3 });
+    const aborts: AbortController[] = [];
+    const listening: Response[] = [];
+    try {
+      assert.equal(running.service.loopbackOnly, false);
+      // Three clients on this machine listen for changes, and a fourth connection is answered: taken for
+      // connections from beyond, the second of them would have been refused.
+      for (let i = 0; i < 3; i++) {
+        const abort = new AbortController();
+        aborts.push(abort);
+        listening.push(await fetch(`${running.service.urls.base}/api/events`, { signal: abort.signal }));
+      }
+      assert.deepEqual(listening.map((response) => response.status), [200, 200, 200]);
+      assert.equal((await running.call("/health")).status, 200);
+      assert.deepEqual(running.warnings.filter((line) => line.startsWith("The service has no connection left")), []);
+    } finally {
+      for (const abort of aborts) abort.abort();
+      await running.stop();
+    }
+  });
+
+  it("counts a client on this machine among the machine's on the stream of changes, by whichever address it connects", async (t) => {
+    const address = Object.values(networkInterfaces())
+      .flat()
+      .find((one) => one && !one.internal && one.family === "IPv4")?.address;
+    if (!address) return void t.skip("this machine has no address on a network");
+    // On every address of the machine: a program on it reaches the service over the one it has for itself and
+    // over the one it has on a network.
+    const running = await start({ VIGILE_LISTEN_ADDRESS: "0.0.0.0" });
+    const { port } = new URL(running.service.urls.base);
+    const aborts: AbortController[] = [];
+    const listening: Response[] = [];
+    const listen = async (host: string, headers: Record<string, string> = {}) => {
+      const abort = new AbortController();
+      aborts.push(abort);
+      const response = await fetch(`http://${host}:${port}/api/events`, { signal: abort.signal, headers });
+      listening.push(response);
+      return response;
+    };
+    try {
+      // It takes all the places of the machine over the first, naming a new address each time.
+      const statuses = [];
+      for (let i = 0; i < 168; i++) statuses.push((await listen("127.0.0.1", { "x-forwarded-for": `192.0.2.${i}` })).status);
+      assert.deepEqual([...new Set(statuses)], [200]);
+      // Over the second it is still the machine, and has none of the places left for clients from elsewhere.
+      const refused = await listen(address);
+      assert.equal(refused.status, 429);
+      assert.match(((await refused.json()) as any).error.message, /^168 clients that connect from the service's own machine are already listening for changes\.$/);
+      // Whom it says it speaks for is believed only of what the machine says to itself.
+      aborts[0]!.abort();
+      assert.equal(await until(async () => ((await running.call("/api/admin/status", undefined, running.adminKey)).body.listeners as number) === 167, 2000), true);
+      const named = [];
+      for (let i = 0; i < 33; i++) named.push((await listen(address, { "x-forwarded-for": `198.51.100.${i}` })).status);
+      assert.deepEqual([named[0], named.filter((status) => status === 200).length], [200, 1], "one place was free, and the name given changes nothing");
+    } finally {
+      for (const abort of aborts) abort.abort();
+      await running.stop();
+    }
+  });
+
+  it("reads no body that says it is too large, and tells a request that asks first to go ahead only when its body would be read", async () => {
+    const running = await start();
+    try {
+      // Each on a connection of its own, which the service closes once it has answered.
+      const head = (path: string, length: number, more = "") => `POST ${path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ${length}\r\n${more}\r\n`;
+      const first = (answer: string) => answer.split("\r\n")[0];
+      // Five megabytes are announced and none is sent: the answer does not wait for them.
+      const large = await exchange(running, [head("/api/list-projects", 5_000_000)], 1000);
+      assert.equal(first(large.answer), "HTTP/1.1 413 Payload Too Large");
+      assert.match(large.answer, /"code":"limit_exceeded","message":"The request body is larger than 1 MB\."/);
+
+      const asks = "Expect: 100-continue\r\n";
+      const wrongKey = "Authorization: Bearer vig_wrongwrongwrongwrongwrong\r\n";
+      // Asked first, the service says to go ahead and then answers what was sent.
+      const taken = await exchange(running, [head("/api/list-projects", 2, asks), "{}"]);
+      assert.match(taken.answer, /^HTTP\/1\.1 100 Continue\r\n\r\nHTTP\/1\.1 200 OK\r\n/);
+      assert.match(taken.answer, /\{"projects":\[\]\}$/);
+      // Where the body would not be read, it is not asked for: the answer comes as it is.
+      assert.equal(first((await exchange(running, [head("/api/list-projects", 5_000_000, asks)], 1000)).answer), "HTTP/1.1 413 Payload Too Large");
+      assert.equal(first((await exchange(running, [head("/api/list-projects", 2, asks + wrongKey)], 1000)).answer), "HTTP/1.1 401 Unauthorized");
+      assert.equal(first((await exchange(running, [head("/mcp", 2, asks + wrongKey)], 1000)).answer), "HTTP/1.1 401 Unauthorized");
+      assert.equal(first((await exchange(running, [head("/api/list-projects", 2, `${asks}Sec-Fetch-Site: cross-site\r\n`)], 1000)).answer), "HTTP/1.1 403 Forbidden");
+      assert.equal(first((await exchange(running, [head("/nothing-here", 2, asks)], 1000)).answer), "HTTP/1.1 404 Not Found");
+      const plain = await exchange(running, [`POST /api/list-projects HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n${asks}\r\n`], 1000);
+      assert.equal(first(plain.answer), "HTTP/1.1 400 Bad Request", "a body that does not say it is JSON is not asked for either");
+      // MCP takes a larger body than the API: one of two megabytes is asked for, one of five is not.
+      const more = `${asks}Accept: application/json, text/event-stream\r\n`;
+      assert.equal(first((await exchange(running, [head("/mcp", 2_000_000, more)], 500)).answer), "HTTP/1.1 100 Continue");
+      assert.equal(first((await exchange(running, [head("/mcp", 5_000_000, more)], 1000)).answer), "HTTP/1.1 413 Payload Too Large");
+      // Nor is a body asked for that MCP would not read: one that does not say it is JSON, or a request that
+      // does not take both kinds of answer.
+      const text = await exchange(running, [`POST /mcp HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n${more}\r\n`], 1000);
+      assert.equal(first(text.answer), "HTTP/1.1 415 Unsupported Media Type");
+      assert.equal(first((await exchange(running, [head("/mcp", 2, asks)], 1000)).answer), "HTTP/1.1 406 Not Acceptable");
+      assert.equal(first((await exchange(running, [head("/mcp", 2, `${asks}Accept: application/json\r\n`)], 1000)).answer), "HTTP/1.1 406 Not Acceptable");
+      // MCP is told to go ahead as well, and answers.
+      const ping = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
+      const mcp = await exchange(running, [head("/mcp", ping.length, `${asks}Accept: application/json, text/event-stream\r\n`), ping]);
+      assert.match(mcp.answer, /^HTTP\/1\.1 100 Continue\r\n\r\nHTTP\/1\.1 200 OK\r\n/);
+      assert.match(mcp.answer, /\{"result":\{\},"jsonrpc":"2\.0","id":1\}$/);
+    } finally {
+      await running.stop();
+    }
+  });
+
+  it("says what goes wrong with the server once it runs, and goes on", async () => {
+    const running = await start();
+    try {
+      running.service.server.emit("error", new Error("EMFILE: too many open files"));
+      assert.match(running.warnings.join("\n"), /^The server reported an error: Error: EMFILE: too many open files/m);
+      assert.equal((await running.call("/health")).status, 200);
+    } finally {
       await running.stop();
     }
   });
@@ -648,11 +954,14 @@ describe("what one client may hold of the service", () => {
   it("gives one address a share of the places on the stream of changes, not all of them", async () => {
     const running = await start();
     const aborts: AbortController[] = [];
+    // The answers of those that listen are kept: one that nothing refers to any more has its connection closed for it.
+    const listening: Response[] = [];
     try {
       const listen = async () => {
         const abort = new AbortController();
         aborts.push(abort);
         const response = await fetch(`${running.service.urls.base}/api/events`, { signal: abort.signal });
+        listening.push(response);
         return response.status === 200 ? { status: 200 } : { status: response.status, body: (await response.json()) as any };
       };
       const answers = [];
@@ -666,7 +975,9 @@ describe("what one client may hold of the service", () => {
       const behind = async (client: string) => {
         const abort = new AbortController();
         aborts.push(abort);
-        return (await fetch(`${running.service.urls.base}/api/events`, { signal: abort.signal, headers: { "x-forwarded-for": client } })).status;
+        const response = await fetch(`${running.service.urls.base}/api/events`, { signal: abort.signal, headers: { "x-forwarded-for": client } });
+        listening.push(response);
+        return response.status;
       };
       assert.equal(await behind("203.0.113.7"), 200);
       // What a client writes into that header itself stands before what the proxy adds, and does not count: one
@@ -675,11 +986,23 @@ describe("what one client may hold of the service", () => {
       for (let i = 0; i < 33; i++) sameClient.push(await behind(`198.51.100.${i}, 203.0.113.99`));
       assert.deepEqual([sameClient.filter((status) => status === 200).length, sameClient.at(-1)], [32, 429], "the 33rd connection of one client is refused, whatever it claims");
       // A place is free again as soon as one of them leaves.
-      aborts[0]!.abort();
-      const end = Date.now() + 2000;
       const listeners = async () => (await running.call("/api/admin/status", undefined, running.adminKey)).body.listeners as number;
-      while ((await listeners()) !== 31 && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(await listeners(), 65);
+      aborts[0]!.abort();
+      assert.equal(await until(async () => (await listeners()) === 64, 2000), true);
       assert.equal((await listen()).status, 200);
+
+      // Whatever is sent from this machine is believed about whom it speaks for, a proxy and any other program
+      // alike. Together they have all places but the share of one address, which is left to clients that connect
+      // from elsewhere themselves: a program here that names a new address each time does not take every place.
+      const others = [];
+      for (let i = 0; i < 104; i++) others.push(await behind(`192.0.2.${i}`));
+      assert.deepEqual([others.slice(0, 103).every((status) => status === 200), others[103], await listeners()], [true, 429, 168]);
+      const abort = new AbortController();
+      aborts.push(abort);
+      const full = await fetch(`${running.service.urls.base}/api/events`, { signal: abort.signal, headers: { "x-forwarded-for": "192.0.2.200" } });
+      assert.match(((await full.json()) as any).error.message, /^168 clients that connect from the service's own machine are already listening for changes\.$/);
+      assert.equal(listening.length, 34 + 1 + 33 + 1 + 104 + 0);
     } finally {
       for (const abort of aborts) abort.abort();
       await running.stop();

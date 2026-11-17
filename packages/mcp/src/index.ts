@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isJsonContentType } from "@modelcontextprotocol/sdk/shared/mediaType.js";
 import { ErrorCode, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { AGENT_INSTRUCTIONS, GUIDE_TOPICS, VERSION, VigileError, guide, httpStatus, toErrorBody, type Engine, type Operation } from "@vigile/core";
@@ -12,6 +13,21 @@ export interface McpOptions {
   caller(request: IncomingMessage): { username: string; id?: string };
   /** Told what went wrong when a request fails in a way nobody planned for, for the service's log. */
   onUnexpected?(error: unknown): void;
+}
+
+/** How large the body of a request to the MCP endpoint may be, in bytes. */
+export const MAX_MCP_BODY = 4 * 1024 * 1024;
+
+/**
+ * Whether the body of a POST to the MCP endpoint would be read, from what the request says before any of it has
+ * come: it takes both kinds of answer, says its body is JSON, and does not say it is larger than is taken. These
+ * are the checks the transport makes before it reads; a request that fails one is answered without its body.
+ */
+export function mcpBodyRead(request: IncomingMessage): boolean {
+  const accept = [request.headers.accept ?? ""].flat().join(",");
+  if (!accept.includes("application/json") || !accept.includes("text/event-stream")) return false;
+  if (!isJsonContentType(request.headers["content-type"])) return false;
+  return !(Number(request.headers["content-length"] ?? 0) > MAX_MCP_BODY);
 }
 
 /** What a connecting agent is told about how to use the service. */
@@ -155,7 +171,7 @@ export function createMcpHandler(options: McpOptions) {
       return reject(response, httpStatus(body.code), [body.message, ...(body.actions ?? [])].join(" "));
     }
     const server = createMcpServer(options.engine, username, letInAs);
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true, maxRequestBodySize: MAX_MCP_BODY });
     response.on("close", () => {
       void transport.close();
       void server.close();
