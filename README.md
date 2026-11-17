@@ -816,6 +816,11 @@ changes before the service faces a network:
   a page is from in the way the service goes by, and the page's own requests
   are refused as coming from another site: a proxy is there to add TLS, so
   give it a certificate, or reach the service directly.
+- **A client cannot have the service hold files or answers for it without
+  end.** The page's files are answered from memory, so a request holds no file
+  open. A connection may have at most 8 requests that are not answered yet: a
+  client that waits for each answer before it asks again has one or two, and a
+  connection that sends more without reading is closed.
 - **Keys are stored in the config file,** which is created readable by your
   account only. `backup` leaves it out.
 - **The command line gives a key to its own service only.** While the service

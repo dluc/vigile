@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { createRequire } from "node:module";
 import { extname, join, normalize, sep } from "node:path";
@@ -66,6 +66,28 @@ function vendorFile(pathname: string): string | null {
 }
 
 /**
+ * What each of the page's files held when it was last read, and what the file was then: when its content and
+ * when anything about it last changed, its size and which file it is. The files are few and small, and are kept whole, so that an answer holds no file open. A
+ * file held open for each request stays open for as long as its answer has not gone out, and a client decides
+ * how long that is and how many answers wait: the service has only so many files it may hold open. An answer
+ * that waits holds no copy either, only the content that all of them share.
+ */
+const held = new Map<string, { stamp: string; content: Buffer }>();
+
+/** The content of a file as it is on the disk now: read again only when the file is another than it was. */
+function contentOf(file: string): Buffer {
+  // The time of the last change of anything about the file moves on with every write, also with one that
+  // leaves the size as it was and puts the time of the content back, as a copy that keeps the times does.
+  const { mtimeMs, ctimeMs, size, ino } = statSync(file);
+  const stamp = `${mtimeMs} ${ctimeMs} ${size} ${ino}`;
+  const known = held.get(file);
+  if (known?.stamp === stamp) return known.content;
+  const content = readFileSync(file);
+  held.set(file, { stamp, content });
+  return content;
+}
+
+/**
  * Serves one of the page's files. Returns false when the path is not one of them. `onUnexpected` is told when a
  * file that is there cannot be read, which is the service's own trouble and not the caller's.
  */
@@ -91,30 +113,27 @@ export function serveWeb(response: ServerResponse, pathname: string, headOnly = 
     }
     const relative = pathname === "/" ? "index.html" : normalize(decoded).replace(/^[/\\]+/, "");
     file = join(webRoot, relative);
-    if (!file.startsWith(webRoot + sep) || !existsSync(file) || !statSync(file).isFile()) return false;
+    if (!file.startsWith(webRoot + sep) || !existsSync(file) || !statSync(file).isFile()) {
+      // A file that is gone is not kept either.
+      held.delete(file);
+      return false;
+    }
   }
-  const headers = { "content-type": TYPES[extname(file)] ?? "application/octet-stream", "cache-control": cache, ...PROTECTION };
-  if (headOnly) {
-    response.writeHead(200, headers).end();
-    return true;
-  }
-  // The answer starts once the file is open. A file that cannot be opened, or fails half-way, ends this request
-  // and nothing else. A client that leaves before it has the whole file must not leave the file open here:
-  // nothing would ever close it, and the service has only so many files it may hold open.
-  const stream = createReadStream(file);
-  response.once("close", () => stream.destroy());
-  stream.once("open", () => {
-    response.writeHead(200, headers);
-    stream.pipe(response);
-  });
-  stream.once("error", (error) => {
+  // A file that cannot be read ends this request and nothing else.
+  let content: Buffer;
+  try {
+    content = contentOf(file);
+  } catch (error) {
     try {
       onUnexpected?.(error);
     } catch {
       // That it could not be reported does not keep the answer back.
     }
-    if (response.headersSent) return void response.destroy();
     response.writeHead(500, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }).end("The file could not be read.\n");
-  });
+    return true;
+  }
+  response.writeHead(200, { "content-type": TYPES[extname(file)] ?? "application/octet-stream", "content-length": content.length, "cache-control": cache, ...PROTECTION });
+  if (headOnly) response.end();
+  else response.end(content);
   return true;
 }
