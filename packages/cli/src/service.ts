@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { isIP } from "node:net";
+import { isIP, type Socket } from "node:net";
 import { uptime } from "node:os";
 import { join } from "node:path";
 import { LiveAuth, masked, saidNothingOf, staleKeys, type LoadedConfig } from "@vigile/config";
@@ -57,6 +57,13 @@ export const LIMITS = {
   checkMs: 5_000,
   /** How many connections may be open at once. Further ones are refused until some close. */
   connections: 1024,
+  /**
+   * How many requests one connection may have sent that are not answered yet. A client that waits for each
+   * answer before it asks again has one, and two for the moment in which its next request is read before the
+   * answer before it is known to be out. One that sends request upon request without reading an answer has the
+   * service do the work of each and keep every answer for it, for as long as it likes: its connection is closed.
+   */
+  unanswered: 8,
 };
 
 /**
@@ -421,7 +428,19 @@ export async function startService(options: ServiceOptions): Promise<Service> {
   // Set once the service listens, from the address it is then bound to. The config may write a loopback address
   // in a way that does not look like one (127.1, a name of the machine's own): the address bound is what counts.
   let loopbackOnly = isLoopback(config.listen.address);
+  /** How many requests each connection has sent that are not answered yet. */
+  const unanswered = new WeakMap<Socket, number>();
   const server = createServer({ requestTimeout: limits.requestMs, headersTimeout: Math.min(limits.headersMs, limits.requestMs), connectionsCheckingInterval: limits.checkMs }, (request, response) => {
+    const { socket } = request;
+    // Requests that arrive in one piece are all handed over before the connection is seen to be closed: what
+    // came with the one that was one too many is not looked at.
+    if (socket.destroyed) return;
+    const waiting = (unanswered.get(socket) ?? 0) + 1;
+    if (waiting > limits.unanswered) return void socket.destroy();
+    unanswered.set(socket, waiting);
+    // An answer is out when all of it has been handed to the connection, which for one that waits behind others
+    // is when its turn has come. A connection that closes first takes its count with it.
+    response.once("finish", () => unanswered.set(socket, (unanswered.get(socket) ?? 1) - 1));
     // Whatever is answered is what its type says it is, whichever part of the service answers.
     response.setHeader("x-content-type-options", "nosniff");
     // Everything a request can set off happens in here, so that nothing it throws ends the service.

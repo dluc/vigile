@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { connect as openSocket, createServer } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
@@ -401,6 +402,145 @@ describe("requests nobody should send", () => {
     const whole = await fetch(`${running.service.urls.base}/vendor/elk-worker.min.js`);
     assert.equal(whole.status, 200);
     assert.ok((await whole.arrayBuffer()).byteLength > 1_000_000, "and the file is still served whole");
+  });
+
+  it("holds no page file open for answers that wait on a connection, however long they wait", async () => {
+    // Open files can be counted where the system lists them, which is on Linux.
+    if (!existsSync("/proc/self/fd")) return;
+    const open = () => readdirSync("/proc/self/fd").filter((fd) => {
+      try {
+        return readlinkSync(`/proc/self/fd/${fd}`).endsWith("elk-worker.min.js");
+      } catch {
+        return false;
+      }
+    }).length;
+    const { port, hostname } = new URL(running.service.urls.base);
+    // As many requests as a connection may have unanswered, sent in one piece, and not one answer read: the
+    // first answer does not fit in what is sent at once, so the others wait behind it for as long as the client likes.
+    const asked = "GET /vendor/elk-worker.min.js HTTP/1.1\r\nHost: x\r\n\r\n".repeat(8);
+    const sockets = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        new Promise<ReturnType<typeof openSocket>>((resolve, reject) => {
+          const socket = openSocket(Number(port), hostname, () => {
+            socket.pause();
+            socket.write(asked, () => resolve(socket));
+          });
+          socket.once("error", reject);
+        }),
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(open(), 0, "none of the 160 answers that wait holds the file open");
+    assert.equal((await running.call("/health")).status, 200, "and the service answers others meanwhile");
+    await Promise.all(sockets.map((socket) => new Promise((resolve) => socket.once("close", resolve).destroy())));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(open(), 0, "nor after the clients have left");
+    const whole = await fetch(`${running.service.urls.base}/vendor/elk-worker.min.js`);
+    assert.equal(whole.status, 200);
+    assert.ok((await whole.arrayBuffer()).byteLength > 1_000_000, "and the file is still served whole");
+  });
+
+  it("serves a page file as it is on the disk now, and says how long it is", async () => {
+    // Not a name of the kind the service's code has, so that nothing takes it for a change of the code.
+    const file = join(webRoot, "changed-for-the-test.txt");
+    const get = async (method = "GET") => {
+      const response = await fetch(`${running.service.urls.base}/changed-for-the-test.txt`, { method });
+      return [response.status, response.headers.get("content-length"), await response.text()];
+    };
+    try {
+      assert.deepEqual((await get()).slice(0, 1), [404]);
+      writeFileSync(file, "body {}");
+      assert.deepEqual(await get(), [200, "7", "body {}"]);
+      assert.deepEqual(await get(), [200, "7", "body {}"], "the same when asked again");
+      assert.deepEqual(await get("HEAD"), [200, "7", ""], "its length without its content, when only that is asked for");
+      // Another file under the same name, as an update of the service puts one there while it runs.
+      writeFileSync(file, "body { color: black }");
+      assert.deepEqual(await get(), [200, "21", "body { color: black }"]);
+      // And one of the same length, written into the same file, with the time of its content put back to what it
+      // was: a time on a whole second, which every file system keeps to the letter.
+      const then = new Date(Math.floor(Date.now() / 1000) * 1000 - 5000);
+      utimesSync(file, then, then);
+      assert.deepEqual(await get(), [200, "21", "body { color: black }"]);
+      writeFileSync(file, "body { color: white }");
+      utimesSync(file, then, then);
+      assert.equal(statSync(file).mtimeMs, then.getTime());
+      assert.deepEqual(await get(), [200, "21", "body { color: white }"]);
+      rmSync(file);
+      assert.deepEqual((await get()).slice(0, 1), [404]);
+      writeFileSync(file, "");
+      assert.deepEqual(await get(), [200, "0", ""], "an empty file is an empty answer");
+    } finally {
+      rmSync(file, { force: true });
+    }
+    // What is served is the file to the letter, for the largest of them too.
+    const largest = createRequire(import.meta.resolve("@vigile/web")).resolve("elkjs/lib/elk-worker.min.js");
+    const served = Buffer.from(await (await fetch(`${running.service.urls.base}/vendor/elk-worker.min.js`)).arrayBuffer());
+    assert.ok(served.equals(readFileSync(largest)));
+  });
+
+  it("closes a connection that sends more requests than it may have unanswered, and no other", async () => {
+    const { port, hostname } = new URL(running.service.urls.base);
+    const one = "GET /health HTTP/1.1\r\nHost: x\r\n\r\n";
+    /** Sends what is given on one connection, and says how many answers came and whether the service closed it. */
+    const send = (pieces: string[]) =>
+      new Promise<{ answers: number; closed: boolean }>((resolve, reject) => {
+        let text = "";
+        let closed = false;
+        const answers = () => text.split("HTTP/1.1 200 OK").length - 1;
+        const socket = openSocket(Number(port), hostname, async () => {
+          for (const [index, piece] of pieces.entries()) {
+            if (closed) break;
+            const expected = answers() + piece.split(" HTTP/1.1\r\n").length - 1;
+            socket.write(piece);
+            // The next piece goes once every answer to this one is here, as a client that waits sends.
+            const end = Date.now() + 3000;
+            while (!closed && answers() < expected && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
+            if (index === pieces.length - 1) await new Promise((r) => setTimeout(r, 100));
+          }
+          resolve({ answers: answers(), closed });
+          socket.destroy();
+        });
+        socket.on("data", (chunk) => (text += chunk));
+        socket.on("close", () => (closed = true));
+        socket.on("error", reject);
+      });
+    const before = running.warnings.length;
+    // A connection of someone else, open all the while.
+    const other = openSocket(Number(port), hostname);
+    await new Promise((resolve, reject) => other.once("connect", resolve).once("error", reject));
+    // One after the other on one connection, each sent when the answer before it has come: as many as one likes.
+    assert.deepEqual(await send(Array.from({ length: 40 }, () => one)), { answers: 40, closed: false });
+    // As many at once as a connection may have unanswered, again and again: each is answered, in its turn.
+    assert.deepEqual(await send([one.repeat(8), one.repeat(8), one.repeat(8)]), { answers: 24, closed: false });
+    // One more than that at once: the connection is closed, and what it sent after is not answered.
+    const over = await send([one.repeat(9), one]);
+    assert.equal(over.closed, true);
+    assert.ok(over.answers < 9, `${over.answers} answers`);
+    // The one too many, and what came with it in the same piece, is not looked at: a change among them is not made.
+    const task = JSON.stringify({ title: "Sent with one request too many", description: "d" });
+    const create = `POST /api/create-task HTTP/1.1\r\nHost: ${hostname}\r\nContent-Type: application/json\r\nContent-Length: ${task.length}\r\n\r\n${task}`;
+    const logged = running.logged.length;
+    assert.equal((await send([one.repeat(8) + create + create])).closed, true);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(running.logged.slice(logged).filter((line) => line.includes("create_task")), []);
+    const made = async () => (await running.call("/api/list-tasks", {})).body.tasks.filter((found: { title: string }) => found.title === "Sent with one request too many").length;
+    assert.equal(await made(), 0);
+    // The same request on a connection that may send it is carried out: it was not the request that was refused.
+    assert.deepEqual(await send([create]), { answers: 1, closed: false });
+    assert.equal(await made(), 1);
+    // A stream of requests that is never read, the size of what a connection may send at once several times over.
+    const flood = await send([one.repeat(2000), one.repeat(2000)]);
+    assert.equal(flood.closed, true);
+    assert.ok(flood.answers < 9, `${flood.answers} answers`);
+    assert.equal((await running.call("/health")).status, 200, "the service answers others as before");
+    // The connection that was open all the while is open still, and is answered.
+    const answer = await new Promise<string>((resolve, reject) => {
+      other.once("data", (chunk) => resolve(String(chunk))).once("close", () => reject(new Error("the other connection was closed")));
+      other.write(one);
+    });
+    assert.match(answer, /^HTTP\/1\.1 200 OK/);
+    other.destroy();
+    assert.deepEqual(running.warnings.slice(before), [], "and has nothing to report: the client was wrong, not the service");
   });
 
   it("answers only to its own name while it listens on this machine only", async () => {
