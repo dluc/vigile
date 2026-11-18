@@ -12,6 +12,11 @@ pnpm install --frozen-lockfile
 pnpm test
 ```
 
+Dependencies wait: pnpm installs a version only once it has been published for
+21 days (`minimumReleaseAge` in `pnpm-workspace.yaml`), and Dependabot proposes
+version updates under the same cooldown. Adding or upgrading to a newer version
+is refused until it is that old; do not exclude a package from the wait.
+
 `pnpm test` builds every package and runs the full suite, including the browser
 tests when Chrome or Chromium is available. Tests run compiled files in `dist/`;
 run `pnpm build` before a single package test.

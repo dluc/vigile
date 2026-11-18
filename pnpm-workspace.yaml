@@ -1,2 +1,6 @@
 packages:
   - packages/*
+
+# A version of a dependency is installed only once it has been published for 21 days (the value is in minutes).
+# A version that was compromised or broken is usually found and withdrawn within that time.
+minimumReleaseAge: 30240
