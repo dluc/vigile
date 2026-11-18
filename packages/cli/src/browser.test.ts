@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { initConfig, loadConfig, setValue } from "@vigile/config";
 import { paging, readAll } from "@vigile/core";
 import { adversary, type Target } from "./adversary.js";
@@ -9991,6 +9991,14 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
   });
 
   browserSuite("history", () => {
+    beforeEach(async () => {
+      await load("/#board");
+      await page.run("localStorage.removeItem('vigile.history-filters')");
+    });
+    afterEach(async () => {
+      await page.run("localStorage.removeItem('vigile.history-filters')");
+    });
+
     it("filters History by task ID and title, and bookmarks the text", async () => {
       const project = await run("create_project", { title: "History search", prefix: "HSTTXT" });
       const match = await run("create_task", { title: "Needle work item", description: "The task ID should be searchable.", project: project.id });
@@ -10032,6 +10040,139 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         to: "in_review",
         events: [[made.id, "in progress → in review"]],
       });
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("remembers applied History filters when reopening History without filter parameters", async () => {
+      await load("/#board");
+      await page.run("localStorage.removeItem('vigile.history-filters')");
+      try {
+        await load("/#history?project=WEB");
+        await page.run("document.getElementById('history-text').value = 'remember me'; document.getElementById('history-kind').value = 'task'; document.getElementById('history-actor').value = 'agent1'; document.getElementById('history-action').value = 'status_changed'; document.getElementById('history-status-from').value = 'in_progress'; document.getElementById('history-status-to').value = 'in_review'; document.getElementById('history-from').value = '2026-11-01'; document.getElementById('history-to').value = '2026-11-17'; document.getElementById('history-filters').requestSubmit()");
+        await page.until("return location.hash.includes('toStatus=in_review')", "the applied History filters");
+        assert.deepEqual(await page.run("return JSON.parse(localStorage.getItem('vigile.history-filters'))"), {
+          text: "remember me",
+          kind: "task",
+          actor: "agent1",
+          action: "status_changed",
+          status_from: "in_progress",
+          status_to: "in_review",
+          from: "2026-11-01",
+          to: "2026-11-17",
+        });
+
+        await load("/#history?project=WEB");
+        await page.until("return location.hash.includes('toStatus=in_review')", "the restored History filters");
+        assert.deepEqual(await page.run("return [location.hash, document.getElementById('history-text').value, document.getElementById('history-kind').value, document.getElementById('history-actor').value, document.getElementById('history-action').value, document.getElementById('history-status-from').value, document.getElementById('history-status-to').value, document.getElementById('history-from').value, document.getElementById('history-to').value]"), [
+          "#history?project=WEB&text=remember%20me&kind=task&actor=agent1&action=status_changed&fromStatus=in_progress&toStatus=in_review&from=2026-11-01&to=2026-11-17",
+          "remember me", "task", "agent1", "status_changed", "in_progress", "in_review", "2026-11-01", "2026-11-17",
+        ]);
+      } finally {
+        await page.run("localStorage.removeItem('vigile.history-filters')");
+      }
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("lets explicit History bookmarks override saved filters and clearing forgets them", async () => {
+      await load("/#board");
+      await page.run("localStorage.setItem('vigile.history-filters', JSON.stringify({ text: 'saved text', kind: 'task', actor: 'agent1', action: 'updated', status_from: 'open', status_to: 'in_progress', from: '2026-11-01', to: '2026-11-17' }))");
+
+      await load("/#history?project=WEB&toStatus=done");
+      await page.until("return location.hash === '#history?project=WEB&toStatus=done'", "the explicit History bookmark");
+      assert.deepEqual(await page.run("return [document.getElementById('history-text').value, document.getElementById('history-kind').value, document.getElementById('history-actor').value, document.getElementById('history-action').value, document.getElementById('history-status-from').value, document.getElementById('history-status-to').value, document.getElementById('history-from').value, document.getElementById('history-to').value, JSON.parse(localStorage.getItem('vigile.history-filters'))]"), [
+        "", "", "", "", "", "done", "", "",
+        { text: null, kind: null, actor: null, action: null, status_from: null, status_to: "done", from: null, to: null },
+      ]);
+
+      await page.click("#history-clear");
+      await page.until("return location.hash === '#history?project=WEB'", "cleared History filters");
+      assert.equal(await page.run("return localStorage.getItem('vigile.history-filters')"), null);
+      await load("/#history?project=WEB");
+      assert.deepEqual(await page.run("return [document.getElementById('history-text').value, document.getElementById('history-kind').value, document.getElementById('history-actor').value, document.getElementById('history-action').value, document.getElementById('history-status-from').value, document.getElementById('history-status-to').value, document.getElementById('history-from').value, document.getElementById('history-to').value]"), ["", "", "", "", "", "", "", ""]);
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("keeps explicitly empty History bookmark parameters authoritative after canonicalization", async () => {
+      await load("/#board");
+      await page.run("localStorage.setItem('vigile.history-filters', JSON.stringify({ text: 'private needle' }))");
+      await load("/#history?project=WEB&text=");
+      await page.until("return !document.getElementById('history-panel').hidden", "History opened from an explicit empty filter bookmark");
+      assert.deepEqual(await page.run("return [location.hash, document.getElementById('history-text').value, localStorage.getItem('vigile.history-filters')]"), ["#history?project=WEB", "", null]);
+
+      const emptyEntryTime = await page.run<number>("return performance.timeOrigin");
+      await page.run("localStorage.setItem('vigile.history-filters', JSON.stringify({ text: 'from another tab' }))");
+      await page.send("Page.reload");
+      await page.until(`return performance.timeOrigin !== ${emptyEntryTime} && location.hash === '#history?project=WEB' && document.getElementById('history-text')?.value === ''`, "reload preserving the entry's empty filter snapshot");
+      assert.deepEqual(await page.run("return JSON.parse(localStorage.getItem('vigile.history-filters'))"), { text: "from another tab" });
+
+      await page.run("localStorage.setItem('vigile.history-filters', JSON.stringify({ text: 'private needle' }))");
+      await load("/#history?project=WEB&from=2026-02-31");
+      await page.until("return !document.getElementById('history-panel').hidden", "History opened from a bookmark with an invalid date filter");
+      assert.deepEqual(await page.run("return [location.hash, document.getElementById('history-text').value, document.getElementById('history-from').value, localStorage.getItem('vigile.history-filters')]"), ["#history?project=WEB", "", "", null]);
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("restores the initially empty History selection on Back after applying a filter", async () => {
+      await load("/#board");
+      await page.run("localStorage.removeItem('vigile.history-filters')");
+      await load("/#history?project=WEB");
+      await page.run("document.getElementById('history-text').value = 'needle'; document.getElementById('history-filters').requestSubmit()");
+      await page.until("return location.hash.includes('text=needle')", "the applied History text filter");
+      await page.run("history.back()");
+      await page.until("return location.hash === '#history?project=WEB' && document.getElementById('history-text').value === ''", "the original empty History entry after Back");
+      assert.deepEqual(await page.run("return localStorage.getItem('vigile.history-filters')"), null);
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("persists an empty History filter selection when applying cleared controls", async () => {
+      await load("/#history?project=WEB&text=needle");
+      await page.run("document.getElementById('history-text').value = ''; document.getElementById('history-filters').requestSubmit()");
+      await page.until("return location.hash === '#history?project=WEB' && document.getElementById('history-text').value === ''", "the applied empty History filter selection");
+      assert.deepEqual(await page.run("return localStorage.getItem('vigile.history-filters')"), null);
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("forgets a concurrently saved History filter when Apply leaves the route unchanged", async () => {
+      await load("/#history?project=WEB");
+      await page.run("localStorage.setItem('vigile.history-filters', JSON.stringify({ text: 'from another tab' }))");
+      await page.run("document.getElementById('history-filters').requestSubmit()");
+      assert.deepEqual(await page.run("return [location.hash, localStorage.getItem('vigile.history-filters')]"), ["#history?project=WEB", null]);
+      await load("/#history?project=WEB");
+      assert.deepEqual(await page.run("return document.getElementById('history-text').value"), "");
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("does not persist a stale History selection on refresh after another tab clears it", async () => {
+      await load("/#history?project=WEB&text=stale%20selection");
+      const saved = await page.run<string>("return localStorage.getItem('vigile.history-filters')");
+      assert.ok(saved);
+      await page.run(`localStorage.removeItem('vigile.history-filters'); window.dispatchEvent(new StorageEvent('storage', { key: 'vigile.history-filters', oldValue: ${JSON.stringify(saved)}, newValue: null, storageArea: localStorage })); window.historyRealFetch = window.fetch; window.historyRefreshFinished = false; window.fetch = async (...args) => { const response = await window.historyRealFetch(...args); if (String(args[0]).endsWith('/api/list-history')) window.historyRefreshFinished = true; return response; }`);
+
+      try {
+        await page.click("#refresh");
+        await page.until("return window.historyRefreshFinished", "the refreshed History feed");
+        assert.equal(await page.run("return localStorage.getItem('vigile.history-filters')"), null);
+        await load("/#history?project=WEB");
+        assert.deepEqual(await page.run("return [location.hash, document.getElementById('history-text').value]"), ["#history?project=WEB", ""]);
+      } finally {
+        await page.run("window.fetch = window.historyRealFetch; delete window.historyRealFetch; delete window.historyRefreshFinished; localStorage.removeItem('vigile.history-filters')");
+      }
+      assert.deepEqual(page.errors, []);
+    });
+
+    it("canonicalizes saved filters restored from a kept History route after authentication", async () => {
+      await load("/#board");
+      await page.run("localStorage.setItem('vigile.history-filters', JSON.stringify({ text: 'restored needle' }))");
+      await page.run("history.replaceState({ kept: { route: '#history?project=WEB', project: 'WEB' } }, '', '#history')");
+      const beforeReload = await page.run<number>("return performance.timeOrigin");
+      await page.send("Page.reload");
+      await page.until(`return performance.timeOrigin !== ${beforeReload} && document.getElementById('main')?.hidden && Boolean(document.querySelector('#notice input'))`, "the reconnect form for a kept History entry");
+      assert.equal(await page.run("return location.hash"), "#history");
+      assert.deepEqual(await page.run("return JSON.parse(localStorage.getItem('vigile.history-filters'))"), { text: "restored needle" });
+
+      await page.run("document.querySelector('#notice form').requestSubmit()");
+      await page.until("return !document.getElementById('main').hidden && document.getElementById('history-text').value === 'restored needle'", "the saved filter restored after authentication");
+      assert.deepEqual(await page.run("return [location.hash, history.state.historyFiltersSnapshot ?? null, history.state.historyFilters?.text ?? null]"), ["#history?project=WEB&text=restored%20needle", true, "restored needle"]);
       assert.deepEqual(page.errors, []);
     });
 
@@ -10263,7 +10404,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
     it("shows the connection form and clears retained History content after the feed is rejected", async () => {
       const group = await run("create_task", { title: "Private History group", description: "Contains private work.", project: "WEB" });
       await run("create_task", { title: "Private nested work", description: "Inside a scoped group.", project: "WEB", parent: group.id });
-      await load("/#history?project=WEB&kind=task&actor=agent1");
+      await load("/#history?project=WEB");
       await page.until("return document.querySelectorAll('#history-list .history-event').length > 0", "the private History entries");
       await page.click(`.history-event[data-id="${group.id}"] .history-zoom-into`);
       await page.until(`return location.hash.includes('in=${group.id}') && document.getElementById('history-scope').textContent.includes('Private History group')`, "the private History group scope");
@@ -10271,6 +10412,22 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.run("document.getElementById('history-text').value = 'checkout'; document.getElementById('history-action').value = 'updated'; document.getElementById('history-status-from').value = 'open'; document.getElementById('history-status-to').value = 'in_review'; document.getElementById('history-filters').requestSubmit()");
       await page.until("return document.getElementById('main').hidden && Boolean(document.querySelector('#notice input'))", "the connection form after History is refused");
       assert.deepEqual(await page.run("return { events: document.querySelectorAll('#history-list .history-event').length, status: document.getElementById('history-status').textContent, filters: ['history-text','history-kind','history-actor','history-action','history-status-from','history-status-to','history-from','history-to'].map(id => document.getElementById(id).value), scope: document.getElementById('history-scope').textContent, zoomOutDisabled: document.getElementById('history-zoom-out').disabled, zoomOutTitle: document.getElementById('history-zoom-out').title, zoomTargets: [...document.querySelectorAll('#history-zoom-target option')].map(option => option.textContent), zoomInDisabled: document.getElementById('history-zoom-target').disabled }"), { events: 0, status: "", filters: ["", "", "", "", "", "", "", ""], scope: "", zoomOutDisabled: true, zoomOutTitle: "History is showing the whole selected scope", zoomTargets: ["No groups in this scope"], zoomInDisabled: true });
+      assert.deepEqual(await page.run("return JSON.parse(localStorage.getItem('vigile.history-filters'))"), { text: "checkout", kind: null, actor: null, action: "updated", status_from: "open", status_to: "in_review", from: null, to: null });
+      await page.run("history.back()");
+      await page.until("return location.hash === '#history' && document.getElementById('main').hidden && document.getElementById('history-text').value === ''", "locked Back keeping saved filters out of the address and controls");
+      await page.run("history.forward()");
+      await page.until("return location.hash === '#history' && document.getElementById('main').hidden && document.getElementById('history-text').value === ''", "locked Forward keeping saved filters out of the address and controls");
+      await page.run("history.back()");
+      await page.until("return location.hash === '#history' && document.getElementById('main').hidden && document.getElementById('history-text').value === ''", "Back to the initially empty History entry while locked");
+      assert.deepEqual(await page.run("return JSON.parse(localStorage.getItem('vigile.history-filters'))"), { text: "checkout", kind: null, actor: null, action: "updated", status_from: "open", status_to: "in_review", from: null, to: null });
+      const lockedEntryTime = await page.run<number>("return performance.timeOrigin");
+      await page.send("Page.reload");
+      await page.until(`return performance.timeOrigin !== ${lockedEntryTime} && location.hash === '#history' && document.getElementById('main')?.hidden && Boolean(document.querySelector('#notice input'))`, "the connection form after reloading a locked History entry");
+      assert.equal(await page.run("return document.getElementById('history-text').value"), "");
+      assert.deepEqual(await page.run("return JSON.parse(localStorage.getItem('vigile.history-filters'))"), { text: "checkout", kind: null, actor: null, action: "updated", status_from: "open", status_to: "in_review", from: null, to: null });
+      await page.run("document.querySelector('#notice form').requestSubmit()");
+      await page.until("return !document.getElementById('main').hidden && location.hash.includes('in=') && !location.hash.includes('text=') && document.getElementById('history-text').value === '' && document.getElementById('history-status-from').value === ''", "the empty entry restored after successful authentication");
+      assert.equal(await page.run("return localStorage.getItem('vigile.history-filters')"), null);
       assert.deepEqual(page.errors, []);
     });
   }, { concurrency: false });
