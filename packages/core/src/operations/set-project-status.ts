@@ -9,7 +9,7 @@ import { statusEntry, touch, version } from "./shared.js";
 export const setProjectStatus = defineWrite({
   name: "set_project_status",
   description:
-    "Change a project's status: open, in_preview, ready, broken or cancelled. Any move is allowed. Tasks that depend on the project wait until it is ready or cancelled. Marking a project ready while it holds unfinished tasks is allowed and shows up as a problem on the project.",
+    "Change a project's status: open, in_preview, ready, broken or cancelled. Any move to another status is allowed; setting the status the project already has is refused. Tasks that depend on the project wait until it is ready or cancelled. Marking a project ready while it holds unfinished tasks is allowed and shows up as a problem on the project.",
   access: "all",
   input: z.strictObject({
     id: z.string().describe("The project's ID."),
