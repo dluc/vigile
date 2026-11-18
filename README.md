@@ -502,6 +502,25 @@ names the field, and has its line in the log like any other refusal. A malformed
 MCP request that does not name a tool is a protocol error, not an operation, so
 it has no operation line in the log.
 
+A request to the MCP endpoint is one JSON-RPC message, like a request to the
+API is one call: a list of messages in one request is refused. Both read a body
+of at most 1 MB. A message over MCP may have up to 1,000 members and elements,
+all its objects and lists together, which is many times what a call has; text
+of any length counts as one. An answer over MCP is at most 4 MB, the message of
+a protocol error at most 1,000 characters. A request has 30 seconds to arrive
+in full, as every request to the service has. The time for the answer begins
+after that, when all of the request is here: the service then has 30 seconds
+to make the answer to a request over MCP, and ends the wait with an error
+when it has none by then. That ends the wait, not the work: a change the
+request began may still be stored, as after a connection that ended, so read
+the item before sending the request again. A key that such a request made was
+in its answer and is not sent again: have an admin reset that user's key, or
+run `vigile user reset-key admin` for the admin's own. The same holds for an
+answer that is too large to be sent: the request was carried out. How long an answer may
+take to reach a client that reads it slowly, or not at all, is the same for
+MCP as for everything else the service answers: see
+[Security](#security).
+
 `GET /api/events` is a stream of server-sent events for anything that wants to
 know when the plan changes. It sends `hello` on connecting and `change` after
 every stored change, each with the plan's revision number and nothing else; what
@@ -844,7 +863,14 @@ changes before the service faces a network:
   end.** The page's files are answered from memory, so a request holds no file
   open. A connection may have at most 8 requests that are not answered yet: a
   client that waits for each answer before it asks again has one or two, and a
-  connection that sends more without reading is closed.
+  connection that sends more without reading is closed. A request that is
+  refused before its body has arrived, over the API or over MCP, for its key,
+  the page it comes from or what it says of its body, ends its connection with
+  the answer: the rest of the body is not taken in, and nothing that came
+  behind it on the same connection is carried out. Only a POST request may
+  have a body; any other that brings one is refused the same way. A stream of
+  changes is the last answer on its connection and says so: what is sent
+  behind it on that connection is not looked at.
 - **Keys are stored in the config file,** which is created readable by your
   account only. `backup` leaves it out.
 - **The command line gives a key to its own service only.** While the service

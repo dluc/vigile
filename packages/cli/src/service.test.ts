@@ -10,6 +10,7 @@ import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { initConfig, loadConfig, setKey, setValue } from "@vigile/config";
 import { Engine, VigileError, paging } from "@vigile/core";
 import { compareTaskIds } from "@vigile/core/ids.js";
@@ -44,13 +45,13 @@ interface Running {
   stop(): Promise<void>;
 }
 
-async function start(environment: NodeJS.ProcessEnv = {}, limits: ServiceOptions["limits"] = undefined): Promise<Running> {
+async function start(environment: NodeJS.ProcessEnv = {}, limits: ServiceOptions["limits"] = undefined, mcpLimits: ServiceOptions["mcpLimits"] = undefined): Promise<Running> {
   const directory = mkdtempSync(join(tmpdir(), "vigile-service-"));
   const config = join(directory, "config.toml");
   const { adminKey } = initConfig(config, { name: "test", port: await freePort() });
   const warnings: string[] = [];
   const logged: string[] = [];
-  const service = await startService({ loaded: loadConfig(config, environment), log: (line) => logged.push(line), warn: (line) => warnings.push(line), limits });
+  const service = await startService({ loaded: loadConfig(config, environment), log: (line) => logged.push(line), warn: (line) => warnings.push(line), limits, mcpLimits });
   return {
     service,
     directory,
@@ -920,14 +921,17 @@ describe("what one client may hold of the service", () => {
       assert.equal(first((await exchange(running, [head("/nothing-here", 2, asks)], 1000)).answer), "HTTP/1.1 404 Not Found");
       const plain = await exchange(running, [`POST /api/list-projects HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n${asks}\r\n`], 1000);
       assert.equal(first(plain.answer), "HTTP/1.1 400 Bad Request", "a body that does not say it is JSON is not asked for either");
-      // MCP takes a larger body than the API: one of two megabytes is asked for, one of five is not.
+      // MCP takes a body as large as the API does: one of a megabyte is asked for, one of two is not.
       const more = `${asks}Accept: application/json, text/event-stream\r\n`;
-      assert.equal(first((await exchange(running, [head("/mcp", 2_000_000, more)], 500)).answer), "HTTP/1.1 100 Continue");
-      assert.equal(first((await exchange(running, [head("/mcp", 5_000_000, more)], 1000)).answer), "HTTP/1.1 413 Payload Too Large");
+      assert.equal(first((await exchange(running, [head("/mcp", 1024 * 1024, more)], 500)).answer), "HTTP/1.1 100 Continue");
+      const tooLarge = await exchange(running, [head("/mcp", 2_000_000, more)], 1000);
+      assert.equal(first(tooLarge.answer), "HTTP/1.1 413 Payload Too Large");
+      assert.match(tooLarge.answer, /"message":"The request body is larger than 1 MB\."/);
       // Nor is a body asked for that MCP would not read: one that does not say it is JSON, or a request that
       // does not take both kinds of answer.
       const text = await exchange(running, [`POST /mcp HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n${more}\r\n`], 1000);
       assert.equal(first(text.answer), "HTTP/1.1 415 Unsupported Media Type");
+      assert.match(text.answer, /"message":"Unsupported Media Type: Content-Type must be application\/json"/);
       assert.equal(first((await exchange(running, [head("/mcp", 2, asks)], 1000)).answer), "HTTP/1.1 406 Not Acceptable");
       assert.equal(first((await exchange(running, [head("/mcp", 2, `${asks}Accept: application/json\r\n`)], 1000)).answer), "HTTP/1.1 406 Not Acceptable");
       // MCP is told to go ahead as well, and answers.
@@ -935,6 +939,104 @@ describe("what one client may hold of the service", () => {
       const mcp = await exchange(running, [head("/mcp", ping.length, `${asks}Accept: application/json, text/event-stream\r\n`), ping]);
       assert.match(mcp.answer, /^HTTP\/1\.1 100 Continue\r\n\r\nHTTP\/1\.1 200 OK\r\n/);
       assert.match(mcp.answer, /\{"result":\{\},"jsonrpc":"2\.0","id":1\}$/);
+    } finally {
+      await running.stop();
+    }
+  });
+
+  it("ends the connection with an answer it gives before the body of the request is here, and carries out nothing that came behind it", async () => {
+    const running = await start();
+    try {
+      const create = (title: string, prefix: string) => {
+        const body = JSON.stringify({ title, prefix });
+        return `POST /api/create-project HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`;
+      };
+      const ping = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
+      const mcp = (more: string) => `POST /mcp HTTP/1.1\r\nHost: localhost\r\n${more}Content-Length: ${ping.length}\r\n\r\n${ping}`;
+      const takes = "Accept: application/json, text/event-stream\r\n";
+      // Each refusal with a change behind it, in one piece: by the endpoint for what the request says of its
+      // body or of the answers it takes, by the service for the page it comes from, and by the API for its key.
+      const refusals: Array<[string, string, string]> = [
+        ["415 Unsupported Media Type", mcp(`Content-Type: text/plain\r\n${takes}`), "ONE"],
+        ["406 Not Acceptable", mcp("Content-Type: application/json\r\nAccept: application/json\r\n"), "TWO"],
+        ["403 Forbidden", mcp(`Content-Type: application/json\r\n${takes}Sec-Fetch-Site: cross-site\r\n`), "THREE"],
+        ["401 Unauthorized", mcp(`Content-Type: application/json\r\n${takes}Authorization: Bearer vig_wrongwrongwrongwrongwrong\r\n`), "FOUR"],
+        ["401 Unauthorized", `POST /api/list-projects HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAuthorization: Bearer vig_wrongwrongwrongwrongwrong\r\nContent-Length: 2\r\n\r\n{}`, "FIVE"],
+      ];
+      for (const [status, refused, prefix] of refusals) {
+        const { answer, closed } = await exchange(running, [refused + create(`Behind a refusal ${prefix}`, prefix)], 2000);
+        assert.equal(answer.split("\r\n")[0], `HTTP/1.1 ${status}`);
+        assert.match(answer, /\r\nConnection: close\r\n/i, status);
+        assert.equal(closed, true, `${status}: the connection ended with the answer`);
+        assert.equal(answer.split("HTTP/1.1 ").length - 1, 1, `${status}: one answer, and none to what came behind it`);
+      }
+      assert.deepEqual((await running.call("/api/list-projects", {})).body.projects, [], "nothing behind a refusal was carried out");
+      // Only a POST has a use for a body. A stream of changes asked for with one would go on while what came
+      // behind it is not looked at: it is refused like the others, and the connection ends.
+      const stream = await exchange(running, [`GET /api/events HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}` + create("Behind a stream", "SIX")], 2000);
+      assert.equal(stream.answer.split("\r\n")[0], "HTTP/1.1 400 Bad Request");
+      assert.match(stream.answer, /"code":"invalid_input","message":"Only a POST request may have a body\."/);
+      assert.match(stream.answer, /\r\nConnection: close\r\n/i);
+      assert.equal(stream.closed, true, "the connection ended with the answer");
+      assert.equal(stream.answer.split("HTTP/1.1 ").length - 1, 1, "one answer, and none to what came behind it");
+      assert.deepEqual((await running.call("/api/list-projects", {})).body.projects, [], "nothing behind the refused stream was carried out");
+      assert.equal((await running.call("/api/admin/status", undefined, running.adminKey)).body.listeners, 0, "no stream was begun");
+      // A stream of changes is the last answer on its connection, and says so: a refusal behind it could not
+      // be sent while the stream goes on, so neither it nor what follows it is looked at.
+      const behind = await exchange(running, ["GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n" + mcp(`Content-Type: text/plain\r\n${takes}`) + create("Behind a stream and a refusal", "SEVEN")], 700);
+      assert.match(behind.answer, /^HTTP\/1\.1 200 OK\r\n/);
+      assert.match(behind.answer, /\r\nConnection: close\r\n/i);
+      assert.doesNotMatch(behind.answer, /keep-alive/i);
+      assert.match(behind.answer, /event: hello\n/);
+      assert.equal(behind.closed, false, "the stream goes on");
+      assert.equal(behind.answer.split("HTTP/1.1 ").length - 1, 1, "one answer, the stream");
+      assert.deepEqual((await running.call("/api/list-projects", {})).body.projects, [], "nothing behind the stream was carried out");
+      // What is not looked at is counted all the same: a connection that sends more behind its stream than a
+      // connection may have unanswered is closed, and the stream with it.
+      const many = await exchange(running, ["GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n" + "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n".repeat(LIMITS.unanswered)], 2000);
+      assert.equal(many.closed, true, "the connection was closed");
+      assert.ok(many.answer.split("HTTP/1.1 ").length - 1 <= 1, "and none of them was answered");
+      assert.equal(await until(async () => ((await running.call("/api/admin/status", undefined, running.adminKey)).body.listeners as number) === 0, 2000), true, "no stream is left");
+      // A large body that is refused for what it says is not taken in: the answer does not wait for it.
+      const large = await exchange(running, [`POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\n${takes}Content-Length: 50000000\r\n\r\n${" ".repeat(100_000)}`], 2000);
+      assert.equal(large.answer.split("\r\n")[0], "HTTP/1.1 415 Unsupported Media Type");
+      assert.equal(large.closed, true);
+      // A body that grows past what is taken without having said how large it is, over the API and over MCP:
+      // the refusal is sent, the connection ends, and the change behind it is not carried out.
+      const piece = " ".repeat(64 * 1024);
+      const pieces = `${piece.length.toString(16)}\r\n${piece}\r\n`.repeat(20) + "0\r\n\r\n";
+      for (const [path, more, said] of [
+        ["/api/create-project", "", /"code":"limit_exceeded","message":"The request body is larger than 1 MB\."/],
+        ["/mcp", takes, /"message":"The request body is larger than 1 MB\."/],
+      ] as const) {
+        const grown = await exchange(running, [`POST ${path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n${more}Transfer-Encoding: chunked\r\n\r\n${pieces}` + create(`Behind a body that grew ${path}`, "EIGHT")], 3000);
+        assert.equal(grown.answer.split("\r\n")[0], "HTTP/1.1 413 Payload Too Large", path);
+        assert.match(grown.answer, said, path);
+        assert.match(grown.answer, /\r\nConnection: close\r\n/i, path);
+        assert.equal(grown.closed, true, `${path}: the connection ended with the answer`);
+        assert.equal(grown.answer.split("HTTP/1.1 ").length - 1, 1, `${path}: one answer, and none to what came behind it`);
+      }
+      assert.deepEqual((await running.call("/api/list-projects", {})).body.projects, [], "nothing behind a body that grew was carried out");
+      // A body that comes a byte at a time is read whole and as it was written over the API too.
+      const inBytes = Buffer.from(JSON.stringify({ title: "Stück für Stück ✓", prefix: "BYTE", description: "d".repeat(2000) }));
+      const bytes = [...inBytes].map((byte) => Buffer.concat([Buffer.from("1\r\n"), Buffer.from([byte]), Buffer.from("\r\n")]).toString("latin1")).join("");
+      const { port, hostname } = new URL(running.service.urls.base);
+      const read = await new Promise<string>((resolve, reject) => {
+        const socket = openSocket(Number(port), hostname, () => socket.write(`POST /api/create-project HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n${bytes}0\r\n\r\n`, "latin1"));
+        let answer = "";
+        socket.on("data", (chunk) => (answer += chunk));
+        socket.on("close", () => resolve(answer));
+        socket.on("error", reject);
+      });
+      assert.equal(read.split("\r\n")[0], "HTTP/1.1 200 OK");
+      const made = (await running.call("/api/get", { id: "BYTE" })).body;
+      assert.equal(made.title, "Stück für Stück ✓");
+      assert.equal((await running.call("/api/delete", { id: "BYTE", version: made.version, permanent: true }, running.adminKey)).status, 200);
+      // Requests that are taken keep their connection, and each is answered in its turn.
+      const kept = await exchange(running, [mcp(`Content-Type: application/json\r\n${takes}`) + create("Behind an answer", "KEPT")], 700);
+      assert.equal(kept.closed, false);
+      assert.deepEqual(kept.answer.match(/HTTP\/1\.1 \d+/g), ["HTTP/1.1 200", "HTTP/1.1 200"]);
+      assert.deepEqual((await running.call("/api/list-projects", {})).body.projects.map((project: { id: string }) => project.id), ["KEPT"]);
     } finally {
       await running.stop();
     }
@@ -1465,6 +1567,352 @@ describe("service over MCP", () => {
     await agent.close();
     await assert.rejects(connect(running, "vig_not-a-real-key-000000000000"));
   });
+
+  /** A request to the endpoint as it is written, and its answer: the status, the text, and the text as JSON. */
+  const sent = async (to: Running, body: unknown, key?: string) => {
+    const response = await fetch(to.service.urls.mcp, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+    const text = await response.text();
+    return { status: response.status, text, answer: text ? JSON.parse(text) : null, closes: response.headers.get("connection") === "close" };
+  };
+  const ping = (params?: unknown) => ({ jsonrpc: "2.0", id: 1, method: "ping", ...(params === undefined ? {} : { params }) });
+
+  it("reads a megabyte of a request and no more, whether or not the request says how large it is", async () => {
+    const large = JSON.stringify(ping({ _meta: { pad: " ".repeat(1024 * 1024) } }));
+    const refused = await sent(running, large);
+    assert.equal(refused.status, 413);
+    assert.deepEqual(refused.answer, { jsonrpc: "2.0", error: { code: -32000, message: "The request body is larger than 1 MB." }, id: null });
+    assert.equal(refused.closes, true, "what is left of the body is not waited for");
+    // Sent in pieces, with no word of its size: refused once it has grown past the limit, and not kept.
+    const { port, hostname } = new URL(running.service.urls.base);
+    const inPieces = await new Promise<string>((resolve, reject) => {
+      const socket = openSocket(Number(port), hostname, () => {
+        socket.write(`POST /mcp HTTP/1.1\r\nHost: ${hostname}:${port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n`);
+        const piece = " ".repeat(64 * 1024);
+        for (let i = 0; i < 20; i++) socket.write(`${piece.length.toString(16)}\r\n${piece}\r\n`);
+      });
+      let answer = "";
+      socket.on("data", (chunk) => (answer += chunk));
+      socket.on("close", () => resolve(answer));
+      socket.on("error", reject);
+    });
+    assert.equal(inPieces.split("\r\n")[0], "HTTP/1.1 413 Payload Too Large");
+    assert.match(inPieces, /The request body is larger than 1 MB\./);
+    // What is refused before its body is read is not read to keep the connection either: for its key, for the
+    // answers it takes, or for what it says its body is. The connection ends with the answer.
+    const refusedUnread = async (headers: Record<string, string>) => {
+      const response = await fetch(running.service.urls.mcp, { method: "POST", headers, body: JSON.stringify(ping()) });
+      await response.text();
+      return [response.status, response.headers.get("connection")];
+    };
+    assert.deepEqual(await refusedUnread({ "content-type": "text/plain", accept: "application/json, text/event-stream" }), [415, "close"]);
+    assert.deepEqual(await refusedUnread({ "content-type": "application/json", accept: "application/json" }), [406, "close"]);
+    assert.deepEqual(await refusedUnread({ "content-type": "application/json", accept: "application/json, text/event-stream", authorization: "Bearer vig_wrongwrongwrongwrongwrong" }), [401, "close"]);
+    // A request that is taken keeps its connection.
+    const taken = await fetch(running.service.urls.mcp, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify(ping()) });
+    assert.deepEqual([taken.status, taken.headers.get("connection"), await taken.json()], [200, "keep-alive", { result: {}, jsonrpc: "2.0", id: 1 }]);
+    // A body that comes a byte at a time is read whole and as it was written, a character of several bytes too.
+    const inBytes = await new Promise<string>((resolve, reject) => {
+      const body = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_task", arguments: { title: "Stück für Stück ✓", description: "d".repeat(3000) } } }));
+      const socket = openSocket(Number(port), hostname, () => {
+        socket.write(`POST /mcp HTTP/1.1\r\nHost: ${hostname}:${port}\r\nConnection: close\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n`);
+        for (const byte of body) socket.write(Buffer.concat([Buffer.from("1\r\n"), Buffer.from([byte]), Buffer.from("\r\n")]));
+        socket.write("0\r\n\r\n");
+      });
+      let answer = "";
+      socket.on("data", (chunk) => (answer += chunk));
+      socket.on("close", () => resolve(answer));
+      socket.on("error", reject);
+    });
+    assert.equal(inBytes.split("\r\n")[0], "HTTP/1.1 200 OK");
+    assert.match(inBytes, /\\"title\\":\\"Stück für Stück ✓\\"/);
+    // A body that is not JSON is answered as the protocol answers one, and a megabyte less a little is read.
+    assert.deepEqual((await sent(running, "{not json")).answer, { jsonrpc: "2.0", error: { code: -32700, message: "Parse error: Invalid JSON" }, id: null });
+    assert.deepEqual((await sent(running, JSON.stringify(ping({ _meta: { pad: " ".repeat(1024 * 1024 - 200) } })))).answer, { result: {}, jsonrpc: "2.0", id: 1 });
+  });
+
+  it("takes one message in a request: a list of them is refused whole, and nothing in it is carried out", async () => {
+    const projects = async () => payload((await sent(running, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_projects", arguments: {} } })).answer.result).projects.length;
+    const before = await projects();
+    const refusal = { jsonrpc: "2.0", error: { code: -32600, message: "This endpoint takes one message in a request, not a list of them." }, id: null };
+    for (const list of [
+      [ping(), ping()],
+      [ping()],
+      [],
+      // A call, and word in the same request that the call is taken back: the answer would wait for good.
+      [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_project", arguments: { title: "In a list", prefix: "LST" } } }, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 1 } }],
+      Array.from({ length: 100 }, (_, i) => ({ jsonrpc: "2.0", id: i + 1, method: "tools/list" })),
+    ]) {
+      const began = Date.now();
+      const answer = await sent(running, list);
+      assert.equal(answer.status, 400, `${list.length} messages`);
+      assert.deepEqual(answer.answer, refusal);
+      assert.ok(Date.now() - began < 2000, "answered at once");
+    }
+    assert.equal(await projects(), before, "the project of the refused list was not created");
+    // One message at a time is what the library's own client sends: the handshake and a call go through.
+    const client = await connect(running);
+    assert.ok((await client.listTools()).tools.length > 0);
+    await client.close();
+  });
+
+  it("refuses a message of more members and elements than a call has, however they are arranged, with a short answer", async () => {
+    const tooMany = { jsonrpc: "2.0", error: { code: -32000, message: "The message has more than 1000 members and elements." }, id: 1 };
+    const keys = (count: number) => Object.fromEntries(Array.from({ length: count }, (_, i) => [`k${i}`, 0]));
+    const nested = (depth: number) => "[".repeat(depth) + "]".repeat(depth);
+    const initialize = (icons: unknown[]) => ({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "a", version: "1", icons } } });
+    for (const [what, body] of [
+      ["a long list of values of the wrong kind", initialize(Array(50_000).fill(0))],
+      ["a wide object", ping({ _meta: keys(5000) })],
+      ["one more than is taken", ping({ _meta: keys(996) })],
+      ["lists inside lists, as deep as the body allows", `{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{"deep":${nested(200_000)}}}}`],
+      ["many small objects", ping({ _meta: { all: Array.from({ length: 400 }, () => ({ a: 1, b: 2 })) } })],
+    ] as const) {
+      const answer = await sent(running, body);
+      assert.equal(answer.status, 413, what);
+      assert.deepEqual(answer.answer, tooMany, what);
+    }
+    // The message itself has four members, its params one, and 995 more make the thousand that are taken.
+    assert.deepEqual((await sent(running, ping({ _meta: keys(995) }))).answer, { result: {}, jsonrpc: "2.0", id: 1 });
+    // What is wrong with a message that is taken is said in a thousand characters, however much is wrong.
+    const wrong = await sent(running, initialize(Array(900).fill(0)));
+    assert.equal(wrong.status, 200);
+    assert.equal(wrong.answer.id, 1);
+    assert.equal(wrong.answer.error.message.length, 1000);
+    assert.match(wrong.answer.error.message, /… \(\d{5,} characters\)$/);
+    assert.ok(wrong.text.length < 1500, `${wrong.text.length} characters of answer`);
+    // So is what the library refuses before it has a message to answer, which it answers by itself: a version
+    // of the protocol that it does not speak, named at length.
+    const version = await fetch(running.service.urls.mcp, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "9".repeat(3000) }, body: JSON.stringify(ping()) });
+    const unspoken = (await version.json()) as { error: { code: number; message: string }; id: null };
+    assert.deepEqual([version.status, unspoken.error.code, unspoken.id], [400, -32000, null]);
+    assert.equal(unspoken.error.message.length, 1000);
+    assert.match(unspoken.error.message, /^Bad Request: Unsupported protocol version: 9{900,}… \(\d{4} characters\)$/);
+    // Text of any length is one value, and is not counted: a call with a full description goes through.
+    const made = await sent(running, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_task", arguments: { title: "A full description", description: "d".repeat(4000) } } });
+    assert.equal(payload(made.answer.result).title, "A full description");
+  });
+
+  it("passes on what the protocol library answers as it answered it: the status, the type, the length and the body", async () => {
+    // The endpoint hands the library a message it has read itself and writes the library's answer itself. What
+    // it relies on the library for is said here, so that a library that comes to behave otherwise is noticed.
+    const ask = async (body: unknown, more: Record<string, string> = {}) => {
+      const response = await fetch(running.service.urls.mcp, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...more }, body: JSON.stringify(body) });
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return { status: response.status, type: response.headers.get("content-type"), length: response.headers.get("content-length"), session: response.headers.get("mcp-session-id"), bytes, text: bytes.toString("utf8") };
+    };
+    // A request is answered at once and in JSON, never as a stream, although the caller takes both; with no
+    // session, since nothing is kept between requests.
+    const hello = await ask({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "a", version: "1" } } });
+    assert.deepEqual([hello.status, hello.type, hello.length, hello.session], [200, "application/json", String(hello.bytes.length), null]);
+    const greeted = JSON.parse(hello.text);
+    assert.deepEqual([greeted.id, greeted.result.protocolVersion, greeted.result.serverInfo.name], [1, "2025-06-18", "vigile"]);
+    // The length is that of the bytes, not of the characters.
+    const goal = "Stück für Stück ✓ ".repeat(50);
+    const prompt = await ask({ jsonrpc: "2.0", id: 2, method: "prompts/get", params: { name: "plan_work", arguments: { goal } } });
+    assert.deepEqual([prompt.status, prompt.length], [200, String(prompt.bytes.length)]);
+    assert.ok(prompt.text.includes("Stück für Stück ✓"), prompt.text.slice(0, 300));
+    assert.ok(prompt.bytes.length > prompt.text.length, "the answer has characters of several bytes");
+    // What asks for no answer gets none: a notification, and an answer to something the service never asked.
+    for (const message of [{ jsonrpc: "2.0", method: "notifications/initialized" }, { jsonrpc: "2.0", id: 5, result: {} }]) {
+      const none = await ask(message);
+      assert.deepEqual([none.status, none.bytes.length], [202, 0], JSON.stringify(message));
+    }
+    // What the library refuses is passed on with the status and the error it gave it.
+    const noMessage = await ask({ hello: "there" });
+    assert.deepEqual([noMessage.status, noMessage.type, JSON.parse(noMessage.text)], [400, "application/json", { jsonrpc: "2.0", error: { code: -32700, message: "Parse error: Invalid JSON-RPC message" }, id: null }]);
+    const noVersion = await ask({ jsonrpc: "2.0", id: 3, method: "ping" }, { "mcp-protocol-version": "1999-01-01" });
+    assert.equal(noVersion.status, 400);
+    assert.match(JSON.parse(noVersion.text).error.message, /^Bad Request: Unsupported protocol version: 1999-01-01/);
+    const noMethod = await ask({ jsonrpc: "2.0", id: 4, method: "tools/destroy" });
+    assert.deepEqual([noMethod.status, JSON.parse(noMethod.text)], [200, { jsonrpc: "2.0", id: 4, error: { code: -32601, message: "Method not found" } }]);
+    // None of it was the service's trouble.
+    assert.deepEqual(running.warnings, []);
+  });
+
+  it("answers with an error, and says why in its log, when the protocol library fails at a request", async () => {
+    const real = WebStandardStreamableHTTPServerTransport.prototype.handleRequest;
+    const warned = running.warnings.length;
+    try {
+      for (const fails of [
+        () => {
+          throw new Error("the transport broke");
+        },
+        () => Promise.reject(new Error("the transport broke")),
+      ]) {
+        WebStandardStreamableHTTPServerTransport.prototype.handleRequest = fails as never;
+        const broken = await sent(running, ping());
+        assert.equal(broken.status, 500);
+        assert.deepEqual(broken.answer, { jsonrpc: "2.0", error: { code: -32000, message: "The service hit an unexpected error." }, id: null });
+      }
+    } finally {
+      WebStandardStreamableHTTPServerTransport.prototype.handleRequest = real;
+    }
+    assert.equal(running.warnings.length - warned, 2);
+    for (const line of running.warnings.slice(warned)) assert.match(line, /^A request to \/mcp failed unexpectedly: Error: the transport broke\n/);
+    running.warnings.length = warned;
+    assert.deepEqual((await sent(running, ping())).answer, { result: {}, jsonrpc: "2.0", id: 1 });
+  });
+
+  it("lists the tools of the user that asks, the same every time it is asked", async () => {
+    const list = async (key?: string) => (await sent(running, { jsonrpc: "2.0", id: 1, method: "tools/list" }, key)).answer.result.tools as Array<{ name: string }>;
+    const [first, second, admins] = [await list(), await list(), await list(running.adminKey)];
+    assert.deepEqual(second, first);
+    assert.equal(first.some((tool) => tool.name === "create_user"), false);
+    assert.equal(admins.some((tool) => tool.name === "create_user"), true);
+    assert.deepEqual(admins.filter((tool) => first.some((one) => one.name === tool.name)), first, "each tool is described the same to both");
+  });
+
+  it("is still there for the next caller after one that left before its request was here", async () => {
+    const { port, hostname } = new URL(running.service.urls.base);
+    const warned = running.warnings.length;
+    await new Promise<void>((resolve, reject) => {
+      const socket = openSocket(Number(port), hostname, () => {
+        socket.write(`POST /mcp HTTP/1.1\r\nHost: ${hostname}:${port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: 1000\r\n\r\n{"jsonrpc":`);
+        setTimeout(() => socket.destroy(), 50);
+      });
+      socket.on("close", () => resolve());
+      socket.on("error", reject);
+    });
+    assert.deepEqual((await sent(running, ping())).answer, { result: {}, jsonrpc: "2.0", id: 1 });
+    assert.equal(running.warnings.length, warned, "a caller that leaves is nobody's trouble");
+  });
+});
+
+describe("an MCP request the service cannot answer", () => {
+  const post = async (to: Running, body: unknown) => {
+    const response = await fetch(to.service.urls.mcp, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify(body) });
+    return { status: response.status, answer: JSON.parse((await response.text()) || "null") };
+  };
+
+  it("is ended when the answer does not come in time, with an error that names the request, and the log says so", async () => {
+    const running = await start({}, undefined, { answerMs: 200 });
+    try {
+      const real = running.service.engine.execute;
+      running.service.engine.execute = () => new Promise(() => {});
+      const began = Date.now();
+      const late = await post(running, { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "list_projects", arguments: {} } });
+      running.service.engine.execute = real;
+      assert.equal(late.status, 503);
+      assert.equal(late.answer.id, 7);
+      assert.match(late.answer.error.message, /^The service did not answer in time\. The request may still be carried out: read the item/);
+      assert.ok(Date.now() - began < 3000, `ended after ${Date.now() - began} ms`);
+      assert.equal(running.warnings.length, 1);
+      assert.match(running.warnings[0]!, /^A request to \/mcp failed unexpectedly: Error: A request to \/mcp was not answered within 200 ms\./);
+      assert.doesNotMatch(late.answer.error.message, /key/);
+      // The next request is answered, and one that is answered in time says nothing to the log.
+      assert.equal((await post(running, { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "list_projects", arguments: {} } })).answer.id, 8);
+      assert.equal(running.warnings.length, 1);
+      // A key is said once, in the answer: a caller whose answer did not come is told how to get another.
+      for (const [name, input] of [
+        ["create_user", { username: "late", type: "agent" }],
+        ["reset_user_key", { username: "agent1" }],
+      ] as const) {
+        running.service.engine.execute = () => new Promise(() => {});
+        const lost = await post(running, { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name, arguments: input } });
+        running.service.engine.execute = real;
+        assert.deepEqual([lost.status, lost.answer.id], [503, 9], name);
+        assert.match(lost.answer.error.message, /^The service did not answer in time\. .* A key that the request made was in its answer and is not sent again: once the request has been carried out, have an admin reset the key of that user, or, for the admin's own key, run "vigile user reset-key admin" on the service's machine\.$/, name);
+      }
+    } finally {
+      await running.stop();
+    }
+  });
+
+  it("carries out once what was begun before the deadline and ends after it, and nothing is left unhandled when it ends", async () => {
+    const running = await start({}, undefined, { answerMs: 200 });
+    const unhandled: unknown[] = [];
+    const seen = (reason: unknown): void => void unhandled.push(reason);
+    process.on("unhandledRejection", seen);
+    try {
+      const { engine } = running.service;
+      const real = engine.execute;
+      // A write and a refusal that both wait until their callers have been told that the answer did not come.
+      let release = (): void => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      engine.execute = async (...call: Parameters<typeof real>) => {
+        await gate;
+        return real.apply(engine, call);
+      };
+      const [stored, refused] = await Promise.all([
+        post(running, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_task", arguments: { title: "Stored after its answer", description: "d" } } }),
+        post(running, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get", arguments: { id: "NOPE-1" } } }),
+      ]);
+      engine.execute = real;
+      assert.deepEqual([stored.status, stored.answer.id, refused.status, refused.answer.id], [503, 1, 503, 2]);
+      assert.deepEqual((await running.call("/api/list-tasks", {})).body.tasks, [], "nothing is stored while the write waits");
+      release();
+      const titles = async () => ((await running.call("/api/list-tasks", {})).body.tasks as Array<{ title: string }>).map((task) => task.title);
+      for (const began = Date.now(); (await titles()).length === 0 && Date.now() - began < 2000; ) await new Promise((resolve) => setTimeout(resolve, 20));
+      // Both have ended by now, the write and the refusal: neither has anybody left to tell, and neither is
+      // anybody's trouble.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.deepEqual(await titles(), ["Stored after its answer"], "stored once");
+      assert.deepEqual(unhandled, []);
+      assert.equal(running.warnings.length, 2, "one line in the log for each answer that did not come, and none for how the work ended");
+      assert.ok(running.logged.some((line) => /op=create_task .*result=ok/.test(line)) && running.logged.some((line) => /op=get .*result=not_found/.test(line)), "both have their line in the log of operations");
+    } finally {
+      process.off("unhandledRejection", seen);
+      await running.stop();
+    }
+  });
+
+  it("lets go of a caller that does not read its answer, as the service lets go of any connection on which nothing moves", async () => {
+    const running = await start({}, { idleMs: 500 });
+    const { port, hostname } = new URL(running.service.urls.base);
+    const connections = () => new Promise<number>((resolve, reject) => running.service.server.getConnections((error, count) => (error ? reject(error) : resolve(count))));
+    // Answers of nearly a megabyte each, more of them than a connection takes in while nobody reads: the
+    // answer to a request that is carried out, and a refusal, which names the request by an ID of any length.
+    const unread = async (what: string, body: string) => {
+      const request = `POST /mcp HTTP/1.1\r\nHost: ${hostname}:${port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: ${body.length}\r\n\r\n${body}`;
+      const socket = openSocket(Number(port), hostname);
+      socket.on("error", () => {});
+      try {
+        await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+        socket.pause();
+        for (let i = 0; i < 6; i++) socket.write(request);
+        const began = Date.now();
+        while ((await connections()) > 0 && Date.now() - began < 4000) await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.equal(await connections(), 0, `${what}: the connection was closed`);
+        assert.equal(socket.destroyed, false, `${what}: the caller did not let go itself`);
+      } finally {
+        socket.destroy();
+      }
+    };
+    try {
+      await unread("an answer", JSON.stringify({ jsonrpc: "2.0", id: 1, method: "prompts/get", params: { name: "plan_work", arguments: { goal: "g".repeat(900_000) } } }));
+      await unread("a refusal", JSON.stringify({ jsonrpc: "2.0", id: "i".repeat(900_000), method: "ping", params: { _meta: Object.fromEntries(Array.from({ length: 1200 }, (_, i) => [`k${i}`, 0])) } }));
+      assert.deepEqual(running.warnings, [], "a caller that does not read is nobody's trouble");
+    } finally {
+      await running.stop();
+    }
+  });
+
+  it("does not send an answer that is larger than an answer may be, and says so in its place", async () => {
+    const running = await start({}, undefined, { answerBytes: 400 });
+    try {
+      const refusal = /^The answer is larger than \S+ MB and was not sent\. A change that the request made is stored: read the item before sending the request again\.$/;
+      const large = await post(running, { jsonrpc: "2.0", id: 3, method: "tools/list" });
+      assert.equal(large.status, 200);
+      assert.equal(large.answer.id, 3);
+      assert.equal(large.answer.error.code, -32603);
+      assert.match(large.answer.error.message, refusal);
+      // The result of a call is measured as soon as there is one. A call that changed something has changed it.
+      const made = await post(running, { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "create_task", arguments: { title: `Stored, and too large to say${" again".repeat(70)}`, description: "d" } } });
+      assert.deepEqual([made.status, made.answer.id, made.answer.error.code], [200, 5, -32603]);
+      assert.match(made.answer.error.message, refusal);
+      const { tasks } = (await running.call("/api/list-tasks", {})).body;
+      assert.equal(tasks.length, 1);
+      assert.match(tasks[0].title, /^Stored, and too large to say/);
+      assert.deepEqual((await post(running, { jsonrpc: "2.0", id: 4, method: "ping" })).answer, { result: {}, jsonrpc: "2.0", id: 4 });
+      assert.deepEqual(running.warnings, []);
+    } finally {
+      await running.stop();
+    }
+  });
 });
 
 describe("lists longer than a page, over HTTP and MCP on the store the service runs on", () => {
@@ -1864,6 +2312,32 @@ describe("several agents at once", () => {
       // And the key that was let in is refused from then on, as before.
       assert.equal((await running.call("/api/list-tasks", {}, key)).status, 401, username);
     }
+    // With the user gone and the name given to nobody, a call over MCP is still a call: the engine refuses it
+    // as it refuses anyone it does not know, and the log has its line.
+    const key = (await running.call("/api/create-user", { username: "wilma", type: "agent" }, running.adminKey)).body.api_key as string;
+    const from = running.logged.length;
+    const gone = await slow("/mcp", key, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_task", arguments: { title: "As the wilma that was", description: "d" } } }), async () => {
+      const user = (await running.call("/api/get", { id: "wilma" }, running.adminKey)).body;
+      assert.equal((await running.call("/api/delete", { id: "wilma", version: user.version, permanent: true }, running.adminKey)).status, 200);
+    });
+    assert.match(gone, /^HTTP\/1\.1 200 /);
+    assert.match(gone, /unauthorized/);
+    assert.match(gone, /There is no user called \\+"wilma\\+"/);
+    assert.doesNotMatch(gone, /Method not found/);
+    assert.ok(running.logged.slice(from).some((line) => /op=create_task caller=wilma kind=write .*result=unauthorized/.test(line)), running.logged.slice(from).join("\n"));
+    assert.equal((await titles()).includes("As the wilma that was"), false);
+    // Nor is such a request shown the tools of whoever has the name now.
+    const list = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: { pad: "p".repeat(200) } } });
+    const wanda = (await running.call("/api/create-user", { username: "wanda", type: "agent" }, running.adminKey)).body.api_key as string;
+    const own = await slow("/mcp", wanda, list, async () => {});
+    assert.match(own, /"name":"create_task"/);
+    const others = await slow("/mcp", wanda, list, async () => {
+      const user = (await running.call("/api/get", { id: "wanda" }, running.adminKey)).body;
+      assert.equal((await running.call("/api/delete", { id: "wanda", version: user.version, permanent: true }, running.adminKey)).status, 200);
+      assert.equal((await running.call("/api/create-user", { username: "wanda", type: "person" }, running.adminKey)).status, 200);
+    });
+    assert.match(others, /^HTTP\/1\.1 200 /);
+    assert.match(others, /\{"result":\{"tools":\[\]\},"jsonrpc":"2\.0","id":1\}$/);
   });
 
   it("lets exactly one of two agents start a task, and tells the other who has it", async () => {

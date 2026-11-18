@@ -28,6 +28,7 @@ export { toHyphens, toUnderscores } from "./names.js";
 export { storedAs } from "./records.js";
 export type { Detail, More, MoreLists, ProjectSummary, Summary, TaskSummary, UserView } from "./views.js";
 export { readAll } from "./pages.js";
+export { readBody } from "./body.js";
 export { isToken, itemListQuestion } from "./paging.js";
 export * as paging from "./paging.js";
 export { VERSION } from "./version.js";
