@@ -4,7 +4,7 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, realpathSync, mk
 import { createServer } from "node:net";
 import { tmpdir, uptime } from "node:os";
 import { basename, join, relative } from "node:path";
-import { after, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { NoPlace, createPlainFile, initConfig, loadConfig, placeOf, samePlace, setValue, unsetValue, whereTo } from "@vigile/config";
 import { backupTenantFile, folderIsHeld, holdFile, holdFolder, holdTenantFiles, inspectTenantFile, readTenantFile } from "@vigile/storage-sqlite";
@@ -78,8 +78,18 @@ interface Instance {
 }
 
 const instances: Instance[] = [];
+/** How many instances there were when the test under way began: those are its suite's, and outlast it. */
+let madeBeforeTest = 0;
+beforeEach(() => {
+  madeBeforeTest = instances.length;
+});
+// What a test started ends with it. A running service keeps a process for each lock it holds and another that
+// watches over that one: left until the last test, they are hundreds, and each has memory of its own.
+afterEach(async () => {
+  while (instances.length > madeBeforeTest) await instances.splice(madeBeforeTest, 1)[0]!.remove();
+});
 after(async () => {
-  for (const instance of instances) await instance.remove();
+  while (instances.length) await instances.shift()!.remove();
 });
 
 async function instance(settings: Record<string, string> = {}): Promise<Instance> {
@@ -671,6 +681,10 @@ describe("an automatic backup of a large plan", () => {
     const { engine } = await one.start();
     await engine.execute("create_project", "agent1", { title: "Large", prefix: "LRG" });
     for (let i = 0; i < 20_000; i++) await engine.execute("create_task", "agent1", { project: "LRG", title: `Task number ${i} of a large plan`, description: "What there is to do, in a few sentences, as tasks have it. ".repeat(40) });
+  });
+  after(async () => {
+    const at = instances.indexOf(one);
+    if (at >= 0) await instances.splice(at, 1)[0]!.remove();
   });
   beforeEach(async () => {
     await one.service.stop();
