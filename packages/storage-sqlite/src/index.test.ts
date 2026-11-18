@@ -201,6 +201,55 @@ it("does not keep an otherwise finished lock owner alive", async () => {
   }
 });
 
+// A helper process that has ended stays in the system's table of processes until the process that started it
+// has taken note of its end. A thread that ends first never does, and the entry stays for as long as the
+// service runs. Counted from the outside, in a process of its own, where no other test's helpers are.
+it("leaves no ended helper process behind when a lock is taken and let go off the main thread", { skip: process.platform !== "linux" }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), "vigile-ended-helpers-"));
+  const module = new URL("./index.js", import.meta.url).href;
+  const script = `
+    import { readFileSync, readdirSync } from "node:fs";
+    import { once } from "node:events";
+    import { Worker } from "node:worker_threads";
+    import { holdFile, holdFileAsync } from ${JSON.stringify(module)};
+    const file = process.argv[2];
+    /** The children of this process that have ended and that nobody has taken note of. */
+    const ended = () => readdirSync("/proc").filter((name) => /^\\d+$/.test(name)).filter((pid) => {
+      try {
+        const stat = readFileSync("/proc/" + pid + "/stat", "utf8");
+        const [state, parent] = stat.slice(stat.lastIndexOf(") ") + 2).split(" ");
+        return state === "Z" && Number(parent) === process.pid;
+      } catch {
+        return false;
+      }
+    }).length;
+    const counted = {};
+    for (let i = 0; i < 3; i++) await (await holdFileAsync(file, Date.now() + 10_000))();
+    counted.takenWithoutBlocking = ended();
+    const mine = holdFile(file);
+    for (let i = 0; i < 3; i++) if (await holdFileAsync(file, Date.now() + 10_000)) throw new Error("a lock that is held was given out again");
+    counted.refusedWithoutBlocking = ended();
+    mine();
+    for (let i = 0; i < 3; i++) {
+      const thread = new Worker("import(require('node:worker_threads').workerData.module).then(({ holdFile }) => holdFile(require('node:worker_threads').workerData.file)())", { eval: true, workerData: { module: ${JSON.stringify(module)}, file } });
+      const [code] = await once(thread, "exit");
+      if (code !== 0) throw new Error("the thread that took the lock failed");
+    }
+    counted.takenOnAThreadThatEnds = ended();
+    console.log(JSON.stringify(counted));
+  `;
+  try {
+    // From a file: the options of a process go to its threads, and one that says what kind of text follows is
+    // refused by a thread that is given a file.
+    writeFileSync(join(directory, "script.mjs"), script);
+    const ran = spawnSync(process.execPath, ["--no-warnings", join(directory, "script.mjs"), join(directory, "lock")], { encoding: "utf8", timeout: 60_000 });
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.deepEqual(JSON.parse(ran.stdout), { takenWithoutBlocking: 0, refusedWithoutBlocking: 0, takenOnAThreadThatEnds: 0 });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 it("keeps a folder held when this process inspects the lock file", () => {
   const directory = mkdtempSync(join(tmpdir(), "vigile-hold-"));
   const release = holdFolder(directory);
