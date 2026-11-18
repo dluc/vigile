@@ -869,6 +869,10 @@ function tryHoldFile(file: string, keepUntilOwnerStops = false): HeldLock | null
       if (done) return;
       done = true;
       expectedExit = true;
+      // The helper ends once it has let go, and stays in the system's table of processes until the thread that
+      // started it has taken note of its end. Nothing else may be left for that thread to do: from here on the
+      // helper keeps it, so that a thread which ends with its work does not leave the helper's entry behind.
+      child.ref();
       if (child.exitCode === null && child.connected) child.send("release");
       const until = Date.now() + 10_000;
       while (!existsSync(released) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
@@ -970,9 +974,25 @@ export async function holdFileAsync(file: string, deadline: number, startWorker:
       ownsLock = true;
     }
   });
+  let ended = false;
   worker.on("exit", () => {
+    ended = true;
     if (ownsLock && !expectedExit) process.exit(1);
   });
+  /**
+   * Lets the worker end by itself once it has nothing to hold, which it does when it has taken note of its
+   * helper's end. Ended from here instead, it would leave the helper's entry in the system's table of processes
+   * for as long as this process runs. A worker that is still there at the deadline is ended as before.
+   */
+  const whenEnded = (until: number): Promise<void> =>
+    new Promise((resolve) => {
+      if (ended) return resolve();
+      const late = setTimeout(() => void worker.terminate().then(() => resolve(), () => resolve()), Math.max(0, until - Date.now()));
+      worker.once("exit", () => {
+        clearTimeout(late);
+        resolve();
+      });
+    });
   const wait = <T>(read: (message: any) => T | undefined, until: number): Promise<T> =>
     new Promise((resolve, reject) => {
       let finished = false;
@@ -1017,7 +1037,7 @@ export async function holdFileAsync(file: string, deadline: number, startWorker:
     if (answer.error) throw new Error(answer.error);
     if (!answer.held) {
       expectedExit = true;
-      await worker.terminate();
+      await whenEnded(deadline);
       return null;
     }
     let released = false;
@@ -1035,7 +1055,7 @@ export async function holdFileAsync(file: string, deadline: number, startWorker:
           return typeof message?.releaseError === "string" ? message : undefined;
         }, releaseDeadline);
         if (result.releaseError) throw new Error(result.releaseError);
-        await worker.terminate();
+        await whenEnded(releaseDeadline);
       } catch (error) {
         try {
           worker.postMessage("release");
