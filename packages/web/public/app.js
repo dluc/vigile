@@ -105,6 +105,7 @@ const WATCH_NAME = "vigile.watching";
 const MOTION_NAME = "vigile.motion";
 const LIGHTS_NAME = "vigile.lights";
 const SCHEME_NAME = "vigile.scheme";
+const HISTORY_FILTERS_NAME = "vigile.history-filters";
 /** Where each sound's switch is remembered. */
 const SOUND_NAMES = { created: "vigile.sound-created", started: "vigile.sound-started", done: "vigile.sound" };
 const THEMES = ["vigile", "dado", "jeev", "gito"];
@@ -1047,6 +1048,50 @@ function validHistoryDate(value) {
   return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value ? null : value;
 }
 
+/** Values kept in localStorage are only the History filters, never the events or credentials they can find. */
+function normalizeHistoryFilters(values = {}) {
+  const historyFilters = {
+    text: typeof values.text === "string" ? truncateAtCodePointBoundary(values.text.trim(), 128) || null : null,
+    kind: ["project", "task", "user"].includes(values.kind) ? values.kind : null,
+    actor: typeof values.actor === "string" ? values.actor || null : null,
+    action: typeof values.action === "string" ? values.action || null : null,
+    status_from: HISTORY_STATUSES.includes(values.status_from) ? values.status_from : null,
+    status_to: HISTORY_STATUSES.includes(values.status_to) ? values.status_to : null,
+    from: validHistoryDate(typeof values.from === "string" ? values.from : ""),
+    to: validHistoryDate(typeof values.to === "string" ? values.to : ""),
+  };
+  if (historyFilters.from && historyFilters.to && historyFilters.from > historyFilters.to) {
+    historyFilters.from = null;
+    historyFilters.to = null;
+  }
+  return historyFilters;
+}
+
+function readStoredHistoryFilters() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(HISTORY_FILTERS_NAME) ?? "null");
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? normalizeHistoryFilters(stored) : normalizeHistoryFilters();
+  } catch {
+    return normalizeHistoryFilters();
+  }
+}
+
+function rememberHistoryFilters(filters) {
+  if (Object.values(filters).some(Boolean)) {
+    const saved = JSON.stringify(filters);
+    if (localStorage.getItem(HISTORY_FILTERS_NAME) !== saved) localStorage.setItem(HISTORY_FILTERS_NAME, saved);
+  } else if (localStorage.getItem(HISTORY_FILTERS_NAME) !== null) {
+    localStorage.removeItem(HISTORY_FILTERS_NAME);
+  }
+}
+
+/** A browser entry's selection is stable across reloads even if another tab changes localStorage. */
+function historyRouteForEntry(route) {
+  return route.view === "history" && !route.hasHistoryFilterParameters && history.state?.historyFiltersSnapshot
+    ? { ...route, historyFilters: normalizeHistoryFilters(history.state.historyFilters) }
+    : route;
+}
+
 /** Truncates at a UTF-16 code-point boundary without exceeding the requested code-unit limit. */
 function truncateAtCodePointBoundary(value, limit) {
   let end = Math.min(value.length, limit);
@@ -1086,21 +1131,20 @@ function readRoute(address = location.hash) {
   const into = (asked.get("in") ?? "").split("/").map(decoded).filter(Boolean);
   const project = decoded(asked.get("project") ?? "") || null;
   const projectZoom = view !== "history" && Boolean(project && asked.get("projectZoom") === "1");
-  const historyFilters = {
-    text: truncateAtCodePointBoundary(decoded(asked.get("text") ?? "").trim(), 128) || null,
-    kind: ["project", "task", "user"].includes(asked.get("kind")) ? asked.get("kind") : null,
-    actor: decoded(asked.get("actor") ?? "") || null,
-    action: decoded(asked.get("action") ?? "") || null,
-    status_from: HISTORY_STATUSES.includes(asked.get("fromStatus")) ? asked.get("fromStatus") : null,
-    status_to: HISTORY_STATUSES.includes(asked.get("toStatus")) ? asked.get("toStatus") : null,
-    from: validHistoryDate(decoded(asked.get("from") ?? "")),
-    to: validHistoryDate(decoded(asked.get("to") ?? "")),
-  };
-  if (historyFilters.from && historyFilters.to && historyFilters.from > historyFilters.to) {
-    historyFilters.from = null;
-    historyFilters.to = null;
-  }
-  return { view: view ?? "board", open: !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : { kind: "task", id }, zoom, into, project, projectZoom, historyFilters };
+  const hasHistoryFilterParameters = ["text", "kind", "actor", "action", "fromStatus", "toStatus", "from", "to"].some((key) => asked.has(key));
+  const historyFilters = view === "history" && !hasHistoryFilterParameters && !locked
+    ? readStoredHistoryFilters()
+    : normalizeHistoryFilters({
+      text: decoded(asked.get("text") ?? ""),
+      kind: asked.get("kind"),
+      actor: decoded(asked.get("actor") ?? ""),
+      action: decoded(asked.get("action") ?? ""),
+      status_from: asked.get("fromStatus"),
+      status_to: asked.get("toStatus"),
+      from: decoded(asked.get("from") ?? ""),
+      to: decoded(asked.get("to") ?? ""),
+    });
+  return { view: view ?? "board", open: !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : { kind: "task", id }, zoom, into, project, projectZoom, historyFilters, hasHistoryFilterParameters };
 }
 
 function routeOf(view, open, zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom, historyFilters = state.historyFilters) {
@@ -1137,7 +1181,12 @@ const sameTrail = (a, b) => a.length === b.length && a.every((id, at) => id === 
 function go(view, open, trail = [], { zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom, historyFilters = state.historyFilters } = {}) {
   const route = routeOf(view, open, zoom, into, project, projectZoom, historyFilters);
   if (route === location.hash) return;
-  history.pushState({ trail }, "", route);
+  const entry = { trail };
+  if (view === "history" && state.view === "history") {
+    entry.historyFilters = normalizeHistoryFilters(historyFilters);
+    entry.historyFiltersSnapshot = true;
+  }
+  history.pushState(entry, "", route);
   applyRoute();
 }
 
@@ -1183,7 +1232,11 @@ function takeRouteBack() {
 function comeBack() {
   const kept = takeRouteBack();
   if (!kept) return;
-  const route = readRoute();
+  const route = historyRouteForEntry(readRoute());
+  if (route.view === "history") {
+    history.replaceState({ ...(history.state ?? {}), historyFilters: route.historyFilters, historyFiltersSnapshot: true }, "", routeOf(route.view, route.open, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters));
+    rememberHistoryFilters(route.historyFilters);
+  }
   Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, trail: history.state?.trail ?? [], project: route.project ?? kept.project ?? null, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
 }
 
@@ -1194,21 +1247,25 @@ function applyRoute() {
   if (locked) putRouteAway();
   else takeRouteBack();
   let route = readRoute();
-  if (route.view === "history") {
+  if (!locked) route = historyRouteForEntry(route);
+  if (route.view === "history" && !locked) {
     const canonical = routeOf(route.view, route.open, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters);
-    if (canonical !== location.hash) {
-      history.replaceState(history.state, "", canonical);
-      route = readRoute();
+    const snapshot = { ...history.state, historyFilters: route.historyFilters, historyFiltersSnapshot: true };
+    if (canonical !== location.hash || !history.state?.historyFiltersSnapshot || JSON.stringify(history.state.historyFilters) !== JSON.stringify(route.historyFilters)) {
+      history.replaceState(snapshot, "", canonical);
     }
   }
   if (state.loadedAt && route.project && !state.projects.some((project) => projectRef(project) === route.project)) {
-    history.replaceState(history.state, "", routeOf(route.view, route.open, route.zoom, route.into, null, false, route.historyFilters));
-    route = readRoute();
+    history.replaceState(route.view === "history" && !locked
+      ? { ...history.state, historyFilters: route.historyFilters, historyFiltersSnapshot: true }
+      : history.state, "", routeOf(route.view, route.open, route.zoom, route.into, null, false, route.historyFilters));
+    route = { ...route, project: null, projectZoom: false };
   }
   const viewChanged = route.view !== state.view;
   const zoomChanged = route.zoom !== state.zoom || !sameTrail(route.into, state.into);
   const projectChanged = route.project !== state.project || route.projectZoom !== state.projectZoom;
   const historyChanged = JSON.stringify(route.historyFilters) !== JSON.stringify(state.historyFilters);
+  if (route.view === "history" && !locked && (historyChanged || route.hasHistoryFilterParameters)) rememberHistoryFilters(route.historyFilters);
   state.view = route.view;
   state.zoom = route.zoom;
   state.into = route.into;
@@ -2424,10 +2481,12 @@ $("history-filters").addEventListener("submit", (event) => {
     from: $("history-from").value || null,
     to: $("history-to").value || null,
   };
+  rememberHistoryFilters(historyFilters);
   go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: state.into, historyFilters });
 });
 $("history-clear").addEventListener("click", () => {
   for (const id of ["history-text", "history-kind", "history-actor", "history-action", "history-status-from", "history-status-to", "history-from", "history-to"]) $(id).value = "";
+  localStorage.removeItem(HISTORY_FILTERS_NAME);
   const historyFilters = { text: null, kind: null, actor: null, action: null, status_from: null, status_to: null, from: null, to: null };
   go("history", null, [], { project: state.project, projectZoom: false, zoom: null, into: state.into, historyFilters });
 });
@@ -2856,7 +2915,7 @@ function showKeyForm(message) {
 /** Asks again and again while the service cannot be reached, until it answers. */
 let again = null;
 /** Whether the service refused the page's key, or its lack of one. Nothing is read until a load succeeds again. */
-let locked = false;
+let locked = Boolean(history.state?.kept);
 /** Goes up each time the page is locked out. An answer asked for before that is not shown after it. */
 let sessions = 0;
 
@@ -2980,8 +3039,9 @@ async function refresh() {
     const snapshot = JSON.stringify([projects, tasks]);
     const changed = snapshot !== state.snapshot;
     Object.assign(state, { instance, projects, tasks, snapshot, byId: new Map(tasks.map((t) => [t.id, t])), failed: false });
-    // The service lets the page in: when it was locked out before, also before it was loaded again, it is
-    // where it was then.
+    // The successful read is the gate back in: only now may the kept address and its filters be restored.
+    const unlocked = locked;
+    locked = false;
     comeBack();
     if (state.project && !projects.some((p) => projectRef(p) === state.project)) {
       state.project = null;
@@ -2994,8 +3054,6 @@ async function refresh() {
     if (!state.open) document.title = instance.name ? `${instance.name} · Vigile` : "Vigile";
     $("you").textContent = `${instance.you.username}${instance.you.keyless ? " (no key)" : ""}`;
     state.failed = false;
-    const unlocked = locked;
-    locked = false;
     if (unlocked) {
       keepUp();
       showRefresh();
@@ -4163,17 +4221,20 @@ $("refresh").addEventListener("click", () => load());
 document.addEventListener("visibilitychange", () => !locked && (auto || state.failed) && !document.hidden && follow());
 
 {
+  if (locked) putRouteAway();
   let route = readRoute();
   if (route.view === "history") {
+    if (!locked) route = historyRouteForEntry(route);
     const canonical = routeOf(route.view, route.open, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters);
-    if (canonical !== location.hash) {
-      history.replaceState(history.state, "", canonical);
-      route = readRoute();
+    if (!locked) {
+      if (route.hasHistoryFilterParameters) rememberHistoryFilters(route.historyFilters);
+      history.replaceState({ ...(history.state ?? {}), historyFilters: route.historyFilters, historyFiltersSnapshot: true }, "", canonical);
     }
   }
   Object.assign(state, { view: route.view, open: route.open, trail: history.state?.trail ?? [], zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, project: route.project, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
   linkViews();
 }
+if (locked) showKeyForm("Reconnect to restore your last view.");
 setAutoRefresh(localStorage.getItem(AUTO_NAME) === "on");
 saveWatched();
-load();
+if (!locked) load();

@@ -277,9 +277,13 @@ On expanded cards, the problem indicator is at the bottom left and "Zoom in" is
 at the bottom right.
 In History, the project selection works the same way. Filters narrow events by
 text, item kind, actor, action, previous or new status, or time range; the
-address keeps those choices when the view is reloaded or shared. Choose a group
-from the scope bar or use a group event to zoom into nested work. Zoom out or
-use the breadcrumb to return, with the group path kept in the address.
+address keeps those choices when the view is reloaded or shared. This browser
+also remembers the selected filters in local storage and restores them when
+History is opened without filter choices in the address; explicit bookmarked
+filters take precedence. Clearing filters removes the remembered selection.
+Choose a group from the scope bar or use a group event to zoom into nested work.
+Zoom out or use the breadcrumb to return, with the group path kept in the
+address.
 Following a link in the
 panel opens the linked item, with a button back to the one you came from. The
 item ID is a copy button. Moving over the description reveals a small copy
