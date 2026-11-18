@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import { VigileError, echo, httpStatus, toErrorBody, toHyphens, toUnderscores, type Engine, type ErrorBody } from "@vigile/core";
+import { VigileError, echo, httpStatus, readBody, toErrorBody, toHyphens, toUnderscores, type Engine, type ErrorBody } from "@vigile/core";
 
 export interface ApiOptions {
   engine: Engine;
@@ -21,6 +21,12 @@ export interface ApiOptions {
    * own, which only the service knows. Without it, only what comes from a loopback address is taken to be.
    */
   fromThisMachine?(request: IncomingMessage): boolean;
+  /**
+   * Told that a stream of changes begins as the answer to a request, before anything of it is sent. Answers
+   * on a connection go out in the order of their requests, so nothing behind a stream can be answered while
+   * it goes on: what that means for the connection is the host's to say.
+   */
+  onStream?(request: IncomingMessage, response: ServerResponse): void;
 }
 
 /** How large the body of a request may be, in bytes. */
@@ -89,14 +95,11 @@ export function bodyRefused(request: IncomingMessage): VigileError | null {
 async function readJson(request: IncomingMessage): Promise<unknown> {
   const refused = bodyRefused(request);
   if (refused) throw refused;
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    size += (chunk as Buffer).length;
-    if (size > MAX_BODY) throw new VigileError("limit_exceeded", "The request body is larger than 1 MB.");
-    chunks.push(chunk as Buffer);
-  }
-  const text = Buffer.concat(chunks).toString("utf8").trim();
+  // A body that grew past what is taken without having said so is refused like one that said so: with an
+  // answer, which the request is still there to get.
+  const body = await readBody(request, MAX_BODY);
+  if (body === null) throw new VigileError("limit_exceeded", "The request body is larger than 1 MB.");
+  const text = body.trim();
   if (!text) return {};
   try {
     return JSON.parse(text);
@@ -148,7 +151,9 @@ export function createApiHandler(options: ApiOptions): ApiHandler {
     if (full) throw new VigileError("too_many_requests", full, { actions: ["Close a page that is listening, or ask for changes with list_tasks instead."] });
     streamsFrom.set(address, atAddress + 1);
     if (here) streamsFromHere++;
-    response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", connection: "keep-alive", "x-accel-buffering": "no" });
+    // Whether the connection is kept after the stream is the host's to say, which is told that one begins.
+    options.onStream?.(request, response);
+    response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-accel-buffering": "no" });
     let ping: NodeJS.Timeout | undefined;
     let unsubscribe = (): void => {};
     let ended = false;

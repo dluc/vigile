@@ -1,12 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { ServerResponse, createServer, type IncomingMessage, type Server } from "node:http";
 import { isIP, type Socket } from "node:net";
 import { uptime } from "node:os";
 import { join } from "node:path";
 import { LiveAuth, masked, saidNothingOf, staleKeys, type LoadedConfig } from "@vigile/config";
 import { Engine, VERSION, VigileError, echo, readAll, type OperationLog } from "@vigile/core";
 import { bodyRefused, createApiHandler, sendError } from "@vigile/http-api";
-import { createMcpHandler, mcpBodyRead } from "@vigile/mcp";
+import { MCP_LIMITS, createMcpHandler, mcpBodyRead } from "@vigile/mcp";
 import { SqliteStorage, everHeld, holdFolder } from "@vigile/storage-sqlite";
 import { serveWeb } from "@vigile/web";
 import { BACKUP_TIMES, startBackups, type BackupSchedule } from "./backup-schedule.js";
@@ -37,6 +37,8 @@ export interface ServiceOptions {
   warn(line: string): void;
   /** Other limits than the usual ones, for tests that cannot wait half a minute. */
   limits?: Partial<typeof LIMITS>;
+  /** Other limits for a request to the MCP endpoint, for the same tests. */
+  mcpLimits?: Partial<typeof MCP_LIMITS>;
   /** Other clocks for the automatic backups, and other times to look at them, for tests that cannot wait a day. */
   now?(): number;
   monotonic?(): number;
@@ -88,6 +90,32 @@ export const LIMITS = {
    */
   unanswered: 8,
 };
+
+/** The connections that end with an answer already given or begun. What else came on one of them is not looked at. */
+const ending = new WeakSet<Socket>();
+
+/**
+ * An answer of the service. One that is given while the body of its request is not here yet is a refusal, by
+ * whichever part of the service and for whatever reason: the method, the key, the page the request comes from,
+ * what it says of its body, or a body that grew past what is taken. The body of such a request is not waited
+ * for, and none of it is taken in to keep the connection: the connection ends with the answer. So no refusal
+ * has the service take in more than a body may be, and nothing that came behind it is carried out with nobody
+ * left to tell. Such an answer is a whole one that ends: only a POST may bring a body, and a stream of changes
+ * is not asked for with one.
+ */
+class Answer extends ServerResponse<IncomingMessage> {
+  override writeHead(...head: unknown[]): this {
+    const request = this.req;
+    if (hasBody(request) && !request.complete && !this.headersSent) {
+      this.setHeader("connection", "close");
+      ending.add(request.socket);
+    }
+    return (super.writeHead as (...head: unknown[]) => this).apply(this, head);
+  }
+}
+
+/** Whether a request says that it brings a body. */
+const hasBody = (request: IncomingMessage): boolean => Number(request.headers["content-length"] ?? 0) > 0 || request.headers["transfer-encoding"] !== undefined;
 
 /**
  * A second service on the same data folder would hold its own copy of the graph, so only one may run. The
@@ -432,6 +460,13 @@ export async function startService(options: ServiceOptions): Promise<Service> {
     caller,
     instance,
     fromThisMachine: (request) => connections.fromHere(request.socket),
+    // A stream of changes is the last answer on its connection. Nothing that came behind it could be answered
+    // while it goes on, a refusal that ends the connection least of all: the stream says that the connection
+    // ends with it, and what else comes on the connection is not looked at.
+    onStream: (request, response) => {
+      response.setHeader("connection", "close");
+      ending.add(request.socket);
+    },
     onUnexpected: (error) => warn(`A request to the API failed unexpectedly: ${explain(error)}`),
     adminStatus: () => ({
       pid: process.pid,
@@ -445,7 +480,8 @@ export async function startService(options: ServiceOptions): Promise<Service> {
       backups: backups.status(),
     }),
   });
-  const mcp = createMcpHandler({ engine, caller, onUnexpected: (error) => warn(`A request to /mcp failed unexpectedly: ${explain(error)}`) });
+  // What the library that speaks the protocol throws can repeat what a caller sent: the log gets its start.
+  const mcp = createMcpHandler({ engine, caller, limits: options.mcpLimits, onUnexpected: (error) => warn(`A request to /mcp failed unexpectedly: ${echo(explain(error), 2000)}`) });
 
   const base = `http://${hostFor(config.listen.address)}:${config.listen.port}`;
   const limits = { ...LIMITS, ...options.limits };
@@ -469,6 +505,11 @@ export async function startService(options: ServiceOptions): Promise<Service> {
     const waiting = (unanswered.get(socket) ?? 0) + 1;
     if (waiting > limits.unanswered) return void socket.destroy();
     unanswered.set(socket, waiting);
+    // Nor is what came behind an answer that ends the connection. It is counted all the same, and stays
+    // counted, since it is never answered: something is kept for every request that comes, looked at or not,
+    // and a connection that sends request upon request behind its stream of changes is closed like any other
+    // that sends more than it may.
+    if (ending.has(socket)) return;
     // An answer is out when all of it has been handed to the connection, which for one that waits behind others
     // is when its turn has come. A connection that closes first takes its count with it.
     response.once("finish", () => unanswered.set(socket, (unanswered.get(socket) ?? 1) - 1));
@@ -501,6 +542,11 @@ export async function startService(options: ServiceOptions): Promise<Service> {
           }),
         );
       }
+      // Nothing but a POST has a use for a body. One that comes with a stream of changes would end the
+      // connection for everything behind it while the stream goes on: it is refused, like any other.
+      if (request.method !== "POST" && hasBody(request)) {
+        return void sendError(response, new VigileError("invalid_input", "Only a POST request may have a body.", { actions: ["Send the request again without a body."] }));
+      }
       if (asksFirst && guarded && request.method === "POST" && wouldBeRead(request, url)) response.writeContinue();
       if (url.pathname === "/mcp") return mcp(request, response);
       if (url.pathname === "/health" || guarded) return api(request, response, url);
@@ -529,9 +575,9 @@ export async function startService(options: ServiceOptions): Promise<Service> {
     } catch {
       return false;
     }
-    return url.pathname === "/mcp" ? mcpBodyRead(request) : bodyRefused(request) === null;
+    return url.pathname === "/mcp" ? mcpBodyRead(request, options.mcpLimits?.bodyBytes) : bodyRefused(request) === null;
   };
-  const server = createServer({ requestTimeout: limits.requestMs, headersTimeout: Math.min(limits.headersMs, limits.requestMs), connectionsCheckingInterval: limits.checkMs }, (request, response) => answer(request, response, false));
+  const server = createServer({ ServerResponse: Answer, requestTimeout: limits.requestMs, headersTimeout: Math.min(limits.headersMs, limits.requestMs), connectionsCheckingInterval: limits.checkMs }, (request, response) => answer(request, response, false));
   server.on("checkContinue", (request, response) => answer(request, response, true));
   server.on("connection", (socket) => void connections.connected(socket));
   // With nobody listening for it, a connection that has gone this long without a byte is closed.
