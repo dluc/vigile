@@ -249,19 +249,22 @@ Nothing private goes on the site: no machine names, addresses, paths or keys, an
 
 The site is public at <https://vigile.dev.ai/>. The workflow `.github/workflows/pages.yml`, "Web site", is the
 site's own. It runs the site's tests on every pull request and on every push to `main`, with the Chrome the runner comes
-with. It builds the site and publishes it with the official Pages actions only when it is started by hand,
-and then only after the tests passed in the same run.
+with. On every push to `main`, and when it is started by hand, it also builds the site and publishes it with
+the official Pages actions, and only after the tests passed in the same run. A pull request publishes nothing.
 Each job asks for what it needs and no more: the tests read the code, the build also asks Pages for the
 address, and only publishing may write the pages.
 
 The workflow names every action by its full commit, with its version in a comment beside it or on the line above, so that the repository can require actions to be pinned: a tag can be moved to other code, a commit cannot. To take a newer version of an action, look up the commit its tag points at and change the commit and the comment together, in every job that names it. `site.test.mjs` reads the workflow as YAML with `lib/yaml.mjs`, a reader of the small part of YAML the workflow uses, so a file that is not YAML, such as one with the marks of an unfinished merge, fails with its line; and it refuses a workflow that names an action by a tag, a branch or a short commit, or names one twice in a job.
 
-A change to the site is public only after the workflow is started again:
+A change to the site is public some minutes after it is merged into `main`, and so is a change to the
+program that the reference pages show: the push starts the workflow, which tests, builds and publishes. When
+two changes are merged close together, the second publishes both: the tests of the first run are ended, and a
+publication whose turn comes after `main` has moved on publishes nothing, so that an older site is never put
+over a newer one.
 
-1. Start the workflow "Web site" by hand (Actions, "Web site", "Run workflow") on `main` and look at the
-   result. The address comes from Pages itself: the domain set in the repository's settings, under **Pages**,
-   where **Source** is **GitHub Actions**.
-2. To publish on every change instead, let the jobs `build` and `publish` run for a push to `main` as well: in
-   the workflow, each of the two says `if: github.event_name == 'workflow_dispatch'`.
-3. If the site moves to another address, set it in the repository's Pages settings and change `SITE_URL` in
-   `site.mjs`, which the README's links and a build without options go by.
+- To publish again without a change, start the workflow "Web site" by hand (Actions, "Web site", "Run
+  workflow") on `main`.
+- The address comes from Pages itself: the domain set in the repository's settings, under **Pages**, where
+  **Source** is **GitHub Actions**. If the site moves to another address, set it there, enforce HTTPS before
+  the next publication, and change `SITE_URL` in `site.mjs`, which the README's links and a build without
+  options go by.

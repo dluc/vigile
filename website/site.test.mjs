@@ -1488,15 +1488,20 @@ describe("the web site", () => {
     assert.deepEqual(test.concurrency, { group: "site-tests-${{ github.event_name }}-${{ github.ref }}", "cancel-in-progress": true }, "a push ends the tests of an older push, and not the ones a publication waits for");
     assert.deepEqual(test.steps.map((step) => (step.uses ?? step.run).split("@")[0]), ["actions/checkout", "pnpm/action-setup", "actions/setup-node", "pnpm install --frozen-lockfile", "pnpm build", "test -x /usr/bin/google-chrome && /usr/bin/google-chrome --version", "node --test website/*.test.mjs"]);
     assert.deepEqual(test.steps.at(-1).env, { VIGILE_TEST_BROWSER: "/usr/bin/google-chrome" }, "the tests are told which browser to drive, so that none of them is skipped for want of one");
-    // Building and publishing: only when someone starts them, one publication at a time, into the environment of Pages.
-    for (const job of [building, publish]) assert.equal(job.if, "github.event_name == 'workflow_dispatch'", "the site is built and published when someone starts it, and on nothing else");
+    // Building and publishing: for a push to main and when someone starts them, never for a pull request; one publication at a time, into the environment of Pages.
+    for (const job of [building, publish]) assert.equal(job.if, "github.event_name != 'pull_request'", "the site is built and published for a push to main and when someone starts it, and never for a pull request");
     assert.deepEqual(building.permissions, { contents: "read", pages: "read" }, "building reads the code, and asks Pages where the site is served");
     assert.deepEqual(building.steps.map((step) => (step.uses ?? step.run).split("@")[0]), ["actions/checkout", "pnpm/action-setup", "actions/setup-node", "pnpm install --frozen-lockfile", "pnpm build", "actions/configure-pages", 'node website/build.mjs --out website/dist --site-url "${{ steps.pages.outputs.base_url }}/"', "actions/upload-pages-artifact"]);
     assert.deepEqual(publish.permissions, { pages: "write", "id-token": "write" }, "publishing writes the pages and says who it is to Pages");
-    assert.deepEqual(publish.concurrency, { group: "pages", "cancel-in-progress": false }, "one publication at a time, and one that has begun is let finish");
+    assert.deepEqual(publish.concurrency, { group: "pages", "cancel-in-progress": false, queue: "max" }, "one publication at a time, one that has begun is let finish, and one that waits is not put out of its turn by another");
     assert.deepEqual(publish.environment, { name: "github-pages", url: "${{ steps.deployment.outputs.page_url }}" }, "it is published into the environment of Pages");
     assert.deepEqual([building.needs, publish.needs], ["test", "build"], "only a site whose tests passed in the same run is built, and only one that was built is published");
-    assert.deepEqual(publish.steps.map((step) => step.uses.split("@")[0]), ["actions/deploy-pages"]);
+    // An older commit is never published over a newer one: the turn of a publication may come after main has moved on, and then it publishes nothing.
+    const [current, deploy] = publish.steps;
+    assert.equal(publish.steps.length, 2);
+    assert.deepEqual([current.id, current.uses], ["current", undefined]);
+    assert.match(current.run, /^head=\$\(git ls-remote "https:\/\/github\.com\/\$GITHUB_REPOSITORY\.git" refs\/heads\/main \| cut -f1\) && test -n "\$head" && if \[ "\$head" = "\$GITHUB_SHA" \]; then echo "is=true" >> "\$GITHUB_OUTPUT"; else echo "[^"]*"; fi$/, "it asks where main is, fails when it cannot tell, and says yes only for the commit main is at");
+    assert.deepEqual([deploy.id, deploy.if, deploy.uses.split("@")[0]], ["deployment", "steps.current.outputs.is == 'true'", "actions/deploy-pages"], "the pages are written only when main is still at this commit");
 
     // The reading refuses what GitHub refuses. A workflow with the marks of a merge that was not finished, as one was sent:
     const checkout = lines.findIndex((line) => line.includes("uses: actions/checkout@"));

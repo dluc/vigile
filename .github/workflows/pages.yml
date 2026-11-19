@@ -4,11 +4,10 @@
 # site from what the program describes of itself (vigile describe) and from running the program, and look at
 # it in a browser.
 #
-# Building and publishing are started by hand only, and only a site whose tests passed in the same run is
-# published: a change to the site is public once this workflow was started on main after it. The site is
-# served at the address the repository's Pages settings give it, where "Source" is "GitHub Actions". To publish
-# on every change instead, let the jobs "build" and "publish" run on a push to main as well. More in
-# website/README.md.
+# The site is built and published on every push to main, and when the workflow is started by hand, and only a
+# site whose tests passed in the same run is published: a change is public some minutes after it is merged. A
+# pull request runs the tests and publishes nothing. The site is served at the address the repository's Pages
+# settings give it, where "Source" is "GitHub Actions". More in website/README.md.
 #
 # Every action is named by the commit it is, in full, with its version beside it: a tag can be moved to other
 # code, a commit cannot. To take a newer version, look up the commit of its tag and change both.
@@ -32,8 +31,8 @@ jobs:
     # The tests read the code and nothing else.
     permissions:
       contents: read
-    # A newer push to the same branch makes the run for the older one pointless. A run that was started by hand
-    # is in a group of its own: a push does not end the tests a publication waits for.
+    # A newer push to the same branch makes the run for the older one pointless: its tests end, and with them
+    # its publication, and the newer one publishes. A run that was started by hand is in a group of its own.
     concurrency:
       group: site-tests-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true
@@ -65,7 +64,7 @@ jobs:
 
   build:
     name: Build the site
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -106,7 +105,7 @@ jobs:
 
   publish:
     name: Publish it
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -115,12 +114,23 @@ jobs:
       pages: write
       id-token: write
     # One publication at a time, and one that has begun is let finish: half a site is worse than an older one.
+    # Every one that waits keeps its turn: where only one may wait, a late publication of an older commit would
+    # take the place of the newest one, and then leave itself out below, so that nothing would be published.
     concurrency:
       group: pages
       cancel-in-progress: false
+      queue: max
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Publications take their turns one at a time, and not always in the order of the pushes they are for. One
+      # that comes to its turn after main has moved on is left out: the publication for the newer commit follows
+      # it, or was there before it, and an older site is never put over a newer one.
+      - id: current
+        name: See whether main is still at this commit
+        run: head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1) && test -n "$head" && if [ "$head" = "$GITHUB_SHA" ]; then echo "is=true" >> "$GITHUB_OUTPUT"; else echo "main is at $head, past $GITHUB_SHA, so this publication is left out"; fi
+
       - id: deployment
+        if: steps.current.outputs.is == 'true'
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
