@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { ConfigBusy, ConfigError } from "@vigile/config";
-import { OPERATIONS, VERSION, toHyphens } from "@vigile/core";
+import { ConfigBusy, ConfigError, loadConfig } from "@vigile/config";
+import { FeatureSelection, OPERATIONS, VERSION, toHyphens } from "@vigile/core";
 import { keyRefused } from "./answers.js";
-import { UsageError, flag, parseArgs, type Args } from "./args.js";
+import { UsageError, configPath, flag, parseArgs, type Args } from "./args.js";
 import { NoAnswerError, NotRunningError, ServiceError } from "./client.js";
 import { EXIT_CODES, type CommandLineCode } from "./codes.js";
 import { backup } from "./commands/backup.js";
@@ -10,6 +10,7 @@ import { config } from "./commands/config.js";
 import { describe } from "./commands/describe.js";
 import { doctor } from "./commands/doctor.js";
 import { help } from "./commands/help.js";
+import { builtinsUnder } from "./commands/builtin.js";
 import { restoreBackup } from "./commands/restore-backup.js";
 import { runOperation } from "./commands/operation.js";
 import { serve } from "./commands/serve.js";
@@ -34,8 +35,12 @@ async function run(args: Args, ui: Ui): Promise<number> {
   if (!name || name === "help" || args.options.has("help")) {
     // The help of the one named after `help`: `config set`, with its second word. Or of the command that was
     // typed with --help, where what follows its name is what it was given.
-    if (name === "help" || !name) help(ui, args.words, flag(args, "json"));
-    else help(ui, [name, ...args.words], flag(args, "json"), true);
+    const topic = name === "help" || !name ? args.words[0] : name;
+    const useConfig = !(topic && builtinsUnder(topic).length) && (args.options.has("config") || process.env.VIGILE_CONFIG);
+    const selection = useConfig ? new FeatureSelection(loadConfig(configPath(args)).config.features) : new FeatureSelection();
+    const operations = OPERATIONS.filter(o => selection.operation(o.name)).map(o => selection.profile(o));
+    if (name === "help" || !name) help(ui, args.words, flag(args, "json"), false, operations);
+    else help(ui, [name, ...args.words], flag(args, "json"), true, operations);
     return 0;
   }
   // Only a command that is listed: every object answers to names such as "constructor" with something callable.

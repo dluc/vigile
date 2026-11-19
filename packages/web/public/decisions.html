@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Decisions · Vigile</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/decisions.css"><script src="/boot.js"></script></head>
+<body class="register"><header class="top"><div class="brand"><h1>Vigile</h1><span id="instance"></span></div><nav class="views" aria-label="Views"><a id="board-link" href="/#board" hidden>Board</a><a href="/decisions.html" aria-current="page">Decisions</a></nav></header>
+<main><h2>Decision register</h2><p id="message" role="status">Connecting…</p>
+<button id="refresh" type="button">Refresh</button>
+<form id="access" hidden><label>API key (leave empty for keyless access) <input id="credential" type="password" autocomplete="off"></label> <button>Connect</button></form>
+<section id="records" hidden><label>State <select id="filter"><option value="">All states</option><option>proposed</option><option>active</option><option>withdrawn</option></select></label>
+<ol id="rows"></ol><button id="more" hidden>More decisions</button><article id="detail" hidden></article></section></main><script type="module" src="/decisions.js"></script></body></html>

@@ -703,6 +703,7 @@ button.link:hover { background: var(--idle-soft); }
   .brand .instance { flex: 0 1 auto; min-width: 6ch; }
   .controls { order: 2; flex: none; }
   .views { order: 4; flex: none; margin: 8px 0 0; }
+  .views a { padding-inline: 9px; }
   /* The state of the page sits at the end of the second row when it fits there, and on a row of its own when not. */
   .status { order: 6; flex: 0 1 auto; margin: 8px 0 0 auto; justify-content: flex-end; text-align: right; }
   #sync { white-space: nowrap; }

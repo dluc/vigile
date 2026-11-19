@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { initConfig, loadConfig, setValue } from "@vigile/config";
 import { paging, readAll } from "@vigile/core";
+import { folderIsHeld } from "@vigile/storage-sqlite";
 import { adversary, type Target } from "./adversary.js";
 import { Page, findBrowser } from "./browser-driver.js";
 import { BROWSER_TEST_SHARDS, type BrowserTestShard, type BrowserTestSuite } from "./browser-shards.js";
@@ -948,6 +949,108 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await layout("in the panel for an unknown item");
       await page.key("Escape");
       assert.deepEqual(page.errors, []);
+    });
+
+    it("opens a standalone decision from the decisions-only home page without requesting tasks", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "vigile-browser-decisions-"));
+      const config = join(dir,"config.toml");
+      const {adminKey} = initConfig(config,{name:"Decisions",port:await freePort()});
+      const instance = await startService({loaded:loadConfig(config,{VIGILE_FEATURES:"decisions"}),log(){},warn(){}});
+      try {
+        const d = await instance.engine.execute("create_decision","agent1", {title:"Catalogue policy",description:"Include tax.",status:"active"}) as {id:string};
+        for (let i=0; i<101; i++) {
+          const project = await instance.engine.execute("create_project","agent1", {title:`Scope ${i}`}) as {id:string};
+          await instance.engine.execute("add_link","agent1", {from:`decision:${d.id}`,type:"affects",to:`project:${project.id}`});
+        }
+        await page.open(`${instance.urls.base}/#board`);
+        await page.until("return document.querySelector('#rows a')?.textContent.includes('Catalogue policy')", "standalone decision in the register");
+        await page.click("#rows a");
+        await page.until("return document.querySelector('#detail')?.textContent.includes('Include tax.')", "decision text");
+        assert.equal(await page.run("return document.activeElement===document.querySelector('#detail h3')"),true);
+        await page.click("#detail button");
+        await page.until("return document.querySelectorAll('#detail li').length===101", "every linked item across both pages");
+        assert.equal(await page.run("return location.hash"),`#${d.id}`);
+        assert.equal(await page.run("return document.getElementById('board-link').hidden"),true);
+        assert.equal(await page.run("return performance.getEntriesByType('resource').some(r => r.name.includes('/api/list-tasks'))"),false);
+        await page.run("const fetchOk = window.fetch; window.fetch = (...args) => { window.fetch = fetchOk; return Promise.resolve(new Response(null,{status:503})); };");
+        await page.click("#refresh");
+        await page.until("return document.querySelector('#message')?.textContent.includes('503')", "failed refresh offers retry");
+        await page.click("#refresh");
+        await page.until("return !document.querySelector('#records').hidden", "register recovers");
+        await page.run("localStorage.setItem('vigile.key','revoked-example')");
+        await page.open(instance.urls.base);
+        await page.until("return !document.querySelector('#access').hidden", "revoked key prompts for connection");
+        await page.click("#access button");
+        await page.until("return !document.querySelector('#records').hidden", "empty key reconnects to keyless account");
+        await page.run(`localStorage.setItem('vigile.key',${JSON.stringify(adminKey)});`);
+        await page.open(instance.urls.base);
+        await page.until("return !document.querySelector('#records').hidden", "keyed session");
+        await page.run("const oldValue=localStorage.getItem('vigile.key'); localStorage.removeItem('vigile.key'); window.dispatchEvent(new StorageEvent('storage',{key:'vigile.key',oldValue,storageArea:localStorage}));");
+        const reads = page.requests.length;
+        await page.click("#refresh");
+        assert.equal(await page.run("return !document.querySelector('#access').hidden && document.querySelector('#rows').childElementCount===0"),true);
+        assert.equal(page.requests.length,reads,"removal and refresh must not silently reconnect keylessly");
+        await page.click("#access button");
+        await page.until("return !document.querySelector('#records').hidden", "explicit reconnect after cross-tab lockout");
+        const latest = await instance.engine.execute("get","agent1",{kind:"decision",id:d.id}) as {version:number};
+        await instance.engine.execute("delete","agent1",{kind:"decision",id:d.id,version:latest.version});
+        await page.open(`${instance.urls.base}/#${d.id}`);
+        await page.until("return document.querySelector('#detail small')?.textContent.includes('Deleted ')", "deleted bookmark explicitly marked");
+        assert.equal(await page.run("return document.querySelectorAll('#rows a').length"),0);
+      } finally { await page.open("about:blank"); await instance.stop(); rmSync(dir,{recursive:true,force:true}); }
+    });
+
+    it("refreshes the open task's impact links when only the instance features change", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "vigile-browser-profile-"));
+      const file = join(dir, "config.toml");
+      initConfig(file, { name: "Profile", port: await freePort() });
+      const start = (features: string) => startService({ loaded: loadConfig(file,{VIGILE_FEATURES:features,VIGILE_BACKUP_ENABLED:"false"}), log(){}, warn(){} });
+      let instance = await start("tasks,decisions");
+      // A bounded stop may return while the data folder is still held; the next start waits for it.
+      const restart = async (features: string) => {
+        await instance.stop();
+        const data = loadConfig(file,{}).dataDir;
+        for (const until = Date.now() + 30_000; folderIsHeld(data); await new Promise(r => setTimeout(r, 50))) if (Date.now() >= until) assert.fail(`the service did not let go of its data folder within 30 seconds of stopping: ${data}`);
+        return start(features);
+      };
+      try {
+        const make = async (op: string, input: Record<string,unknown>) => instance.engine.execute(op,"agent1",input) as Promise<{id:string}>;
+        const t = await make("create_task",{title:"Cart",description:"Work"});
+        const d = await make("create_decision",{title:"Include tax",description:"Pricing",status:"active"});
+        await make("add_link",{from:d.id,to:t.id,type:"affects"});
+        await page.open(`${instance.urls.base}/#board/${t.id}`);
+        await page.until("return !!document.querySelector('[data-relation=\"is affected by\"]')", "initial decision link");
+        instance = await restart("tasks");
+        // Trigger the regular refresh while the modal keeps the toolbar covered.
+        await page.run("document.getElementById('refresh').click()");
+        await page.until("return document.querySelector('#view-decisions').hidden && document.querySelector('.detail-title')?.textContent === 'Cart' && !document.querySelector('[data-relation=\"is affected by\"]')", "same task without disabled decision links");
+        instance = await restart("decisions");
+        await page.run("document.getElementById('refresh').click()");
+        await page.until("return location.pathname==='/decisions.html' && !!document.querySelector('#rows a')", "open board recovers into enabled register");
+        instance = await restart("tasks");
+        await page.click("#refresh");
+        await page.until("return location.pathname==='/' && !!document.querySelector('.card') && document.querySelector('#view-decisions').hidden", "open register recovers into enabled board");
+        instance = await restart("tasks,decisions");
+        await page.open(`${instance.urls.base}/#board/decision:${d.id}`);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Include tax'", "decision panel on the board");
+        instance = await restart("tasks");
+        await page.run("document.getElementById('refresh').click()");
+        await page.until("return document.getElementById('panel').hidden && !location.hash.includes('decision')", "the disabled decision's panel and address are gone");
+        assert.equal(await page.run("return document.getElementById('panel').innerText.includes('Pricing')"), false, "nothing of the decision is left in the panel");
+        // A task that was reached through a decision keeps no way back to it, by the panel or by the browser.
+        instance = await restart("tasks,decisions");
+        await page.open(`${instance.urls.base}/#board/decision:${d.id}`);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Include tax'", "decision panel again");
+        await page.click('[data-relation="affects"] .link');
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Cart' && !!document.querySelector('#detail .back')", "the task, with the way back to the decision");
+        instance = await restart("tasks");
+        await page.run("document.getElementById('refresh').click()");
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Cart' && !document.querySelector('#detail .back')", "the task without a way back to the disabled decision");
+        const refusedBefore = page.requests.length;
+        await page.run("history.back()");
+        await page.until("return document.getElementById('panel').hidden && !location.hash.includes('decision')", "the browser's Back does not open the disabled decision");
+        assert.equal(page.requests.slice(refusedBefore).some((url) => url.endsWith("/api/get")), false, "and the decision is not asked for");
+      } finally { await page.open("about:blank"); await instance.stop(); rmSync(dir,{recursive:true,force:true}); }
     });
 
     it("follows a reverse impact link and restores its decision after reload", async () => {
@@ -5650,18 +5753,22 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await page.until("return !document.getElementById('notice').hidden", "the notice", 3000);
         assert.match(await notice(), /Cannot reach the service\. Trying again every few seconds\./);
         assert.match(await text("#sync"), /Not connected/);
-        const asked = loads();
+        // A refresh asks which features are enabled before it can request task data.
+        const probes = () => page.requests.filter(url => url.endsWith("/api/instance")).length;
+        const asked = probes();
+        const taskReads = loads();
         await page.wait(3500);
-        assert.ok(loads() > asked, "the page asks again by itself while the service is away");
+        assert.ok(probes() > asked, "the page asks again by itself while the service is away");
+        assert.equal(loads(), taskReads, "no task requests until the feature check succeeds");
         // A change is made while the page is cut off, and the service comes back.
         await again();
         await move(ids.address!, "in_review");
         await page.until("return document.getElementById('notice').hidden", "the page to find the service again without a click", 5000);
         assert.match(await text("#sync"), /^Updated/);
         assert.equal(await count(`.column[data-key="in_review"] .card[data-id="${ids.address}"]`), 1, "and shows the plan as it is now");
-        const settledAt = loads();
+        const settledAt = probes();
         await page.wait(3500);
-        assert.equal(loads(), settledAt, "once it has the plan, it stops asking: auto-refresh is off");
+        assert.equal(probes(), settledAt, "once it has the plan, it stops asking: auto-refresh is off");
         await move(ids.address!, "in_progress");
 
         // Opened while the service is away, the page shows the plan as soon as the service is there.

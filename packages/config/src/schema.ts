@@ -24,6 +24,7 @@ export const BACKUP_EVERY_HOURS = { least: 0.25, most: 8760 };
 export const BACKUP_KEEP_MOST = 10_000;
 
 export const configSchema = z.strictObject({
+  features: z.array(z.enum(["tasks", "decisions"])).min(1, "enable at least one product feature or remove features to enable all").default(["tasks", "decisions"]),
   name: z.string().min(1).max(40).default("vigile"),
   data_dir: z.string().min(1).default("data"),
   log_level: z.enum(["debug", "info", "quiet"]).default("info"),
@@ -61,13 +62,14 @@ export type Config = z.output<typeof configSchema>;
 export interface Setting {
   key: string;
   /** A number is a whole number; a decimal may have a fraction; a boolean is `true` or `false`. */
-  type: "string" | "number" | "decimal" | "boolean";
+  type: "string" | "number" | "decimal" | "boolean" | "list";
   env: string;
   description: string;
 }
 
 /** The settings a person changes with `vigile config set`. API keys are managed with `vigile user` instead. */
 export const SETTINGS: readonly Setting[] = [
+  { key: "features", type: "list", env: "VIGILE_FEATURES", description: "Enabled product features, comma-separated: tasks, decisions. Omit to enable all." },
   { key: "name", type: "string", env: "VIGILE_NAME", description: "A label for this instance, shown in the web page and at startup" },
   { key: "data_dir", type: "string", env: "VIGILE_DATA_DIR", description: "Where the data lives; relative paths start at the config file's folder" },
   { key: "log_level", type: "string", env: "VIGILE_LOG_LEVEL", description: "debug, info or quiet" },

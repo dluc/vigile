@@ -4,7 +4,8 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { isJsonContentType } from "@modelcontextprotocol/sdk/shared/mediaType.js";
 import { ErrorCode, ListToolsRequestSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { AGENT_INSTRUCTIONS, GUIDE_TOPICS, VERSION, VigileError, guide, httpStatus, readBody, toErrorBody, type Engine, type Operation } from "@vigile/core";
+import { FeatureSelection, instanceGuide, instanceInstructions } from "@vigile/core";
+import { GUIDE_TOPICS, VERSION, VigileError, httpStatus, readBody, toErrorBody, type Engine, type Operation } from "@vigile/core";
 
 /**
  * What one request may cost the service. The library that speaks the protocol takes more than the service has
@@ -47,7 +48,7 @@ export interface McpOptions {
 }
 
 /** What a connecting agent is told about how to use the service. */
-export const INSTRUCTIONS = AGENT_INSTRUCTIONS;
+export const INSTRUCTIONS = instanceInstructions(new FeatureSelection());
 
 /** Ready-made requests a client can offer its user. Each one sends the agent to the guide and then to work. */
 export const PROMPTS = [
@@ -121,7 +122,7 @@ export function createMcpServer(engine: Engine, username: string, letInAs?: stri
   // is not shown what is theirs.
   const named = engine.user(username);
   const user = named && (letInAs === undefined || named.id === letInAs) ? named : undefined;
-  const server = new McpServer({ name: "vigile", version: VERSION }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "vigile", version: VERSION }, { instructions: instanceInstructions(engine.features) });
 
   // The tools are not registered with the library's own list of tools. That list checks what a call sends before
   // the call gets anywhere, and answers in words of its own: input of the wrong type never reached the engine,
@@ -154,18 +155,18 @@ export function createMcpServer(engine: Engine, username: string, letInAs?: stri
 
   // The guide, for clients that read resources or offer prompts instead of calling tools.
   for (const topic of GUIDE_TOPICS) {
-    const part = guide(topic);
+    const part = instanceGuide(engine.features, topic);
     const uri = `vigile://guide/${topic}`;
     server.registerResource(`guide-${topic}`, uri, { title: `Vigile guide: ${part.title}`, description: part.topics.find((t) => t.topic === topic)!.summary, mimeType: "text/markdown" }, () => ({
       contents: [{ uri, mimeType: "text/markdown", text: `# ${part.title}\n\n${part.text}` }],
     }));
   }
-  for (const prompt of PROMPTS) {
+  for (const prompt of engine.features.has("tasks") ? PROMPTS : []) {
     server.registerPrompt(
       prompt.name,
       { title: prompt.title, description: prompt.description, argsSchema: { [prompt.argument.name]: z.string().optional().describe(prompt.argument.description) } },
       (args: Record<string, string | undefined>) => {
-        const part = guide(prompt.topic);
+        const part = instanceGuide(engine.features, prompt.topic);
         return { messages: [{ role: "user" as const, content: { type: "text" as const, text: `${prompt.text((args[prompt.argument.name] ?? "").trim())}\n\n${PROMPT_SCOPE}\n\n# ${part.title}\n\n${part.text}` } }] };
       },
     );

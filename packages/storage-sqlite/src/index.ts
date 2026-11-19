@@ -9,6 +9,7 @@ import {
   FORMAT_VERSION,
   DECISION_FORMAT,
   formatAfter,
+  visibleLinkHistory,
   RevisionConflictError,
   assertCommitSize,
   assertTenantName,
@@ -359,6 +360,7 @@ export class SqliteStorage implements StorageAdapter {
         opened = openDatabase(file);
         db = opened;
         db.function("vigile_lower", { deterministic: true }, (value: SQLOutputValue, ..._rest: SQLOutputValue[]) => typeof value === "string" ? value.toLowerCase() : "");
+        db.function("vigile_visible_link", { deterministic: true }, (excluded: SQLOutputValue, type: SQLOutputValue, to: SQLOutputValue) => Number(visibleLinkHistory(String(excluded),type,to)));
         // WAL with synchronous=FULL: a confirmed write survives a power cut.
         db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;");
         const from = prepare(db, file);
@@ -549,10 +551,12 @@ export class SqliteStorage implements StorageAdapter {
     const db = this.existingDb(tenant);
     if (!db) return { records: [], total: 0 };
     const { before, sinceLast } = page;
-    const columns = "SELECT kind, id, revision, seq, at, actor, action, data FROM history WHERE kind = ? AND id = ?";
+    const visible = page.excludeKind ? " AND (action NOT IN ('link_added','link_removed') OR vigile_visible_link(?,json_extract(data,'$.type'),json_extract(data,'$.to')))" : "";
+    const args = page.excludeKind ? [kind,id,page.excludeKind] : [kind,id];
+    const columns = "SELECT kind, id, revision, seq, at, actor, action, data FROM history WHERE kind = ? AND id = ?" + visible;
     const latest = "ORDER BY revision DESC, seq DESC LIMIT ?";
     let rows = (
-      before ? db.prepare(`${columns} AND (revision, seq) < (?, ?) ${latest}`).all(kind, id, before.revision, before.seq, page.limit) : db.prepare(`${columns} ${latest}`).all(kind, id, page.limit)
+      before ? db.prepare(`${columns} AND (revision, seq) < (?, ?) ${latest}`).all(...args, before.revision, before.seq, page.limit) : db.prepare(`${columns} ${latest}`).all(...args, page.limit)
     ) as unknown as Array<Omit<HistoryRecord, "data"> & { data: string }>;
     // The latest of all that are fewer than were asked for are all that is stored for the item.
     let whole = !before && rows.length < page.limit;
@@ -574,8 +578,8 @@ export class SqliteStorage implements StorageAdapter {
     // Otherwise the entries are counted where they lie, one after the other under the item's kind and ID, from
     // where the history begins, without reading what each one says.
     const counted = (): number => {
-      const count = "SELECT COUNT(*) AS entries FROM history WHERE kind = ? AND id = ?";
-      const found = begins ? db.prepare(`${count} AND (revision, seq) >= (?, ?)`).get(kind, id, begins.revision, begins.seq) : db.prepare(count).get(kind, id);
+      const count = "SELECT COUNT(*) AS entries FROM history WHERE kind = ? AND id = ?" + visible;
+      const found = begins ? db.prepare(`${count} AND (revision, seq) >= (?, ?)`).get(...args, begins.revision, begins.seq) : db.prepare(count).get(...args);
       return (found as { entries: number }).entries;
     };
     return { records: rows.reverse().map((r) => ({ ...r, data: JSON.parse(r.data) as JsonObject })), total: whole ? rows.length : counted() };
@@ -631,6 +635,10 @@ export class SqliteStorage implements StorageAdapter {
         )
       )`);
       values.push(page.text.trim(), page.text.trim(), page.text.trim(), page.text.trim());
+    }
+    if (page.excludeKind !== undefined) {
+      filters.push("h.kind <> ? AND (h.action NOT IN ('link_added','link_removed') OR vigile_visible_link(?,json_extract(h.data,'$.type'),json_extract(h.data,'$.to')))");
+      values.push(page.excludeKind,page.excludeKind);
     }
     for (const [field, column] of [["kind", "kind"], ["actor", "actor"], ["action", "action"], ["from", "at"], ["to", "at"]] as const) {
       const value = page[field];

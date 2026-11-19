@@ -1,6 +1,7 @@
 import {
   FORMAT_VERSION,
   formatAfter,
+  visibleLinkHistory,
   RevisionConflictError,
   assertCommitSize,
   assertTenantName,
@@ -122,7 +123,8 @@ export class MemoryStorage implements StorageAdapter {
 
   async readHistoryPage(tenant: string, kind: string, id: string, page: HistoryPageRequest): Promise<HistoryPage> {
     const stored = this.tenants.get(tenant)?.history.filter((h) => h.kind === kind && h.id === id) ?? [];
-    const all = page.sinceLast === undefined ? stored : stored.slice(Math.max(0, stored.findLastIndex((h) => h.action === page.sinceLast)));
+    const since = page.sinceLast === undefined ? stored : stored.slice(Math.max(0, stored.findLastIndex((h) => h.action === page.sinceLast)));
+    const all = !page.excludeKind ? since : since.filter(h => !(h.action === "link_added" || h.action === "link_removed") || visibleLinkHistory(page.excludeKind!,h.data.type,h.data.to));
     const { before } = page;
     const earlier = before ? all.filter((h) => h.revision < before.revision || (h.revision === before.revision && h.seq < before.seq)) : all;
     return { records: copy(earlier.slice(Math.max(0, earlier.length - page.limit))), total: all.length };
@@ -190,6 +192,8 @@ export class MemoryStorage implements StorageAdapter {
         if (!matches) return false;
       }
       if (page.kind !== undefined && record.kind !== page.kind) return false;
+      if (record.kind === page.excludeKind) return false;
+      if (page.excludeKind && (record.action === "link_added" || record.action === "link_removed") && !visibleLinkHistory(page.excludeKind,record.data.type,record.data.to)) return false;
       if (page.actor !== undefined && record.actor !== page.actor) return false;
       if (page.action !== undefined && record.action !== page.action) return false;
       if (page.statusFrom !== undefined && (record.action !== "status_changed" || record.data.from !== page.statusFrom)) return false;

@@ -56,7 +56,7 @@ export const deleteItem = defineWrite({
     permanent: z.boolean().optional().describe("true to remove the item for good. Admins only."),
   }),
   run(ctx, input) {
-    const node = resolveRef(ctx.graph, input.id, input.kind ? [input.kind] : KINDS);
+    const node = resolveRef(ctx.graph, input.id, (input.kind ? [input.kind] : KINDS).filter(k => ctx.features.kind(k)));
     const permanent = input.permanent === true;
     if (ctx.caller.type !== "admin" && (permanent || node.kind === "user")) {
       throw forbidden(permanent ? "Only an admin can delete permanently." : "Only an admin can delete users.", [
@@ -69,7 +69,7 @@ export const deleteItem = defineWrite({
         actions: ["Leave this built-in user in place. Call list_users to find a non-built-in user if you meant to delete a different account."],
       });
     }
-    requireVersion(node, input.version, () => summary(ctx.graph, node));
+    requireVersion(node, input.version, () => summary(ctx.features.view(ctx.graph), node));
     if (!permanent && !isLive(node)) {
       throw refused("already_deleted", `${describe(node)} is already deleted.`, { actions: ["Call restore to bring it back."] });
     }

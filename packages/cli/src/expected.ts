@@ -272,7 +272,7 @@ function goesOn(answer: Record<string, unknown>, kind: Kind, what: string, page?
   if (!Object.hasOwn(answer, "more")) return null;
   const more = answer.more;
   if (!isRecord(more)) return `"more" of ${what} is not which lists go on`;
-  const item = { kind, id: String(answer.id) };
+  const item = { kind, id: String(answer.id), feature_profile: answer.feature_profile as string | undefined };
   let named = 0;
   /** More than what is shown, and what is shown is something. */
   const counted = (field: string, part: unknown, shown: unknown): string | null => {
@@ -343,7 +343,7 @@ function onwards(answer: Record<string, unknown>, at: At): unknown {
 
 /** Every list of an answer of `get`, or the one list of a page, held to being a page of that list: see `inPlace`. */
 function listsInPlace(answer: Record<string, unknown>, kind: Kind, what: string, page?: At, sent?: unknown): string | null {
-  const item = { kind, id: String(answer.id) };
+  const item = { kind, id: String(answer.id), feature_profile: answer.feature_profile as string | undefined };
   const links = isRecord(answer.links) ? answer.links : {};
   const all: At[] = page ? [page] : [...Object.keys(links).map((name): At => ["links", name]), ...(["timeline", "history"] as const).filter((list) => Object.hasOwn(answer, list)).map((list): At => [list])];
   for (const at of all) {
@@ -390,7 +390,7 @@ const aPage: Judge = (answer, input) => {
   const { kind: stated, rest } = splitRef(input.id);
   const named = (!stated || stated === kind) && (normalizeId(kind, rest) === answer.id || (kind === "user" && normalizeId("user", rest) === null));
   if (!named) return `it is about ${about(answer)}, and not about ${input.id}`;
-  if (!paging.isTokenOf(paging.describeItemList({ kind, id: answer.id as string }, at), input.continuation)) return `it is a page of ${at.join(" ")} of ${about(answer)}, and not of the list the continuation of the call reads on in`;
+  if (!paging.isTokenOf(paging.describeItemList({ kind, id: answer.id as string, feature_profile: answer.feature_profile as string | undefined }, at), input.continuation)) return `it is a page of ${at.join(" ")} of ${about(answer)}, and not of the list the continuation of the call reads on in`;
   return goesOn(answer, kind, what, at) ?? listsInPlace(answer, kind, what, at, input.continuation);
 };
 

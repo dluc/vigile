@@ -211,7 +211,7 @@ export function createApiHandler(options: ApiOptions): ApiHandler {
       const user = engine.user(who.username)!;
 
       if (request.method === "GET" && path === "instance") {
-        return send(response, 200, { ...options.instance(), you: { username: user.username, type: user.type, keyless: who.keyless } });
+        return send(response, 200, { ...options.instance(), features: engine.features.enabled, you: { username: user.username, type: user.type, keyless: who.keyless } });
       }
       if (request.method === "GET" && path === "operations") {
         const operations = engine.operationsFor(user.type).map((o) => ({

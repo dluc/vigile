@@ -1061,7 +1061,7 @@ it prints while it runs is the service's log.
 
 | Command | What it does |
 |---|---|
-| `vigile serve [--name <text>] [--data_dir <text>] [--log_level <text>] [--listen.address <text>] [--listen.port <number>] [--auth.keyless_user <text>] [--backup.enabled <true\|false>] [--backup.every_hours <number>] [--backup.folder <text>] [--backup.keep <number>]` | Runs the service in the foreground: MCP, HTTP API and web page on one port. Each setting can be given for this run, as in `--listen.port 8701`, and is not written to the config. |
+| `vigile serve [--features <text>] [--name <text>] [--data_dir <text>] [--log_level <text>] [--listen.address <text>] [--listen.port <number>] [--auth.keyless_user <text>] [--backup.enabled <true\|false>] [--backup.every_hours <number>] [--backup.folder <text>] [--backup.keep <number>]` | Runs the service in the foreground: MCP, HTTP API and web page on one port. Each setting can be given for this run, as in `--listen.port 8701`, and is not written to the config. |
 | `vigile doctor` | Checks the config, the data and the running service. Changes nothing; exits with an error when a check fails. |
 | `vigile backup <folder>` | Writes a consistent copy of the data into the folder, while the service runs. The service also takes backups by itself: see [Automatic backups](#automatic-backups). |
 | `vigile restore-backup <backup file> [--tenant <name>]` | Puts a backup in the place of the data, while the service is stopped. The file is one that `vigile backup` or the service itself wrote. What was there is set aside, not deleted. `--tenant` says which tenant the file is a backup of, when its name does not. |
@@ -1078,6 +1078,14 @@ it prints while it runs is the service's log.
 | `vigile help [command]` | Lists the commands, or what one command takes: `vigile help user`, `vigile help config set`, `vigile help create-task`. `vigile <command> --help` does the same. A name that is no command, such as `vigile help config nonsense`, is an error that lists what there is. |
 
 ### Operations
+
+Select the product features for an instance with a top-level TOML array:
+
+```toml
+features = ["decisions"]
+```
+
+`["tasks"]` enables task workflows alone. Omit the setting to enable all features in the installed version, including after an upgrade. An empty list refuses startup. Restart the service after changing the selection. Disabled features keep their records and links. MCP tools, guide topics and examples, HTTP calls, CLI operation calls and the web view respect the same selection; existing credentials still determine who may call an operation. With Decisions only, the home page opens the read-only register.
 
 The same twenty-four operations are MCP tools (`set_task_status`), HTTP endpoints
 (`POST /api/set-task-status`) and commands (`vigile set-task-status`). Commands

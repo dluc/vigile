@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { GUIDE_TOPICS } from "../guide-topics.js";
-import { guide } from "../guide.js";
+import { instanceGuide } from "../guide.js";
 import { defineRead } from "../operation.js";
 
 export const getGuide = defineRead({
@@ -11,7 +11,7 @@ export const getGuide = defineRead({
   input: z.strictObject({
     topic: z.enum(GUIDE_TOPICS).optional().describe('Which part to read: "overview" (the default), "organising", "working" or "examples".'),
   }),
-  run(_ctx, input) {
-    return guide(input.topic);
+  run(ctx, input) {
+    return instanceGuide(ctx.features, input.topic);
   },
 });

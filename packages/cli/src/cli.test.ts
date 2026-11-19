@@ -4782,7 +4782,7 @@ describe("the built-in commands", () => {
   it("each have their own help, with their words and options, under help <command> and under <command> --help", async () => {
     // What the review found nowhere, and the commands the task names.
     for (const [topic, shown] of [
-      [["serve"], /vigile serve \[--name <text>\][^\n]*\[--listen\.port <number>\][^]*--listen\.port <number>\s+for this run: the port to listen on/],
+      [["serve"], /vigile serve \[--features <text>\] \[--name <text>\][^\n]*\[--listen\.port <number>\][^]*--listen\.port <number>\s+for this run: the port to listen on/],
       [["config"], /vigile config init \[--name <name>\] \[--listen\.address <address>\] \[--listen\.port <port>\][^]*--listen\.address <address>\s+the address to listen on; also --address[^]*vigile config set <setting> <value>[^]*vigile config unset <setting>[^]*vigile config path/],
       [["user"], /vigile user add <username> \[--type <agent\|person>\][^]*--type <agent\|person>\s+what the user is[^]*vigile user remove <username> \[--permanent\][^]*--permanent\s+remove the user for good[^]*vigile user reset-key <username>[^]*vigile user list/],
       [["doctor"], /vigile doctor\n\s+check the config and the running service; changes nothing/],

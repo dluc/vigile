@@ -67,10 +67,10 @@ export const listed = (names: readonly string[], last = "and"): string => (names
  * that was last read, which changes take none, and what a second call does of each of those. The guide says
  * all three; the instructions, which have to be short, name the operations and send the reader to the guide.
  */
-export function versionAdvice(): { versioned: string; unversioned: string; repeated: string } {
-  const unversioned = Object.entries(REPEATED_WITHOUT_VERSION).map(([name, repeated]) => ({ name, repeated }));
+export function versionAdvice(enabled: (name: string) => boolean = () => true): { versioned: string; unversioned: string; repeated: string } {
+  const unversioned = Object.entries(REPEATED_WITHOUT_VERSION).filter(([name]) => enabled(name)).map(([name, repeated]) => ({ name, repeated }));
   return {
-    versioned: `${listed(VERSIONED_OPERATIONS)} take the version you last read`,
+    versioned: `${listed(VERSIONED_OPERATIONS.filter(enabled))} take the version you last read`,
     unversioned: `${listed(unversioned.map((one) => one.name))} take no version, so a conflict does not catch one that is sent twice`,
     repeated: unversioned.map((one) => `${one.name} ${one.repeated}`).join("; "),
   };

@@ -1,0 +1,8 @@
+.register { overflow: auto; }
+.register main { display: block; max-width: 62rem; margin: 2rem auto; padding: 0 1rem; }
+.register #rows { list-style: none; padding: 0; border-top: 1px solid var(--line); }
+.register #rows li { border-bottom: 1px solid var(--line); }
+.register #rows a { display: block; padding: .8rem 0; color: inherit; }
+.register article { border-inline-start: .25rem solid var(--busy); padding: 0 1rem; margin-top: 1.5rem; }
+.register article p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.register [hidden] { display: none; }

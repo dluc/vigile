@@ -389,6 +389,7 @@ export async function startService(options: ServiceOptions): Promise<Service> {
   let engine: Engine;
   try {
     engine = await Engine.open({
+      features: config.features,
       storage,
       keys: auth,
       onOperation: (entry) => {
@@ -550,7 +551,10 @@ export async function startService(options: ServiceOptions): Promise<Service> {
       if (asksFirst && guarded && request.method === "POST" && wouldBeRead(request, url)) response.writeContinue();
       if (url.pathname === "/mcp") return mcp(request, response);
       if (url.pathname === "/health" || guarded) return api(request, response, url);
-      if ((request.method === "GET" || request.method === "HEAD") && serveWeb(response, url.pathname, request.method === "HEAD", (error) => warn(`The page's file ${url.pathname} could not be read: ${explain(error)}`))) return;
+      let page = url.pathname;
+      if (!engine.features.has("tasks") && (page === "/" || page === "/index.html")) page = "/decisions.html";
+      if (page === "/decisions.html" && !engine.features.has("decisions")) { response.writeHead(404).end(); return; }
+      if ((request.method === "GET" || request.method === "HEAD") && serveWeb(response, page, request.method === "HEAD", (error) => warn(`The page's file ${url.pathname} could not be read: ${explain(error)}`))) return;
       sendError(response, new VigileError("not_found", `Nothing is served at ${echo(url.pathname)}.`));
     })();
     handled.catch((error: unknown) => {

@@ -77,6 +77,7 @@ export const listHistory = defineRead({
         }
       }
       const page = await ctx.readHistoryFeedPage({
+        excludeKind: !ctx.features.has("tasks") ? "task" : !ctx.features.has("decisions") ? "decision" : undefined,
         ...(project === undefined ? {} : { project }),
         ...(parent === undefined ? {} : { parent }),
         ...(filters.text === undefined ? {} : { text: filters.text }),
