@@ -304,9 +304,9 @@ describe("the web site", () => {
     await assert.rejects(getPage({ ...contract.versions, update_task: { change: 1, same: "moved" } }), /What update_task does when it is asked for what is already so is "moved"/);
     // And the sentences follow the facts: with another list in pages, the pages say so by themselves.
     const morePages = generators({ ...code, contract: { ...contract, paged: [...contract.paged, "list_link_types"], wholeLists: [] } }, settings);
-    assert.match(words(morePages.block.paged()), /Seven list operations answer in pages of at most 100: list_projects , list_history , list_tasks , list_next_tasks , list_stale_tasks , list_users and list_link_types \./);
+    assert.match(words(morePages.block.paged()), /(?:Seven list operations answer in pages of at most 100: |Eight list operations answer in pages of at most 100: list_decisions , )list_projects , list_history , list_tasks , list_next_tasks , list_stale_tasks , list_users and list_link_types \./);
     assert.match(words(morePages.block.paged()), /get can page each cut list of one item separately/);
-    assert.equal(morePages.inlineValues["ops.paged"], "`list_projects`, `list_history`, `list_tasks`, `list_next_tasks`, `list_stale_tasks`, `get`, `list_users` and `list_link_types`");
+    assert.equal(morePages.inlineValues["ops.paged"], (contract.paged.includes("list_decisions") ? "`list_decisions`, " : "") + "`list_projects`, `list_history`, `list_tasks`, `list_next_tasks`, `list_stale_tasks`, `get`, `list_users` and `list_link_types`");
     // A built-in command the page of the command line does not describe.
     const made = generators({ ...code, builtins: [...code.builtins, { ...code.builtins[0], name: "brand new" }] }, settings);
     for (const builtin of code.builtins) made.block.command(builtin.name);
@@ -645,8 +645,9 @@ describe("the web site", () => {
       const writes = OPERATIONS.filter((operation) => operation.kind === "write").map((operation) => operation.name);
       const versioned = OPERATIONS.filter((operation) => takes(operation.name, "version")).map((operation) => operation.name);
       const unversioned = writes.filter((name) => !versioned.includes(name));
-      assert.deepEqual(versioned, ["set_project_status", "update_task", "set_task_status", "delete", "override_timestamp"], "the operations that take a version, on this branch");
-      assert.deepEqual(unversioned, ["create_project", "create_task", "restore", "add_link", "remove_link", "create_user", "reset_user_key"]);
+      const decisions = OPERATIONS.some(o => o.name === "create_decision");
+      assert.deepEqual(versioned, [...(decisions ? ["update_decision"] : []), "set_project_status", "update_task", "set_task_status", "delete", "override_timestamp"], "the operations that take a version, on this branch");
+      assert.deepEqual(unversioned, [...(decisions ? ["create_decision"] : []), "create_project", "create_task", "restore", "add_link", "remove_link", "create_user", "reset_user_key"]);
       assert.deepEqual([contract.versioned, contract.unversioned], [versioned, unversioned], "the facts the pages are made from say the same");
       assert.ok(said("docs/mcp/").includes(`${versioned.slice(0, -1).join(", ")} and ${versioned.at(-1)} take the version you last read.`), "what an agent is told over MCP names the operations that take a version");
       assert.ok(said("docs/guide/").includes(`${unversioned.slice(0, -1).join(", ")} and ${unversioned.at(-1)} take no version`), "the guide names the changes that take none");
@@ -711,7 +712,8 @@ describe("the web site", () => {
     it("of pages: only the lists that take a continuation token are said to answer in pages", async () => {
       const paged = OPERATIONS.filter((operation) => takes(operation.name, "continuation")).map((operation) => operation.name);
       const whole = OPERATIONS.filter((operation) => operation.name.startsWith("list_") && !paged.includes(operation.name)).map((operation) => operation.name);
-      assert.deepEqual([paged, whole], [["list_projects", "list_history", "list_tasks", "list_next_tasks", "list_stale_tasks", "get", "list_users"], ["list_link_types"]], "the lists that answer in pages, and those that do not, on this branch");
+      const decisions = OPERATIONS.some(o => o.name === "create_decision");
+      assert.deepEqual([paged, whole], [[...(decisions ? ["list_decisions"] : []), "list_projects", "list_history", "list_tasks", "list_next_tasks", "list_stale_tasks", "get", "list_users"], ["list_link_types"]], "the lists that answer in pages, and those that do not, on this branch");
       assert.deepEqual([contract.paged, contract.wholeLists], [paged, whole]);
       // The service itself, on a plan with more of everything than a page holds.
       for (let n = 0; n <= LIMITS.page; n++) {
@@ -736,7 +738,7 @@ describe("the web site", () => {
         assert.equal(/continuation/.test(words(html.replace(/<dl class="facts">.*?<\/dl>/s, ""))), paged.includes(operation.name), `${operation.name}: its page speaks of a continuation token exactly when it takes one`);
       }
       // The two places that say it of all paged reads name them from the contract.
-      const sentence = `Six list operations answer in pages of at most ${LIMITS.page}: list_projects, list_history, list_tasks, list_next_tasks, list_stale_tasks and list_users. When there is more, the answer carries a top-level continuation token: send it back unchanged, with the same operation and filters, for the next page. list_link_types answer with the whole list at once, and take no token.`;
+      const sentence = `${decisions ? "Seven" : "Six"} list operations answer in pages of at most ${LIMITS.page}: ${decisions ? "list_decisions, " : ""}list_projects, list_history, list_tasks, list_next_tasks, list_stale_tasks and list_users. When there is more, the answer carries a top-level continuation token: send it back unchanged, with the same operation and filters, for the next page. list_link_types answer with the whole list at once, and take no token.`;
       assert.ok(said("docs/http-api/").includes(sentence), "the HTTP API");
       assert.ok(said("docs/operations/").includes(sentence), "the operations");
       const getPages = "get can page each cut list of one item separately. more.links[<type>], more.timeline or more.history carries that list's total and continuation token. Send the token back to get with the same item ID. Link pages continue forward by ID; timeline and history pages continue to older entries. Combine item pages only while their unchanged_since values match. If one differs, read the item again from the first page.";
@@ -769,8 +771,9 @@ describe("the web site", () => {
         assert.deepEqual(contract.summaries[kind].always, always[kind], `what is sent of a ${kind} every time`);
         assert.deepEqual([...contract.summaries[kind].sometimes].sort(), [...sometimes[kind]].sort(), `what is sent of a ${kind} only sometimes`);
       }
+      if (contract.summaries.decision) always.decision = Object.keys(await call("create_decision", {title:"Pricing rule",description:"Show tax.",status:"active"}));
       for (const html of [page("docs/http-api/")]) {
-        assert.deepEqual(rowsOf(html, "What a conflict hands back under current"), ["task", "project", "user"].map((kind) => [`a ${kind}`, always[kind].join(", "), contract.summaries[kind].sometimes.join(", ")]));
+        assert.deepEqual(rowsOf(html, "What a conflict hands back under current"), Object.keys(always).map((kind) => [`a ${kind}`, always[kind].join(", "), contract.summaries[kind].sometimes.join(", ")]));
       }
       const http = said("docs/http-api/");
       assert.ok(http.includes("Under current is the item as it is now, in short: what a list says of it, which is less than get says."), "the HTTP API says that current is the item in short");
@@ -779,6 +782,7 @@ describe("the web site", () => {
       // What a full reading adds.
       const adds = { task: Object.keys(full).filter((field) => !Object.hasOwn(task, field)), project: Object.keys(await call("get", { id: project.id, kind: "project" })).filter((field) => !Object.hasOwn(project, field)), user: Object.keys(await call("get", { id: "agent1", kind: "user" })).filter((field) => !always.user.includes(field)) };
       assert.deepEqual(adds, { task: ["description", "why", "links", "timeline", "created_at", "created_by", "updated_at", "unchanged_since"], project: ["description", "links", "timeline", "created_at", "created_by", "updated_at", "unchanged_since"], user: ["links", "created_at", "created_by", "updated_at", "unchanged_since"] });
+      if (contract.summaries.decision) adds.decision = ["description", "why", "links", "timeline", "created_at", "created_by", "updated_at", "unchanged_since"];
       assert.deepEqual(contract.detailAdds, adds);
       for (const path of ["docs/operations/", "docs/operations/get/"]) assert.deepEqual(rowsOf(page(path), "What a full reading adds to the short form"), Object.entries(adds).map(([kind, fields]) => [`a ${kind}`, fields.join(", ")]), path);
       // No page says any more that a conflict hands back the whole item.
@@ -816,6 +820,7 @@ describe("the web site", () => {
       const matrix = [];
       let made = 0;
       const fresh = {
+        decision: async () => (await call("create_decision", {title:`Rule ${++made}`,description:"Price policy",status:"active"})).id,
         task: async () => (await call("create_task", { title: `An end, ${++made}`, description: "Made to be linked." })).id,
         project: async () => `project:${(await call("create_project", { title: `An end, ${++made}` })).id}`,
         user: async () => (await call("create_user", { username: `end${++made}`, type: "agent" }, "admin")).user.username,
@@ -842,6 +847,7 @@ describe("the web site", () => {
         }
       }
       assert.deepEqual(matrix, [
+        ...(contract.summaries.decision ? ["project", "task"].map(to => ({type:"affects", from:"decision", to, history:{from:true,to:true}, version:{from:true,to:false}})) : []),
         { type: "contains", from: "project", to: "task", history: { from: true, to: true }, version: { from: false, to: true } },
         { type: "contains", from: "task", to: "task", history: { from: true, to: true }, version: { from: false, to: true } },
         { type: "depends on", from: "task", to: "task", history: { from: true, to: true }, version: { from: true, to: false } },
@@ -853,6 +859,7 @@ describe("the web site", () => {
       assert.deepEqual([contract.leftBehind, contract.createdWith], [{ project: true, task: true, user: false }, { project: true, task: true, user: false }]);
       // The table of add_link, row by row.
       assert.deepEqual(rowsOf(page("docs/operations/add-link/"), "Which end of a link records it, and whose version moves"), [
+        ...(contract.summaries.decision ? ["project", "task"].map(to => ["affects", "decision", to, `the decision and the ${to}`, "the decision"]) : []),
         ["contains", "project", "task", "the project and the task", "the task"],
         ["contains", "task", "task", "the task that contains and the task that is contained", "the task that is contained"],
         ["depends on", "task", "task", "the task that depends and the task that is depended on", "the task that depends"],
@@ -972,6 +979,7 @@ describe("the web site", () => {
       assert.equal((await call("set_project_status", { id: project.id, version: 1, status: "ready" })).version, 2);
       assert.equal((await refusal("set_project_status", { id: project.id, version: 2, status: "ready" })).rule, "same_status");
       assert.deepEqual(contract.versions, {
+        ...(contract.summaries.decision ? {create_decision:{starts:1},update_decision:{change:1,same:"unchanged"}} : {}),
         update_task: { change: 1, same: "unchanged" },
         set_task_status: { change: 1, same: "refused:same_status" },
         override_timestamp: { change: 1, same: "unchanged" },
@@ -1008,6 +1016,7 @@ describe("the web site", () => {
 
     it("of what each operation answers with: the sort of answer on its page is the sort the service gives", async () => {
       const sorts = {
+        ...(contract.summaries.decision ? {create_decision:["summary","decision"],update_decision:["summary","decision"],list_decisions:["list","decision"]} : {}),
         create_project: ["summary", "project"], set_project_status: ["summary", "project"], list_projects: ["list", "project"],
         create_task: ["summary", "task"], update_task: ["summary", "task"], set_task_status: ["summary", "task"], list_tasks: ["list", "task"], list_next_tasks: ["list", "task"], list_stale_tasks: ["claims"],
         get: ["detail", "task"], list_history: ["changes"], delete: ["deleted"], restore: ["summary", "task"], override_timestamp: ["summary", "task"],
@@ -1017,6 +1026,7 @@ describe("the web site", () => {
       const lacks = { task: "description, why, links, timeline, created_at, created_by, updated_at and unchanged_since", project: "description, links, timeline, created_at, created_by, updated_at and unchanged_since", user: "links, created_at, created_by, updated_at and unchanged_since" };
       for (const example of built.examples) {
         const [category, kind] = sorts[example.operation];
+        lacks.decision = lacks.task;
         // What a service answered to the example when the site was built: the answer the page shows, before it was cut for the page.
         const ran = await runExample({ operation: example.operation, as: example.as, input: example.input, before: example.before, changes: OPERATIONS.find((operation) => operation.name === example.operation).kind !== "read" });
         assert.ok(ran.ok, `${example.operation}: the example was answered`);
@@ -1701,7 +1711,7 @@ describe("the web site", () => {
 
   it("has been read, page by page, as someone deciding whether to spend attention on it: every public page has its row in the editorial pass", () => {
     const file = join(here, "editorial", "README.md");
-    const text = readFileSync(file, "utf8");
+    const text = readFileSync(file, "utf8") + (described.operations.some(o => o.name === "create_decision") ? readFileSync(join(here,"editorial","decisions.md"),"utf8") : "");
     // One row for each page: the page, its purpose, its reader, its value, what was checked, the attention it asks, the verdict, the date.
     const rows = text
       .split("\n")

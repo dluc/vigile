@@ -31,7 +31,7 @@ export function answerOf(answer) {
   if (has("deleted") && has("permanent")) return { category: "deleted", says: "that it was deleted, whether for good, and the kind and ID of the item" };
   if (has("kind") && has("links")) return { category: "detail", kind: answer.kind, says: `the ${answer.kind} in full` };
   if (has("kind")) return { category: "summary", kind: answer.kind, says: `the ${answer.kind} in short` };
-  for (const [field, of] of [["tasks", "task"], ["projects", "project"], ["users", "user"]]) if (has(field)) return { category: "list", kind: of, says: `a list of ${field}, each in short` };
+  for (const [field, of] of [["tasks", "task"], ["projects", "project"], ["users", "user"], ["decisions", "decision"]]) if (has(field)) return { category: "list", kind: of, says: `a list of ${field}, each in short` };
   if (has("changes")) return { category: "changes", says: "recorded changes across the plan, newest first" };
   if (has("claims") && has("attention_after_hours")) return { category: "claims", says: "quiet claims that need attention and the threshold that brought them to attention" };
   if (has("link_types")) return { category: "link-types", says: "the link types" };
@@ -285,13 +285,16 @@ async function seenOn(service, facts) {
     delete: [agent, { id: free.id, version: 999 }],
     set_project_status: [agent, { id: projects[0].id, version: 999, status: "ready" }],
   };
+  const decision = versioned.includes("update_decision") ? await agent("create_decision", { title: "Use gross prices", description: "Display the total price.", status: "proposed" }) : null;
+  if (decision) attempts.update_decision = [agent, { id: decision.id, version: 999, status: "active" }];
   for (const name of versioned) {
     if (!attempts[name]) throw new Error(`The operation ${name} takes a version, and website/lib/contract.mjs has no call that sends it a wrong one. Add one to "attempts".`);
     const [as, input] = attempts[name];
     const refused = await refusalOf(() => as(name, input));
     if (refused?.code !== "version_conflict" || !refused.current) throw new Error(`${name} with a wrong version was not refused with a conflict that holds the item: ${JSON.stringify(refused)}`);
     conflict[name] = { kind: refused.current.kind, fields: sorted(Object.keys(refused.current)), category: answerOf(refused.current).category };
-    (refused.current.kind === "task" ? tasks : projects).push(refused.current);
+    if (refused.current.kind === "task") tasks.push(refused.current);
+    if (refused.current.kind === "project") projects.push(refused.current);
   }
   // And an operation that takes none goes through whatever the item's version is: seen for each that changes an item it is given.
   const unversioned = operations.filter((operation) => operation.kind === "write" && !versioned.includes(operation.name)).map((operation) => operation.name);
@@ -322,6 +325,13 @@ async function seenOn(service, facts) {
     user: await agent("get", { id: busy.assigned_to[0], kind: "user" }),
   };
   const summaries = { task: fieldsOf(tasks), project: fieldsOf(projects), user: fieldsOf(users) };
+  if (decision) {
+    const retired = await agent("create_decision", {title:"Temporary policy",description:"Retired policy.",status:"active"});
+    await agent("delete", {kind:"decision", id:retired.id, version:retired.version});
+    const deletedSummary = (await refusalOf(() => agent("delete", {kind:"decision",id:retired.id,version:999}))).current;
+    summaries.decision = fieldsOf([decision, deletedSummary]);
+    details.decision = await agent("get", { kind: "decision", id: decision.id });
+  }
   const detailAdds = Object.fromEntries(Object.entries(details).map(([kind, detail]) => [kind, Object.keys(detail).filter((field) => !summaries[kind].always.includes(field) && !summaries[kind].sometimes.includes(field))]));
   const withHistory = Object.keys(await agent("get", { id: busy.id, history: true })).filter((field) => !Object.hasOwn(details.task, field));
   const linkedSeen = { project: [], task: [], user: [] };
@@ -349,6 +359,7 @@ async function seenOn(service, facts) {
   const linkHistory = [];
   let made = 0;
   const fresh = {
+    decision: async () => (await agent("create_decision", { title: "Pricing", description: "Price at checkout.", status: "active" })).id,
     task: async () => (await agent("create_task", { title: `A task to link, ${++made}`, description: "Made to see what a link does." })).id,
     project: async () => (await agent("create_project", { title: `A project to link, ${++made}` })).id,
     user: async () => (await admin("create_user", { username: `linked${++made}`, type: "agent" })).user.username,
@@ -450,6 +461,12 @@ async function seenOn(service, facts) {
 
   // ---- What a change does to the version: one on. And what a call does that asks for what is already so.
   const versions = {};
+  if (decision) {
+    const updated = await agent("update_decision", { id: decision.id, version: decision.version, status: "active" });
+    const again = await agent("update_decision", { id: decision.id, version: updated.version, status: "active" });
+    versions.create_decision = { starts: decision.version };
+    versions.update_decision = { change: updated.version - decision.version, same: again.version === updated.version ? "unchanged" : "moved" };
+  }
     {
     const t = await newTask({});
     const id = `task:${t.id}`;

@@ -283,6 +283,8 @@ async function write(out, settings, under, contentRoot) {
     operationsIndex.children.push(path);
   }
   for (const file of readdirSync(join(contentRoot, "docs", "operations"))) {
+    // The register's notes can accompany an older program; its pages are generated only once advertised.
+    if (!code.operations.some(op => op.name === "create_decision") && ["create-decision.md", "update-decision.md", "list-decisions.md"].includes(file)) continue;
     if (file !== "index.md" && !code.operations.some((operation) => `${operation.command}.md` === file)) throw new Error(`content/docs/operations/${file} is the notes of no operation. Remove it, or name it after one.`);
   }
 
