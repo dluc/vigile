@@ -50,7 +50,8 @@ it("signals only the process birth that was originally observed", () => {
 it("treats an unreaped Linux zombie as terminated", { skip: process.platform !== "linux" }, async () => {
   const directory = mkdtempSync(join(tmpdir(), "vigile-zombie-"));
   const ready = join(directory, "ready");
-  const script = `const { spawn } = require('node:child_process'); const { writeFileSync } = require('node:fs'); const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' }); writeFileSync(process.argv[1], String(child.pid)); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000);`;
+  // The file that names the child is put in place whole: one that is there is never empty, as one that is being written is.
+  const script = `const { spawn } = require('node:child_process'); const { renameSync, writeFileSync } = require('node:fs'); const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' }); writeFileSync(process.argv[1] + '.part', String(child.pid)); renameSync(process.argv[1] + '.part', process.argv[1]); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000);`;
   const parent = spawn(process.execPath, ["-e", script, ready], { stdio: "ignore" });
   try {
     const until = Date.now() + 5_000;
