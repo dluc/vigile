@@ -1,13 +1,6 @@
-export type ErrorCode =
-  | "invalid_input"
-  | "not_found"
-  | "unauthorized"
-  | "forbidden"
-  | "version_conflict"
-  | "rule_violation"
-  | "limit_exceeded"
-  | "too_many_requests"
-  | "internal";
+/** Every code an error can carry, in the order the documentation lists them. */
+export const ERROR_CODES = ["invalid_input", "not_found", "unauthorized", "forbidden", "version_conflict", "rule_violation", "limit_exceeded", "too_many_requests", "internal"] as const;
+export type ErrorCode = (typeof ERROR_CODES)[number];
 
 /** An item named in an error, so the client can act on it without another call. */
 export interface ErrorItem {
@@ -29,6 +22,22 @@ export interface ErrorDetails {
   /** The item as it is now, when the client's copy was stale. */
   current?: unknown;
 }
+
+/**
+ * What an error may carry beyond its code and its message, each in the words the documentation uses for it.
+ * Every field of `ErrorDetails` is here. A refusal of an operation names actions; the other fields are there
+ * only when there is something to say, and an error that is no refusal may carry none of them.
+ */
+export const ERROR_DETAIL_WORDS = {
+  rule: "the rule that refused the change",
+  blocking: "the items in the way",
+  blocking_total: "how many items are in the way",
+  actions: "actions you can take",
+  current: "the item as it is now",
+} as const satisfies Record<keyof ErrorDetails, string>;
+
+/** What every error has. */
+export const ERROR_ALWAYS = ["code", "message"] as const satisfies ReadonlyArray<keyof ErrorBody>;
 
 export interface ErrorBody extends ErrorDetails {
   code: ErrorCode;

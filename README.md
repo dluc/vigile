@@ -61,9 +61,10 @@ The pictures in this file show made-up data.
   work assigned to you from work assigned elsewhere or with no assignee.
   Invalid input says to correct the reported input; restricted operations say
   which role can perform them, and built-in users must stay in place.
-- **No silent overwrites.** Every change names the version it was based on. If
-  someone else changed the item first, the call fails and returns the current
-  item.
+- **No silent overwrites.** `set_project_status`, `update_task`, `set_task_status`, `delete` and `override_timestamp` name the version the
+  change was based on. If someone else changed the item first, the call fails
+  and returns the item as it is now. The changes that take no version are
+  named under [conflicts](#why-was-my-change-refused-with-a-conflict).
 - **A guide agents can read.** `get_guide` shows the ways to organise work, the
   routine for a task, and complete examples. The tests run every call the
   examples show.
@@ -76,7 +77,8 @@ The pictures in this file show made-up data.
   changes by their previous or new status.
 - **Storage you can trust and move.** A confirmed write survives a power cut. An
   instance is one folder; back it up while the service runs.
-- **Nothing to compile.** It uses the SQLite built into Node.js.
+- **No database server, no native module.** It uses the SQLite built into Node.js.
+  Its own code is compiled once, with `pnpm build`.
 
 ## Getting started
 
@@ -881,8 +883,10 @@ changes before the service faces a network:
   and says what answers instead. It follows no redirect. For a config whose
   `listen.address` is another machine's, there is no data folder to look at,
   and the answer alone decides.
-- **The web page cannot change anything.** It only calls read operations. When
-  a key is required it asks for one and keeps it in that browser.
+- **The web page mostly reads.** It calls read operations, except that the
+  priority −/+ controls in a task's panel call `update_task` as the current
+  browser user. When a key is required it asks for one and keeps it in that
+  browser.
 - **The page runs only its own files.** It is served with a policy that lets
   the browser run and load nothing but the page's own files, nothing written
   into the page itself, and that forbids other sites to show it in a frame.
@@ -915,10 +919,16 @@ status you set; they are worked out from the links each time you ask.
 
 ### Why was my change refused with a conflict?
 
-Someone changed the item after you read it. Every change carries the `version`
-you last read; if it is no longer the current one, the call fails and returns
-the item as it is now. Look at what changed, then call again with the new
-version if your change still makes sense.
+Someone changed the item after you read it. `set_project_status`, `update_task`,
+`set_task_status`, `delete` and `override_timestamp` take the `version` you last
+read; if it is no longer the current one, the call fails and returns the item
+as it is now, in short. Look at what changed, with `get` when it may be the
+description, then call again with the new version if your change still makes
+sense.
+
+`create_project`, `create_task`, `restore`, `add_link`, `remove_link`,
+`create_user` and `reset_user_key` take no version, so no conflict catches one
+that is sent twice; `vigile get-guide` says what a second call of each does.
 
 A change to a task's links counts too: putting it into a group or a project,
 making it depend on something, or assigning it moves its version on, although
@@ -926,10 +936,11 @@ making it depend on something, or assigning it moves its version on, although
 
 ### How are IDs made?
 
-A project has a prefix of 2 to 8 letters, such as `WEB`. A task's ID is its
-project's prefix and a number: `WEB-012`. The number comes from one counter for
-the whole instance, so no two tasks share a number, and a task with no project
-is just `012`. IDs are assigned by the service and never reused: a number is
+A project has a prefix of 2 to 8 letters, such as `WEB`. A task's ID is given
+when it is created: the prefix of the project it is created in and a number,
+`WEB-012`; with no such project, the prefix of its parent's ID; otherwise the
+number alone, `012`. It keeps that ID when it is moved. The number comes from
+one counter for the whole instance, so no two tasks share a number. IDs are assigned by the service and never reused: a number is
 given once, and so is a prefix. A project that was deleted for good leaves its
 prefix used up, and no later project can have it.
 
@@ -1014,8 +1025,7 @@ views by person and by calendar.
 | `web` | The web page |
 | `cli` | The `vigile` command, which also assembles the service |
 
-[`AGENTS.md`](AGENTS.md) has the rules of the design for anyone, or any agent,
-changing the code.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) says how to make a change.
 
 ## Command reference
 
@@ -1047,7 +1057,7 @@ it prints while it runs is the service's log.
 
 ### Operations
 
-The same twenty operations are MCP tools (`set_task_status`), HTTP endpoints
+The same twenty-one operations are MCP tools (`set_task_status`), HTTP endpoints
 (`POST /api/set-task-status`) and commands (`vigile set-task-status`). Commands
 act as `admin` unless given `--as <username>`.
 
@@ -1076,8 +1086,8 @@ act as `admin` unless given `--as <username>`.
 
 No answer holds more than 100 entries of anything:
 
-- **Lists** (`list_projects`, `list_tasks`, `list_history`, `list_next_tasks`, `list_users`)
-  return at most 100 items or changes and a `continuation` token for the next page. The
+- **Paged reads.** `vigile list-projects`, `vigile list-history`, `vigile list-tasks`, `vigile list-next-tasks`, `vigile list-stale-tasks`, `vigile get` and `vigile list-users` return at most 100 entries and a continuation token for the next page.
+  `vigile list-link-types` returns the whole list. The
   token belongs to the list it came from: the same operation and the same
   filters are sent with it, and for `list_next_tasks` by the same user. A token
   is a word to hand back as it came: letters, digits, `-` and `_`, which can be

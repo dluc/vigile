@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { GUIDE_TOPICS, guide } from "../guide.js";
+import { GUIDE_TOPICS } from "../guide-topics.js";
+import { guide } from "../guide.js";
 import { defineRead } from "../operation.js";
 
 export const getGuide = defineRead({
