@@ -141,7 +141,7 @@
       </div>
       <form id="history-filters" class="history-filters" aria-label="Filter history">
         <label><span>Text</span><input id="history-text" type="search" maxlength="128" placeholder="ID, title or username" autocomplete="off"></label>
-        <label><span>Item kind</span><select id="history-kind"><option value="">All kinds</option><option value="project">Projects</option><option value="task">Tasks</option><option value="user">Users</option></select></label>
+        <label><span>Item kind</span><select id="history-kind"><option value="">All kinds</option><option value="project">Projects</option><option value="task">Tasks</option><option value="decision" id="history-kind-decision">Decisions</option><option value="user">Users</option></select></label>
         <label><span>Event</span><select id="history-action">
           <option value="">All events</option>
           <option value="created">Created</option>
@@ -167,6 +167,9 @@
           <option value="in_preview">In preview</option>
           <option value="ready">Ready</option>
           <option value="broken">Broken</option>
+          <option value="proposed" class="history-decision-status">Proposed</option>
+          <option value="active" class="history-decision-status">Active</option>
+          <option value="withdrawn" class="history-decision-status">Withdrawn</option>
         </select></label>
         <label><span>To status</span><select id="history-status-to">
           <option value="">Any status</option>
@@ -180,6 +183,9 @@
           <option value="in_preview">In preview</option>
           <option value="ready">Ready</option>
           <option value="broken">Broken</option>
+          <option value="proposed" class="history-decision-status">Proposed</option>
+          <option value="active" class="history-decision-status">Active</option>
+          <option value="withdrawn" class="history-decision-status">Withdrawn</option>
         </select></label>
         <label><span>From</span><input id="history-from" type="date"></label>
         <label><span>Through</span><input id="history-to" type="date"></label>

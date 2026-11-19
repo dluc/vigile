@@ -10,7 +10,7 @@ import { kind, touch } from "./shared.js";
 export const restore = defineWrite({
   name: "restore",
   description:
-    "Bring back a deleted project, task or user. It returns to the lists with the status and links it had. Restoring a user is for admins only, and the user needs a new API key afterwards. An item that was deleted permanently cannot be restored.",
+    "Bring back a deleted project, task, decision or user. It returns to the lists with the status and links it had. Restoring a user is for admins only, and the user needs a new API key afterwards. An item that was deleted permanently cannot be restored.",
   access: "all",
   input: z.strictObject({
     kind,

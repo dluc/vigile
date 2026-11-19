@@ -220,7 +220,8 @@ const HISTORY_ACTIONS = {
   key_reset: "Key reset",
   timestamp_overridden: "Timestamp overridden",
 };
-const HISTORY_STATUSES = ["draft", "open", "in_progress", "paused", "in_review", "done", "cancelled", "in_preview", "ready", "broken"];
+const DECISION_STATUSES = ["proposed", "active", "withdrawn"];
+const HISTORY_STATUSES = ["draft", "open", "in_progress", "paused", "in_review", "done", "cancelled", "in_preview", "ready", "broken", ...DECISION_STATUSES];
 
 const label = (status) => status.replaceAll("_", " ");
 
@@ -1048,15 +1049,21 @@ function validHistoryDate(value) {
   return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value ? null : value;
 }
 
+/** Whether this instance offers the kind of an item. Until the instance has answered, nothing is ruled out. */
+const offered = (item) => item.kind !== "decision" || !state.instance || state.instance.features?.includes("decisions") === true;
+
+/** A status History can be narrowed to: one of a task or a project, or of a decision where the instance has decisions. */
+const historyStatus = (value) => (HISTORY_STATUSES.includes(value) && (!DECISION_STATUSES.includes(value) || offered({ kind: "decision" })) ? value : null);
+
 /** Values kept in localStorage are only the History filters, never the events or credentials they can find. */
 function normalizeHistoryFilters(values = {}) {
   const historyFilters = {
     text: typeof values.text === "string" ? truncateAtCodePointBoundary(values.text.trim(), 128) || null : null,
-    kind: ["project", "task", "user"].includes(values.kind) ? values.kind : null,
+    kind: ["project", "task", "decision", "user"].includes(values.kind) && offered({ kind: values.kind }) ? values.kind : null,
     actor: typeof values.actor === "string" ? values.actor || null : null,
     action: typeof values.action === "string" ? values.action || null : null,
-    status_from: HISTORY_STATUSES.includes(values.status_from) ? values.status_from : null,
-    status_to: HISTORY_STATUSES.includes(values.status_to) ? values.status_to : null,
+    status_from: historyStatus(values.status_from),
+    status_to: historyStatus(values.status_to),
     from: validHistoryDate(typeof values.from === "string" ? values.from : ""),
     to: validHistoryDate(typeof values.to === "string" ? values.to : ""),
   };
@@ -1240,9 +1247,6 @@ function comeBack() {
   }
   Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, trail: trailOf(), project: route.project ?? kept.project ?? null, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
 }
-
-/** Whether this instance offers the kind of an item. Until the instance has answered, nothing is ruled out. */
-const offered = (item) => item.kind !== "decision" || !state.instance || state.instance.features?.includes("decisions") === true;
 
 /**
  * The items the panel came through, as the entry in the browser's history keeps them, from after the last one
@@ -2313,7 +2317,7 @@ function renderHistoryList() {
     const id = event.kind === "project" && /^\d+$/.test(event.id) ? `project:${event.id}` : event.id;
     const title = event.title || "Item no longer available";
     const completed = event.kind === "task" && event.action === "status_changed" && event.data?.to === "done";
-    const item = event.kind === "project" || event.kind === "task"
+    const item = event.kind === "project" || event.kind === "task" || event.kind === "decision"
       ? el("button", { class: "history-event-item", type: "button", "data-id": event.id, "data-kind": event.kind, "aria-label": `Open ${event.kind} ${id}: ${title}`, onclick: () => openItem(event.kind, event.id) },
           el("span", { class: "id" }, id), el("span", { class: "history-event-title" }, title))
       : el("span", { class: "history-event-item passive" }, el("span", { class: "id" }, id), el("span", { class: "history-event-title" }, title));
@@ -3085,10 +3089,21 @@ async function refresh() {
       state.trail = trailOf(state.trail);
       history.replaceState({ ...(history.state ?? {}), trail: state.trail }, "", location.hash);
     }
+    // History cannot be narrowed to a kind or a status this instance does not offer: such a filter goes, from
+    // the address too.
+    const narrowed = normalizeHistoryFilters(state.historyFilters);
+    if (narrowed.kind !== state.historyFilters.kind || narrowed.status_from !== state.historyFilters.status_from || narrowed.status_to !== state.historyFilters.status_to) {
+      state.historyFilters = narrowed;
+      rememberHistoryFilters(state.historyFilters);
+      syncHistoryControls();
+      if (state.view === "history") history.replaceState({ ...(history.state ?? {}), historyFilters: state.historyFilters, historyFiltersSnapshot: true }, "", routeOf(state.view, state.open, state.zoom, state.into, state.project, state.projectZoom, state.historyFilters));
+    }
     // A group the board was in may be gone, or no longer hold the one after it in the trail.
     const left = settleZoom();
     $("instance").textContent = instance.name ?? "";
     $("view-decisions").hidden = !instance.features?.includes("decisions");
+    // History is narrowed to decisions, and to their statuses, only where the instance has them.
+    for (const option of [$("history-kind-decision"), ...document.querySelectorAll(".history-decision-status")]) option.hidden = option.disabled = !instance.features?.includes("decisions");
     if (!state.open) document.title = instance.name ? `${instance.name} · Vigile` : "Vigile";
     $("you").textContent = `${instance.you.username}${instance.you.keyless ? " (no key)" : ""}`;
     state.failed = false;
