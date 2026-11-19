@@ -1,0 +1,24 @@
+active_contents: A task is being cancelled while it contains tasks that are in progress or in review, at any depth. Finish them or move them out first.
+already_deleted: `delete` is called on an item that is already deleted. `restore` brings it back.
+assigned_to_other: A task is being started by someone it is not assigned to. Change its `assigned to` link explicitly before taking it over.
+built_in: `delete` is called on one of the three users every instance starts with.
+completed_before_created: `override_timestamp` would put a task's completion before its creation.
+completed_before_earlier_completion: `override_timestamp` would put a completion before an earlier completion of the same task, which was reopened since.
+completed_container: Work is being put inside a task that is done, directly or through another group. Reopen the completed container first.
+contains_deleted_tasks: A project is being deleted for good while deleted tasks are still in it. They could be restored into no project.
+contains_tasks: A project is being deleted while it still contains tasks.
+created_after_change: `override_timestamp` would put the creation after a later change of status.
+created_after_recorded: `override_timestamp` would put the creation after the moment the item was recorded here. What is carried over happened before that.
+deleted: A change is made to an item that is deleted. Restore it first.
+has_assigned_tasks: A user is being deleted while tasks are still assigned to it.
+loop: A "contains" or "depends on" link would close a loop, so that none of the items on it could ever finish. The refusal shows the path.
+not_completed: `override_timestamp` is asked to set the completion date of something that has none: a task that is not done, or a project.
+not_deleted: `restore` is called on an item that is not deleted.
+prefix_taken: A project is being created with a prefix another project has, or had: a prefix is never given twice.
+same_status: A task or project is being moved to the status it already has. For `in_progress` the refusal says whether the task is assigned to the caller, to other users or to nobody.
+self_link: An item is being linked to itself.
+status_move_not_allowed: The move is not in the table of [moves](/docs/model/#moves). The refusal lists where the task can go from where it is.
+timestamp_in_future: `override_timestamp` is given a moment that has not come yet.
+unfinished_contents: A task is being marked done while it contains unfinished tasks, at any depth.
+unfinished_dependencies: A task is being started or marked done while something it depends on is not finished.
+username_taken: A user is being created with a username that is in use, also by a deleted user.

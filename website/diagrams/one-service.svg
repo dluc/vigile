@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 296" font-size="13" role="img" aria-labelledby="one-service-title one-service-desc">
+<title id="one-service-title">One process, one port, one data folder</title>
+<desc id="one-service-desc">Agents, the command line and browsers all connect to one process, vigile serve, on one address and port, which answers at /mcp, /api and /. That process holds the data folder. A second vigile serve that is started on the same data folder is refused.</desc>
+<defs>
+<marker id="one-service-head" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" class="head"/></marker>
+<marker id="one-service-stop" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" class="head-stop"/></marker>
+</defs>
+<rect x="8" y="20" width="150" height="40" rx="20" class="box"/>
+<text x="83" y="45" text-anchor="middle" class="t-small t-strong">agents</text>
+<rect x="8" y="76" width="150" height="40" rx="20" class="box"/>
+<text x="83" y="101" text-anchor="middle" class="t-small t-strong">vigile, and programs</text>
+<rect x="8" y="132" width="150" height="40" rx="20" class="box"/>
+<text x="83" y="157" text-anchor="middle" class="t-small t-strong">browsers</text>
+<path d="M158 40L236 74" class="wire" marker-end="url(#one-service-head)"/>
+<path d="M158 96H236" class="wire" marker-end="url(#one-service-head)"/>
+<path d="M158 152L236 118" class="wire" marker-end="url(#one-service-head)"/>
+<rect x="238" y="20" width="230" height="152" rx="12" class="box-ink"/>
+<text x="353" y="48" text-anchor="middle" class="t-mono t-strong t-ink">vigile serve</text>
+<text x="353" y="68" text-anchor="middle" class="t-small t-ink">one process</text>
+<rect x="258" y="84" width="190" height="30" rx="7" class="box"/>
+<text x="353" y="104" text-anchor="middle" class="t-mono t-small">127.0.0.1:8700</text>
+<rect x="258" y="124" width="56" height="30" rx="7" class="box-busy"/>
+<text x="286" y="144" text-anchor="middle" class="t-mono t-small">/mcp</text>
+<rect x="325" y="124" width="56" height="30" rx="7" class="box-busy"/>
+<text x="353" y="144" text-anchor="middle" class="t-mono t-small">/api</text>
+<rect x="392" y="124" width="56" height="30" rx="7" class="box-busy"/>
+<text x="420" y="144" text-anchor="middle" class="t-mono t-small">/</text>
+<path d="M353 172V222" class="wire-go" />
+<text x="365" y="202" class="t-small t-go t-strong">holds it</text>
+<rect x="238" y="224" width="230" height="56" rx="12" class="box-go"/>
+<text x="353" y="247" text-anchor="middle" class="t-mono t-strong">data/</text>
+<text x="353" y="266" text-anchor="middle" class="t-small">one folder, held by one service</text>
+<rect x="540" y="20" width="172" height="76" rx="12" class="box-group"/>
+<text x="626" y="48" text-anchor="middle" class="t-mono t-strong">vigile serve</text>
+<text x="626" y="68" text-anchor="middle" class="t-small t-muted">a second one,</text>
+<text x="626" y="84" text-anchor="middle" class="t-small t-muted">on the same folder</text>
+<path d="M626 96V252H472" class="wire-stop" marker-end="url(#one-service-stop)"/>
+<rect x="540" y="150" width="172" height="46" rx="10" class="box-stop"/>
+<text x="626" y="170" text-anchor="middle" class="t-small t-stop t-strong">refused to start</text>
+<text x="626" y="186" text-anchor="middle" class="t-small">the folder is in use</text>
+</svg>

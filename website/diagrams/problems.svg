@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 268" font-size="13" role="img" aria-labelledby="problems-title problems-desc">
+<title id="problems-title">A problem: a task went on, and what it depends on was reopened</title>
+<desc id="problems-desc">Task WEB-008, the search box, depends on task WEB-007, the nightly index. WEB-008 is in review. WEB-007 was done and has been reopened, which is allowed. WEB-008 now carries the problem unfinished_dependency, and the project WEB carries the problem contains_task_with_problems.</desc>
+<defs><marker id="problems-head" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" class="head"/></marker></defs>
+<text x="8" y="22" class="t-label">1 · IT WAS DONE, THEN REOPENED</text>
+<rect x="8" y="36" width="262" height="92" rx="10" class="box-wait"/>
+<text x="22" y="60" class="t-mono t-strong">WEB-007</text>
+<text x="22" y="80" class="t-small">Index all products every night</text>
+<text x="22" y="108" class="t-small t-muted">status: done, and now <tspan class="t-wait t-strong">open</tspan> again</text>
+<text x="8" y="150" class="t-small t-muted">Reopening is allowed. Nothing is refused.</text>
+<path d="M270 82H446" class="wire" marker-end="url(#problems-head)"/>
+<text x="358" y="72" text-anchor="middle" class="t-small t-muted">WEB-008 depends on it</text>
+<text x="450" y="22" class="t-label">2 · WHAT WENT ON IS FLAGGED</text>
+<rect x="450" y="36" width="262" height="92" rx="10" class="box-review"/>
+<text x="464" y="60" class="t-mono t-strong">WEB-008</text>
+<text x="464" y="80" class="t-small">Search box with suggestions</text>
+<text x="464" y="108" class="t-small t-muted">status: <tspan class="t-review t-strong">in review</tspan></text>
+<rect x="450" y="138" width="262" height="46" rx="10" class="box-stop"/>
+<path d="M472 152l9 16h-18z" class="wire-stop"/>
+<text x="492" y="158" class="t-mono t-small t-strong">unfinished_dependency</text>
+<text x="492" y="175" class="t-small">depends on work that is not finished</text>
+<text x="8" y="212" class="t-label">3 · AND ITS PROJECT SAYS SO</text>
+<rect x="8" y="224" width="704" height="36" rx="10" class="box-sunk"/>
+<text x="22" y="247" class="t-mono t-strong">WEB</text>
+<text x="58" y="247" class="t-small">Website relaunch</text>
+<path d="M452 235l8 14h-16z" class="wire-stop"/>
+<text x="470" y="247" class="t-mono t-small t-strong">contains_task_with_problems</text>
+</svg>

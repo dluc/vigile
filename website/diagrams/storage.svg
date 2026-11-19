@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 330" font-size="13" role="img" aria-labelledby="storage-title storage-desc">
+<title id="storage-title">How a change is stored</title>
+<desc id="storage-desc">A change goes through four steps, one change at a time. First it is checked against the plan in memory: the version, the rules and the links; a change that fails is refused and nothing is stored. Second it is stored in the SQLite file as one step, all or nothing. Third the plan in memory is brought up to date. Fourth the listeners are told the new revision. Items, links and what is worked out of them, next, waiting and problems, are answered from the plan in memory. Descriptions, history and status timelines are read from the store when they are asked for.</desc>
+<defs><marker id="storage-head" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" class="head"/></marker></defs>
+<rect x="200" y="8" width="150" height="50" rx="10" class="box-ink"/>
+<text x="275" y="30" text-anchor="middle" class="t-mono t-strong t-ink">default.sqlite</text>
+<text x="275" y="47" text-anchor="middle" class="t-small t-ink">the store decides</text>
+<path d="M275 100V60" class="wire" marker-end="url(#storage-head)"/>
+<rect x="8" y="100" width="150" height="86" rx="10" class="box"/>
+<text x="22" y="124" class="t-label">1 · CHECK</text>
+<text x="22" y="146" class="t-small">the version, the rules</text>
+<text x="22" y="163" class="t-small">and the links, against</text>
+<text x="22" y="180" class="t-small">the plan in memory</text>
+<rect x="200" y="100" width="150" height="86" rx="10" class="box-busy"/>
+<text x="214" y="124" class="t-label">2 · STORE</text>
+<text x="214" y="146" class="t-small">one step: the item,</text>
+<text x="214" y="163" class="t-small">its links, its history.</text>
+<text x="214" y="180" class="t-small t-strong">All or nothing</text>
+<rect x="392" y="100" width="150" height="86" rx="10" class="box"/>
+<text x="406" y="124" class="t-label">3 · APPLY</text>
+<text x="406" y="146" class="t-small">memory is brought</text>
+<text x="406" y="163" class="t-small">up to date. The change</text>
+<text x="406" y="180" class="t-small">is confirmed</text>
+<rect x="584" y="100" width="128" height="86" rx="10" class="box"/>
+<text x="598" y="124" class="t-label">4 · ANNOUNCE</text>
+<text x="598" y="146" class="t-small">listeners are told</text>
+<text x="598" y="163" class="t-small">the new revision</text>
+<path d="M158 143H198" class="wire" marker-end="url(#storage-head)"/>
+<path d="M350 143H390" class="wire" marker-end="url(#storage-head)"/>
+<path d="M542 143H582" class="wire" marker-end="url(#storage-head)"/>
+<path d="M83 186V236" class="wire-dash" marker-end="url(#storage-head)"/>
+<path d="M467 186V236" class="wire" marker-end="url(#storage-head)"/>
+<rect x="8" y="238" width="534" height="64" rx="10" class="box-sunk"/>
+<text x="22" y="258" class="t-label">THE PLAN IN MEMORY: A WORKING COPY</text>
+<text x="22" y="275" class="t-small">items, links, and next, waiting and problems are answered from here</text>
+<text x="22" y="292" class="t-small t-muted">descriptions, history and timelines are read from the store when asked for</text>
+<text x="8" y="322" class="t-small t-muted">A change that fails the check is refused at step 1, and nothing is stored.</text>
+</svg>

@@ -1,0 +1,1 @@
+{ "shows": "One process on one address and port holds the data folder; a second one on the same folder is refused.", "ids": [], "terms": [], "paths": ["/mcp", "/api"], "address": "127.0.0.1:8700" }

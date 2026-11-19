@@ -1,0 +1,130 @@
+{
+  "board": {
+    "kind": "window",
+    "width": 1520,
+    "height": 900,
+    "widths": [
+      760,
+      1520,
+      2280
+    ],
+    "schemes": [
+      "light",
+      "dark"
+    ]
+  },
+  "project-zoom": {
+    "kind": "window",
+    "width": 1520,
+    "height": 760,
+    "widths": [
+      760,
+      1520
+    ],
+    "schemes": [
+      "light",
+      "dark"
+    ]
+  },
+  "history": {
+    "kind": "window",
+    "width": 1520,
+    "height": 900,
+    "widths": [
+      760,
+      1520
+    ],
+    "schemes": [
+      "light",
+      "dark"
+    ]
+  },
+  "panel": {
+    "kind": "window",
+    "width": 1180,
+    "height": 1180,
+    "widths": [
+      590,
+      1180
+    ],
+    "schemes": [
+      "light",
+      "dark"
+    ]
+  },
+  "graph": {
+    "kind": "window",
+    "width": 1520,
+    "height": 1172,
+    "widths": [
+      760,
+      1520
+    ],
+    "schemes": [
+      "light",
+      "dark"
+    ]
+  },
+  "phone": {
+    "kind": "phone",
+    "width": 390,
+    "height": 800,
+    "widths": [
+      390,
+      780
+    ],
+    "schemes": [
+      "light",
+      "dark"
+    ]
+  },
+  "theme-dado": {
+    "kind": "window",
+    "width": 1200,
+    "height": 700,
+    "widths": [
+      600,
+      1200
+    ],
+    "schemes": [
+      "light"
+    ]
+  },
+  "theme-jeev": {
+    "kind": "window",
+    "width": 1200,
+    "height": 700,
+    "widths": [
+      600,
+      1200
+    ],
+    "schemes": [
+      "light"
+    ]
+  },
+  "theme-gito": {
+    "kind": "window",
+    "width": 1200,
+    "height": 700,
+    "widths": [
+      600,
+      1200
+    ],
+    "schemes": [
+      "dark"
+    ]
+  },
+  "problem": {
+    "kind": "window",
+    "width": 1180,
+    "height": 900,
+    "widths": [
+      590,
+      1180
+    ],
+    "schemes": [
+      "light",
+      "dark"
+    ]
+  }
+}

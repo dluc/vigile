@@ -1,0 +1,3 @@
+admin: Maintenance. It always needs its API key, which `config init` writes into the config file.
+user: A person that agents can assign work to. It has no key until one is issued.
+agent1: Who a connection without an API key acts as, unless the config says otherwise.

@@ -1,0 +1,7 @@
+unfinished_dependency: A task is in progress, in review or done, but something it depends on is not finished: the dependency was reopened, restored or added afterwards.
+inside_inactive_container: An unfinished task has no active path into the plan because every path passes through a project or group that is not active.
+done_with_unfinished_contents: A group is done, but tasks already inside it are not finished: one was reopened or restored afterwards.
+depends_on_broken_project: An unfinished task depends on a project that is marked broken.
+project_broken: The project is marked broken.
+ready_with_unfinished_tasks: The project is marked ready, but tasks in it are not finished.
+contains_task_with_problems: The project holds tasks that have problems of their own.

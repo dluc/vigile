@@ -1,0 +1,7 @@
+title: Characters in a title.
+text: Characters in a description.
+why: Characters in a reason.
+username: Characters in a username.
+page: Items in one page of a list that answers in pages. See [Lists and pages](/docs/http-api/#lists-and-pages).
+blocking: Items named in one refusal as being in the way. `blocking_total` says how many there are in all when the list is cut.
+links_per_create: Entries in `depends_on`, and in `assigned_to`, of one `create_task`.

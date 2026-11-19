@@ -1,0 +1,5 @@
+open: Work on it goes on. A new project starts here.
+in_preview: Its result can be looked at, and is not final.
+ready: Its result is there.
+broken: Something is wrong with it as a whole. Tasks that depend on it are flagged.
+cancelled: It will not be finished.

@@ -1,0 +1,9 @@
+invalid_input: The input is not what the operation takes: a value of the wrong type, a required field that is missing, a field it does not know, text that is too long, an ID that matches more than one item, a body that is not JSON, a request other than a POST that brings a body. The message names the field.
+not_found: No item matches the ID or name that was given, there is no such link, no such operation, or nothing is served at that address.
+unauthorized: The connection may not act as anyone: it has no key where one is required, the key is not valid, or the key's user no longer exists.
+forbidden: The caller may not do this: an operation for admins, a permanent delete, or a request one of the [guards](/docs/security/#the-browser-guards) turns away.
+version_conflict: The item changed since the caller read it. The error carries the item as it is now, in short, under `current`.
+rule_violation: The change would break a rule of the plan. The error carries the `rule` and what to do under `actions`, and with some rules the items in the way under `blocking`.
+limit_exceeded: The request is too large: a body of more than 1 MB, or a change that touches more records than can be stored in one step.
+too_many_requests: Either too many clients are listening to the stream of changes, in all, from one address or from the service's own machine, or a read by `get` or `list_history` was overtaken repeatedly by changes to the plan. Close stream clients in the first case; read again in the second.
+internal: Something went wrong inside the service that was nobody's mistake. The service's log says what. It is the one code after which a change may have been stored: the message says what stands, or that the change was not confirmed.

@@ -1,0 +1,4 @@
+task: Planned work. The default.
+bug: Something that should work and does not.
+issue: A problem or an open question that needs attention.
+incident: Something that is failing right now and needs urgent action.

@@ -1,0 +1,7 @@
+create_project: There is no item yet. Sent twice, it makes two projects, unless a `prefix` is given: the second is then refused with `prefix_taken`.
+create_task: There is no item yet. Sent twice, it makes two tasks.
+restore: A deleted item cannot be changed, so there is nothing a restore could overwrite. Sent twice, the second is refused with `not_deleted`.
+add_link: It adds to a set. A link that is already there is left as it is, and the answer says `created: false`.
+remove_link: It takes from a set. A link that is no longer there is `not_found`.
+create_user: There is no item yet. A username that is taken is refused with `username_taken`.
+reset_user_key: Each reset that is carried out replaces the key: the last one carried out is the one in force.
