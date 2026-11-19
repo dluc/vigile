@@ -5,9 +5,9 @@
  * Where the site is published. Every link inside the site is relative, so the site works under any path; this
  * address is only for what must be absolute: the sitemap, the canonical address and the picture of a shared
  * link, and the links of the 404 page, which GitHub Pages serves at any depth. Set SITE_URL to change it, for
- * example to a domain of its own: SITE_URL=https://vigile.example/ node website/build.mjs
+ * example to another domain: SITE_URL=https://vigile.example/ node website/build.mjs
  */
-export const SITE_URL = withSlash(process.env.SITE_URL || "https://dluc.github.io/vigile/");
+export const SITE_URL = withSlash(process.env.SITE_URL || "https://vigile.dev.ai/");
 
 /** Where the code is, for the links to the source and for the command that fetches it. */
 export const REPO_URL = (process.env.REPO_URL || "https://github.com/dluc/vigile").replace(/\/$/, "");
