@@ -268,3 +268,8 @@ over a newer one.
   **Source** is **GitHub Actions**. If the site moves to another address, set it there, enforce HTTPS before
   the next publication, and change `SITE_URL` in `site.mjs`, which the README's links and a build without
   options go by.
+To check compatibility across the introduction of the decision register, run
+`node website/check-register-compatibility.mjs <older-vigile> <decision-capable-vigile>`.
+It checks each program's advertised catalog, then runs the full website suite
+against each binary, including the live operation examples. The site build
+itself continues to use only the program being documented.

@@ -198,7 +198,8 @@ const ACCESS = (operation) => (operation.access === "all" ? "Every user" : `${op
 export function generators(codeData, site) {
   const { operations, contract } = codeData;
   const byName = new Map(operations.map((operation) => [operation.name, operation]));
-  const grouped = new Set(OPERATION_GROUPS.flatMap((group) => group.operations));
+  const groups = byName.has("create_decision") ? [...OPERATION_GROUPS, { title: "Decisions", operations: ["create_decision", "update_decision", "list_decisions"] }] : OPERATION_GROUPS;
+  const grouped = new Set(groups.flatMap((group) => group.operations));
   for (const operation of operations) if (!grouped.has(operation.name)) throw new Error(`The operation ${operation.name} is in no group of OPERATION_GROUPS in website/site.mjs. Add it to one.`);
   for (const name of grouped) if (!byName.has(name)) throw new Error(`website/site.mjs groups an operation called ${name}, and there is none.`);
   const used = { commands: new Set() };
@@ -268,7 +269,7 @@ export function generators(codeData, site) {
     },
 
     "operations-index"() {
-      return OPERATION_GROUPS.map((group) => {
+      return groups.map((group) => {
         const rows = group.operations.map((name) => {
           const operation = byName.get(name);
           return [`<a href="${operationPath(operation)}">${code(operation.name)}</a>`, operation.kind === "read" ? "reads" : "changes", escapeHtml(ACCESS(operation).toLowerCase()), escapeHtml(sentence(firstSentence(operation.description)))];
@@ -458,7 +459,8 @@ export function generators(codeData, site) {
     /** Every operation that changes something, with whether it takes a version, and the page's words for those that take none. */
     versions(_args, body) {
       const { versioned, unversioned } = contract;
-      const words = described("without-version", unversioned, body);
+      const words = described("without-version", unversioned.filter(name => name !== "create_decision"), body);
+      if (unversioned.includes("create_decision")) words.set("create_decision", "Sent twice, it makes two decisions.");
       const link = (name) => `<a href="${operationPath(byName.get(name))}">${code(name)}</a>`;
       const rows = [...versioned.map((name) => [link(name), '<span class="yes">yes</span>', "Refused with <code>version_conflict</code> when the item has changed since the version that is sent."]), ...unversioned.map((name) => [link(name), '<span class="no">no</span>', words.get(name)])];
       return table("Which operations take a version", ["Operation", "Takes a version", "So"], rows);
