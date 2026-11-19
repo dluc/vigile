@@ -4107,6 +4107,15 @@ describe("the note of a restore", () => {
   });
 });
 
+/** Waits until no service holds the data folder any more, and fails with what it waited for when that does not come. */
+async function released(directory: string): Promise<void> {
+  const until = Date.now() + 30_000;
+  while (folderIsHeld(directory)) {
+    if (Date.now() >= until) assert.fail(`the service did not let go of its data folder within 30 seconds of stopping: ${directory}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 describe("a restore that was killed half-way", () => {
   it("is put in order by the next start: undone when the backup was not in place yet, finished when it was", async () => {
     const directory = mkdtempSync(join(tmpdir(), "vigile-interrupted-"));
@@ -4115,14 +4124,20 @@ describe("a restore that was killed half-way", () => {
     const data = join(directory, "data");
     const titles = async (service: Service) => ((await service.engine.execute("list_tasks", "agent1", {})) as { tasks: Array<{ title: string }> }).tasks.map((task) => task.title);
     const start = async (warnings: string[]) => startService({ loaded: loadConfig(config, {}), log: () => {}, warn: (line) => warnings.push(line) });
+    // A bounded stop may return while a backup that was under way still settles its files and holds the data
+    // folder. What follows moves the data files by hand and starts again at once, so it waits for the folder.
+    const stop = async (service: Service) => {
+      await service.stop();
+      await released(data);
+    };
     try {
       let service = await start([]);
       await service.engine.execute("create_task", "agent1", { title: "In the backup", description: "d" });
-      await service.stop();
+      await stop(service);
       const backup = JSON.parse((await run(["backup", join(directory, "backups"), "--json", "--config", config])).out).files[0].file as string;
       service = await start([]);
       await service.engine.execute("create_task", "agent1", { title: "After the backup", description: "d" });
-      await service.stop();
+      await stop(service);
 
       // 1. Killed after the data file was moved away and before the copy of the backup had its name: the note
       // is there, the data file is in the folder that takes what was there, and the copy is still beside it.
@@ -4141,7 +4156,7 @@ describe("a restore that was killed half-way", () => {
       assert.deepEqual(await titles(service), ["In the backup", "After the backup"], "the plan is the one from before the restore, not an empty one");
       assert.equal(undone.length, 1);
       assert.match(undone[0]!, /was interrupted before the backup was in place\. The data is as it was/);
-      await service.stop();
+      await stop(service);
       assert.deepEqual([existsSync(join(data, "restore-in-progress.json")), existsSync(join(data, "default.sqlite.restoring"))], [false, false], "nothing of the restore is left");
       assert.equal(existsSync(join(data, "replaced-20260101-000000-000")), false, "nor the folder that gave back all it took");
 
@@ -4155,7 +4170,7 @@ describe("a restore that was killed half-way", () => {
       writeFileSync(join(data, "replaced-20260101-000000-222", "default.sqlite"), "set aside by an earlier restore");
       service = await start([]);
       assert.deepEqual(await titles(service), ["In the backup", "After the backup"]);
-      await service.stop();
+      await stop(service);
       assert.deepEqual(readdirSync(data).filter((name) => name.includes("restor")), []);
       assert.deepEqual([existsSync(join(data, "replaced-20260101-000000-111")), existsSync(join(data, "replaced-20260101-000000-222", "default.sqlite"))], [false, true], "the empty folder is gone, the one that holds something stays");
       rmSync(join(data, "replaced-20260101-000000-222"), { recursive: true });
@@ -4200,7 +4215,7 @@ describe("a restore that was killed half-way", () => {
       assert.match(moved.err, /The data is as it was before the restore began/);
       service = await start([]);
       assert.deepEqual(await titles(service), ["In the backup", "After the backup"], "the data is as it was");
-      await service.stop();
+      await stop(service);
       assert.deepEqual(readdirSync(data).filter((name) => name.includes("restor")), []);
 
       // 1b. An undoing that was itself cut short: the data file is back, what lay beside it is not yet, and the
@@ -4213,7 +4228,7 @@ describe("a restore that was killed half-way", () => {
       assert.match(resumed[0]!, /was interrupted before the backup was in place/);
       assert.equal(existsSync(join(data, "replaced-20260101-000000-500", "default.sqlite-wal")), false, "what lay beside the data file was put back as well");
       assert.deepEqual(await titles(service), ["In the backup", "After the backup"]);
-      await service.stop();
+      await stop(service);
 
       mkdirSync(join(data, "replaced-20260101-000001-000"));
       writeFileSync(join(data, "restore-in-progress.json"), JSON.stringify({ tenant: "default", aside: "replaced-20260101-000001-000", had: ["default.sqlite"] }));
@@ -4223,7 +4238,7 @@ describe("a restore that was killed half-way", () => {
       service = await start(finished);
       assert.deepEqual(await titles(service), ["In the backup"], "the plan is the restored one");
       assert.match(finished[0]!, /had put the backup in place .* It is finished; what was there before is in .*replaced-20260101-000001-000/);
-      await service.stop();
+      await stop(service);
       assert.equal(existsSync(join(data, "restore-in-progress.json")), false);
 
       // 2b. The backup has the data file's name, and the move of the old log of changes was lost, as it can be
@@ -4238,7 +4253,7 @@ describe("a restore that was killed half-way", () => {
       service = await start(completed);
       assert.match(completed[0]!, /had put the backup in place .* It is finished/);
       assert.deepEqual(await titles(service), ["In the backup"], "the plan is the backup's");
-      await service.stop();
+      await stop(service);
       assert.equal(readFileSync(join(data, "replaced-20260101-000002-000", "default.sqlite-wal"), "utf8"), "the log of changes of the data that was replaced", "the old log is with the old data");
 
       // 3. A note that cannot be read keeps the service from opening the data, and says where to look.
@@ -4247,7 +4262,7 @@ describe("a restore that was killed half-way", () => {
       assert.equal(existsSync(join(data, "vigile.lock")), false, "and it lets go of the data folder");
       rmSync(join(data, "restore-in-progress.json"));
       service = await start([]);
-      await service.stop();
+      await stop(service);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
