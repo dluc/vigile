@@ -1144,7 +1144,8 @@ function readRoute(address = location.hash) {
       from: decoded(asked.get("from") ?? ""),
       to: decoded(asked.get("to") ?? ""),
     });
-  return { view: view ?? "board", open: !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : { kind: "task", id }, zoom, into, project, projectZoom, historyFilters, hasHistoryFilterParameters };
+  const open = !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : id.startsWith("decision:") ? { kind: "decision", id: id.slice(9) } : { kind: "task", id };
+  return { view: view ?? "board", open, zoom, into, project, projectZoom, historyFilters, hasHistoryFilterParameters };
 }
 
 function routeOf(view, open, zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom, historyFilters = state.historyFilters) {
@@ -1162,7 +1163,7 @@ function routeOf(view, open, zoom = state.zoom, into = state.into, project = sta
     view !== "history" && zoom !== null && `zoom=${zoom}`,
     view !== "history" && projectZoom && "projectZoom=1",
   ].filter(Boolean).join("&");
-  return `#${view}${open ? `/${open.kind === "project" ? "project:" : ""}${encodeURIComponent(open.id)}` : ""}${asks ? `?${asks}` : ""}`;
+  return `#${view}${open ? `/${open.kind === "task" ? "" : `${open.kind}:`}${encodeURIComponent(open.id)}` : ""}${asks ? `?${asks}` : ""}`;
 }
 /** A task ID as the service stores it, for comparing supported bookmark spellings without losing large digits. */
 const taskIdentity = (id) => {

@@ -17,6 +17,7 @@ export interface LinkType {
 }
 
 export const LINK_TYPES: readonly LinkType[] = [
+  { type: "affects", reverse: "is affected by", from: ["decision"], to: ["project", "task"], built_in: true, effect: null, description: "Records an explicit impact link; it does not affect task readiness or extend to descendants." },
   {
     type: "contains",
     reverse: "is contained",

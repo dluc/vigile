@@ -65,7 +65,8 @@ export interface UserView {
   deleted_at?: string;
 }
 
-export type Summary = TaskSummary | ProjectSummary | UserView;
+export type DecisionSummary = Pick<import("./model.js").DecisionNode, "kind" | "id" | "title" | "status" | "version"> & { deleted_at?: string };
+export type Summary = TaskSummary | ProjectSummary | UserView | DecisionSummary;
 
 export interface LinkedItem {
   kind: string;
@@ -175,6 +176,8 @@ export function userView(user: UserNode): UserView {
 
 export function summary(graph: GraphView, node: Node): Summary {
   switch (node.kind) {
+    case "decision":
+      return { kind: node.kind, id: node.id, title: node.title, status: node.status, version: node.version, ...(node.deleted_at ? { deleted_at: node.deleted_at } : {}) };
     case "task":
       return taskSummary(graph, node);
     case "project":
@@ -215,7 +218,7 @@ export function detail(graph: GraphView, node: Node, text: string | null, lists:
   return {
     ...item,
     ...(node.kind === "user" ? {} : { description: text ?? "" }),
-    ...(node.kind === "task" ? { why: node.why } : {}),
+    ...(node.kind === "task" || node.kind === "decision" ? { why: node.why } : {}),
     links: lists.links,
     ...(lists.timeline ? { timeline: lists.timeline } : {}),
     created_at: node.created_at,

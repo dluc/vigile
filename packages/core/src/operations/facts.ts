@@ -30,6 +30,7 @@ export interface OperationFacts {
  * A test sends each one twice and holds these to what the engine does.
  */
 export const REPEATED_WITHOUT_VERSION: Readonly<Record<string, string>> = {
+  create_decision: "makes another decision",
   create_project: "makes another project, unless it names a prefix, which is refused the second time",
   create_task: "makes another task",
   restore: "is refused once the item is back",
@@ -40,7 +41,7 @@ export const REPEATED_WITHOUT_VERSION: Readonly<Record<string, string>> = {
 };
 
 /** Kept loadable before the operation registry, which includes the guide; operationFacts checks it against every input. */
-const VERSIONED_OPERATIONS = ["set_project_status", "update_task", "set_task_status", "delete", "override_timestamp"] as const;
+const VERSIONED_OPERATIONS = ["update_decision", "set_project_status", "update_task", "set_task_status", "delete", "override_timestamp"] as const;
 
 export function operationFacts(): OperationFacts {
   const versioned = OPERATIONS.filter((operation) => takes(operation.input, "version")).map((operation) => operation.name);

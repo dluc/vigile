@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DECISION_STATUSES, type DecisionStatus } from "../model.js";
 import { LIMITS, KINDS, PROJECT_STATUSES, TASK_STATUSES, type Kind, type ProjectStatus, type TaskStatus } from "../model.js";
 import { isMoment } from "../shape.js";
 import { displayId, storageId } from "../records.js";
@@ -28,8 +29,8 @@ const historyBound = z.string().refine((value) => {
 const bound = (value: string, endOfDate: boolean): string =>
   dateOnly.test(value) ? `${value}T${endOfDate ? "23:59:59.999" : "00:00:00.000"}Z` : new Date(value).toISOString();
 
-type HistoryStatus = TaskStatus | ProjectStatus;
-const historyStatuses = [...new Set([...TASK_STATUSES, ...PROJECT_STATUSES])] as [HistoryStatus, ...HistoryStatus[]];
+type HistoryStatus = TaskStatus | ProjectStatus | DecisionStatus;
+const historyStatuses = [...new Set([...TASK_STATUSES, ...PROJECT_STATUSES, ...DECISION_STATUSES])] as [HistoryStatus, ...HistoryStatus[]];
 const historyStatus = z.enum(historyStatuses);
 
 const input = z.strictObject({

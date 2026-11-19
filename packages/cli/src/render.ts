@@ -341,6 +341,9 @@ const item: Printer = (ui, result) => {
  * here (see expected.ts). A test fails when the engine has an operation that is not in this table.
  */
 const PRINTED: Record<string, Printer> = {
+  create_decision: item,
+  update_decision: item,
+  list_decisions: (ui, result) => { for (const decision of result.decisions) ui.out(oneLine(ui, decision)); more(ui, result); },
   create_project: item,
   set_project_status: item,
   list_projects: projects,

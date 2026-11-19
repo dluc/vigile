@@ -1,5 +1,6 @@
 import {
   FORMAT_VERSION,
+  formatAfter,
   RevisionConflictError,
   assertCommitSize,
   assertTenantName,
@@ -101,7 +102,7 @@ export class MemoryStorage implements StorageAdapter {
         }
       }
     }
-    t.head = { format: t.head.format, revision, counters: { ...request.counters } };
+    t.head = { format: formatAfter(t.head.format, request.changes), revision, counters: { ...request.counters } };
     this.tenants.set(tenant, t);
     return copy(t.head);
   }

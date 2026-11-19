@@ -7,6 +7,7 @@ export { LINK_TYPES, findLinkType, type LinkType } from "./link-types.js";
 export { AGENT_INSTRUCTIONS, GUIDE_EXAMPLES, GUIDE_TOPICS, guide, type Guide, type GuideExample, type GuideTopic } from "./guide.js";
 export {
   BUILT_IN_USERS,
+  DECISION_STATUSES,
   KINDS,
   LIMITS,
   PROJECT_FINISHED,

@@ -7,6 +7,8 @@ import { Worker } from "node:worker_threads";
 import type { DatabaseSync as Database, SQLOutputValue } from "node:sqlite";
 import {
   FORMAT_VERSION,
+  DECISION_FORMAT,
+  formatAfter,
   RevisionConflictError,
   assertCommitSize,
   assertTenantName,
@@ -419,7 +421,7 @@ export class SqliteStorage implements StorageAdapter {
       const actual = current ? current.revision : null;
       if (actual !== request.expectedRevision) throw new RevisionConflictError(tenant, request.expectedRevision, actual);
       const head: Head = {
-        format: current?.format ?? FORMAT_VERSION,
+        format: formatAfter(current?.format ?? FORMAT_VERSION, request.changes),
         revision: (current?.revision ?? 0) + 1,
         counters: { ...request.counters },
       };
@@ -1198,11 +1200,11 @@ export function inspectTenantFile(tenant: string, file: string): TenantFileRepor
     // A sound database is not yet a plan: what is in it must read as one, or the service would not start on it.
     // By the format it says it is in: a file of an earlier format is one that the store brings to the present
     // one when it opens it, and until then it has that format's tables and nothing else.
-    const wrong = head && head.format <= FORMAT_VERSION ? unreadable(db, head.format) : null;
+    const wrong = head && head.format <= DECISION_FORMAT ? unreadable(db, head.format) : null;
     if (wrong) report.messages.push(wrong);
-    report.ok = report.messages.length === 1 && report.messages[0] === "ok" && report.format !== null && report.format <= FORMAT_VERSION;
-    if (report.format !== null && report.format > FORMAT_VERSION) {
-      report.messages.push(`data format ${report.format} is newer than this version understands (${FORMAT_VERSION})`);
+    report.ok = report.messages.length === 1 && report.messages[0] === "ok" && report.format !== null && report.format <= DECISION_FORMAT;
+    if (report.format !== null && report.format > DECISION_FORMAT) {
+      report.messages.push(`data format ${report.format} is newer than this version understands (${DECISION_FORMAT})`);
     }
     db.exec("COMMIT");
     transaction = false;

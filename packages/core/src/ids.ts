@@ -6,7 +6,7 @@ import type { Kind, Ref } from "./model.js";
  */
 
 /** The kinds of item there are. */
-export const KINDS = ["project", "task", "user"] as const;
+export const KINDS = ["project", "task", "user", "decision"] as const;
 
 /** Words that introduce a kind of object in an ID, and so can never be a project prefix. */
 export const RESERVED_PREFIXES = ["USER", "TEAM", "SVC", "OBJ", "COMMENT"] as const;
@@ -51,6 +51,7 @@ export function normalizeId(kind: Kind, input: string): string | null {
     case "project":
       if (PREFIX.test(text)) return text;
       return DIGITS.test(text) ? formatNumber(Number(text)) : null;
+    case "decision":
     case "task": {
       const m = TASK_ID.exec(text);
       return m ? taskId(m[1] ?? null, Number(m[2])) : null;
@@ -64,7 +65,7 @@ export function normalizeId(kind: Kind, input: string): string | null {
 
 /** Splits `task:042` into its kind and the rest. A bare reference has no kind. */
 export function splitRef(input: string): { kind: Kind | null; rest: string } {
-  const m = /^(project|task|user):(.*)$/i.exec(input.trim());
+  const m = /^(project|task|user|decision):(.*)$/i.exec(input.trim());
   return m ? { kind: m[1]!.toLowerCase() as Kind, rest: m[2]! } : { kind: null, rest: input.trim() };
 }
 
@@ -116,6 +117,7 @@ export type Place = readonly [kind: number, prefix: string, digits: string, id: 
 export function placeOf(ref: Ref): Place {
   if (ref.kind === "project") return DIGITS.test(ref.id) ? [0, "\uFFFF", ref.id, ref.id] : [0, ref.id, "", ref.id];
   if (ref.kind === "task") return [1, ...taskParts(ref.id), ref.id];
+  if (ref.kind === "decision") return [3, ...taskParts(ref.id), ref.id];
   return [2, "", /(\d+)$/.exec(ref.id)?.[1] ?? "", ref.id];
 }
 

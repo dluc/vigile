@@ -20,9 +20,11 @@ import { restore } from "./restore.js";
 import { setProjectStatus } from "./set-project-status.js";
 import { setTaskStatus } from "./set-task-status.js";
 import { updateTask } from "./update-task.js";
+import { createDecision, updateDecision, listDecisions } from "./decisions.js";
 
 /** Every operation the product offers. MCP, the HTTP API and the CLI are all generated from this list. */
 export const OPERATIONS: readonly Operation[] = [
+  createDecision, updateDecision, listDecisions,
   createProject,
   setProjectStatus,
   listProjects,

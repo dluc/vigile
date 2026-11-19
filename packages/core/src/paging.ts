@@ -246,6 +246,7 @@ const linkKey = (entry: any): string | undefined => (typeof entry?.id === "strin
 const ORDERS = {
   list_projects: inOrderOfIds("projects", compareProjectIds),
   list_tasks: inOrderOfIds("tasks", compareTaskIds),
+  list_decisions: inOrderOfIds("decisions", compareTaskIds),
   /** Recorded changes across the tenant, newest first by the revision that stored them. */
   list_history: {
     entries: "changes",
@@ -305,7 +306,7 @@ const ORDERS = {
 } as const;
 
 /** The operations that return a list in pages, each with the field its entries are in. */
-export const PAGED = { list_projects: "projects", list_tasks: "tasks", list_history: "changes", list_next_tasks: "tasks", list_stale_tasks: "claims", list_users: "users" } as const;
+export const PAGED = { list_projects: "projects", list_tasks: "tasks", list_decisions: "decisions", list_history: "changes", list_next_tasks: "tasks", list_stale_tasks: "claims", list_users: "users" } as const;
 export type PagedOperation = keyof typeof PAGED;
 export const isPaged = (operation: string): operation is PagedOperation => Object.hasOwn(PAGED, operation);
 /** The lists that are the asking user's own. */

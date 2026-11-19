@@ -1,4 +1,4 @@
-import { CommitTooLargeError, FORMAT_VERSION, RevisionConflictError, type HistoryRecord, type StorageAdapter } from "@vigile/storage";
+import { CommitTooLargeError, DECISION_FORMAT, FORMAT_VERSION, RevisionConflictError, type HistoryRecord, type StorageAdapter } from "@vigile/storage";
 import { randomBytes } from "node:crypto";
 import { isLive, taskCalc, type Known } from "./calc.js";
 import { VigileError, echo, forbidden, invalidInput, notFound, toErrorBody } from "./errors.js";
@@ -318,6 +318,12 @@ export class Engine {
       let reply: () => unknown;
       try {
         reply = await this.run(operation, username, letInAs, input, plan, now);
+        // A description read from another writer can make a stale update appear to be a no-op.
+        // Without a commit there is no compare-and-swap to validate the version we checked.
+        if (operation.name === "update_decision" && !plan.mutations.length) {
+          const actual = await this.storage.readRevision(this.tenant);
+          if (actual !== this.revision) throw new RevisionConflictError(this.tenant,this.revision,actual);
+        }
       } catch (error) {
         // A write that reads beside its checked plan can discover that another engine moved the store while it
         // was reading. Refresh and rerun once, just as when the eventual commit finds that same revision drift.
@@ -336,6 +342,7 @@ export class Engine {
             changes: toChanges(plan.mutations, now, caller.id),
           });
           this.apply(plan.mutations, head.revision);
+          this.format = head.format;
           this.revision = head.revision;
           this.counters = head.counters;
           this.loadedAt = now;
@@ -407,9 +414,9 @@ export class Engine {
       snapshot = await this.storage.load(this.tenant);
     }
     if (!snapshot) throw new Error(`Tenant "${this.tenant}" could not be created`);
-    if (snapshot.head.format > FORMAT_VERSION) {
+    if (snapshot.head.format > DECISION_FORMAT) {
       throw new Error(
-        `Tenant "${this.tenant}" uses data format ${snapshot.head.format}; this version of the service understands up to ${FORMAT_VERSION}. Upgrade the service.`,
+        `Tenant "${this.tenant}" uses data format ${snapshot.head.format}; this version of the service understands up to ${DECISION_FORMAT}. Upgrade the service.`,
       );
     }
     // Data of an earlier format is brought to the present one by the store when it opens it. Read as it is, its
@@ -540,7 +547,7 @@ export class Engine {
     const astray = records.findIndex((record, index) => record.place !== index);
     if (astray >= 0) throw new Error(`The timeline of ${ref.kind} ${ref.id} is damaged: the entry after place ${astray - 1} is at place ${records[astray]!.place}`);
     const entries = records.map((record) => ({ place: record.place, entry: recordToEntry(record.data) }));
-    if (ref.kind === "project" || ref.kind === "task") {
+    if (ref.kind !== "user") {
       const problem = entriesProblem(ref.kind, entries);
       if (problem) throw new Error(`The timeline of ${ref.kind} ${ref.id} is damaged: ${problem}`);
     }
@@ -582,7 +589,7 @@ export class Engine {
 
   private async timelineProblems(graph: GraphView, most: number, signal?: AbortSignal): Promise<string[]> {
     const problems: string[] = [];
-    for (const node of [...graph.all("project"), ...graph.all("task")]) {
+    for (const node of [...graph.all("project"), ...graph.all("task"), ...graph.all("decision")]) {
       if (problems.length >= most) break;
       const id = storageId(node.kind, node.id);
       let wrong: string | null = null;
@@ -643,7 +650,7 @@ export class Engine {
  */
 function findLoops(graph: GraphView): string[] {
   const key = (ref: Ref) => `${ref.kind}:${ref.id}`;
-  const holds = LINK_TYPES.filter((type) => type.effect !== "assigns").map((type) => type.type);
+  const holds = LINK_TYPES.filter((type) => type.effect === "groups" || type.effect === "holds_back").map((type) => type.type);
   const next = (ref: Ref): Ref[] => holds.flatMap((type) => graph.out(ref, type).map((link) => link.to)).filter((to) => graph.node(to));
   const left = new Set<string>();
   const loops: string[] = [];
@@ -705,7 +712,7 @@ function findInconsistencies(graph: GraphView, counters: Record<string, number>)
   const highest = (nodes: Node[], number: (n: Node) => number) => nodes.reduce((max, n) => Math.max(max, number(n)), 0);
   const trailing = (id: string) => Number(/(\d+)$/.exec(id)?.[1] ?? 0);
   const checks: Array<[string, number]> = [
-    [COUNTERS.task, highest(graph.all("task"), (n) => trailing(n.id))],
+    [COUNTERS.task, highest([...graph.all("task"), ...graph.all("decision")], (n) => trailing(n.id))],
     [COUNTERS.identity, highest(graph.all("user"), (n) => trailing(n.id))],
     [COUNTERS.project, highest(graph.all("project").filter((p) => p.prefix === null), (n) => trailing(n.id))],
   ];

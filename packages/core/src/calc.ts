@@ -74,7 +74,7 @@ export function dependencies(graph: GraphView, task: TaskNode): Array<TaskNode |
   const found: Array<TaskNode | ProjectNode> = [];
   for (const link of graph.out(task, DEPENDS_ON)) {
     const target = graph.node(link.to);
-    if (target && target.kind !== "user") found.push(target);
+    if (target?.kind === "project" || target?.kind === "task") found.push(target);
   }
   return found;
 }
@@ -104,7 +104,7 @@ export function containers(graph: GraphView, task: TaskNode): Array<ProjectNode 
   const found: Array<ProjectNode | TaskNode> = [];
   for (const link of graph.in(task, CONTAINS)) {
     const node = graph.node(link.from);
-    if (node && node.kind !== "user") found.push(node);
+    if (node?.kind === "project" || node?.kind === "task") found.push(node);
   }
   return found;
 }

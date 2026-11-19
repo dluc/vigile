@@ -84,7 +84,7 @@ export function requireVersion(node: Node, version: number, current: () => Summa
 }
 
 export const describe = (node: Node): string =>
-  node.kind === "user" ? `User ${node.username}` : `${node.kind === "task" ? "Task" : "Project"} ${refText(node)}`;
+  node.kind === "user" ? `User ${node.username}` : `${node.kind === "task" ? "Task" : node.kind === "decision" ? "Decision" : "Project"} ${refText(node)}`;
 
 /** Refuses putting work behind a completed task container; reopening stored status must be an explicit change. */
 export function checkContainerAcceptsWork(graph: GraphView, holder: Node): void {
