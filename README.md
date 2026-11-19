@@ -78,6 +78,9 @@ build it and serve it on your machine: `pnpm build && node website/build.mjs && 
   out from planned work.
 - **You want to script it.** Everything an agent can do, a shell script can do
   with `vigile` or with `curl`.
+- **Decisions should not live in a file that nobody reads again.** Record each
+  as an item with a state and its reasons, link it to the work it affects, and
+  it is found from that work.
 
 ## What you get
 
@@ -115,6 +118,9 @@ build it and serve it on your machine: `pnpm build && node website/build.mjs && 
   task went through. Created and completed work is easy to spot, with the time
   from creation to completion in the feed and task details. Filter status
   changes by their previous or new status.
+- **A decision register.** [Decisions](#decisions) are items beside the tasks,
+  proposed, active or withdrawn, each with its reasons, its history and links
+  to what it affects. An instance can offer tasks, decisions or both.
 - **Storage you can trust and move.** A confirmed write survives a power cut. An
   instance is one folder; back it up while the service runs.
 - **No database server, no native module.** It uses the SQLite built into Node.js.
@@ -266,9 +272,78 @@ of these. Over MCP the guide is also offered as resources
 (`vigile://guide/<topic>`) and through three prompts: `plan_work`,
 `pick_up_work` and `report_problem`.
 
+### Decisions
+
+A plan rests on choices as well as work: prices include tax, card numbers are
+never stored. Written in a Markdown file, they hold only as long as everyone
+remembers to read the file. In Vigile a decision is an item of its own beside
+the tasks, with an ID that never changes, a state, its reasons, a history, and
+explicit links to the work it affects.
+
+On the plan from [Trying it without keeping anything](#trying-it-without-keeping-anything):
+
+```bash
+vigile create-decision --project WEB --status active \
+  --title "Prices include tax" \
+  --description "Every price the shop shows includes tax." \
+  --why "A total that grows at checkout loses orders."
+vigile add-link --from WEB-004 --type affects --to WEB-002
+vigile list-decisions --status active
+vigile get --id WEB-002      # the cart page: "is affected by WEB-004"
+vigile update-decision --id WEB-004 --version 2 --status withdrawn
+```
+
+- **A decision says where it stands.** It is created as `proposed`, a choice
+  under consideration, or as `active`, one that was adopted; there is no
+  default. `update_decision` amends its text or changes its state, in any
+  direction, to `withdrawn` when the choice no longer holds. A withdrawn
+  decision stays readable, and `list_decisions` still lists it.
+- **It stands alone.** A decision is in no group, and nothing waits for it. A
+  project named when it is created gives its ID a prefix and nothing more:
+  `WEB-004`, or `004` without one. The number comes from the same counter as a
+  task's. Where the kind has to be said, write `decision:WEB-004`.
+- **What it affects is a link that someone makes.** "affects" goes from a
+  decision to a task, a group or a project, and `get` shows it from both ends.
+  Vigile infers nothing from it: the link is not passed on to the tasks inside
+  a group or a project, it holds no work back, and neither a link nor a change
+  to another item changes a decision's state. Making the link does move the
+  decision's version, which is why the last line above names version 2.
+- **What it said before is kept.** `vigile get --id WEB-004 --history` shows
+  each amendment and each change of state, with who made it and when;
+  `vigile list-history --kind decision` lists them across all decisions.
+  `delete` and `restore` work as for any item.
+
+![The decision register: seven decisions by ID with their state, and below them the chosen one with its text, its rationale, the two tasks it affects and its recent changes](images/decisions.webp)
+
+In the page, "Decisions" in the header opens the register, at
+`/decisions.html`: the decisions by ID, each with its title and state, a
+filter by state, and for the chosen one its text, its rationale, what it
+affects and its recent changes. `/decisions.html#WEB-004` is the address of
+one decision. A task's panel lists the decisions that affect it under "is
+affected by", and following one opens the decision in the panel, which has an
+address too: `/#board/decision:WEB-004`. The page only reads decisions: they
+are recorded and changed over MCP, through the API or from the command line.
+
+![A task open in the panel, with the two decisions that affect it listed first among its links](images/decision-panel.webp)
+
+**Decisions without tasks.** An instance can keep decisions for work that is
+tracked somewhere else:
+
+```bash
+vigile config set features decisions
+```
+
+After a restart it offers the decision operations, with projects for their
+prefixes and as what a decision affects, and no task operation: over MCP, over
+the API and on the command line alike. An agent that connects is told how to
+keep the register, and the page opens on it. `vigile config unset features`
+and a restart bring the tasks back as they were; see
+[Operations](#operations) for the setting.
+
 ### The web page
 
-The page has three views, linked from its header. It is for reading the plan, with
+The page has three views, linked from its header, and beside them a link to the
+[decision register](#decisions). It is for reading the plan, with
 one small steering control: in a task's panel, − and + lower or raise its
 priority by one. The change uses the version the panel read, so another change
 meanwhile is shown as a conflict and never overwritten. Priority affects where
@@ -643,8 +718,8 @@ admin = "vig_..."
 ### Applying a change
 
 - **Users and keys** (`[auth]`) apply at once, without a restart.
-- **Everything else** (`name`, `data_dir`, `log_level`, `[listen]`, `[backup]`)
-  applies when the service starts. Stop it and run `vigile serve` again. Until
+- **Everything else** (`features`, `name`, `data_dir`, `log_level`, `[listen]`,
+  `[backup]`) applies when the service starts. Stop it and run `vigile serve` again. Until
   then, after a change of `name`, `data_dir` or `[listen]`, the commands that
   call the service do not: it is still what it was started as, and no longer
   what the config describes.
@@ -653,7 +728,7 @@ A value that can be checked and fails is never written, and a config that fails
 startup checks does not start the service. If no service runs on the config's
 data, `config set auth.keyless_user` is written unchecked with a warning; the
 service will not start if that user does not exist. For one run, a setting can
-be overridden by an environment variable (`VIGILE_LISTEN_PORT`,
+be overridden by an environment variable (`VIGILE_FEATURES`, `VIGILE_LISTEN_PORT`,
 `VIGILE_LISTEN_ADDRESS`,
 `VIGILE_NAME`, `VIGILE_DATA_DIR`, `VIGILE_LOG_LEVEL`,
 `VIGILE_AUTH_KEYLESS_USER`, `VIGILE_BACKUP_ENABLED`,
@@ -984,7 +1059,8 @@ A project has a prefix of 2 to 8 letters, such as `WEB`. A task's ID is given
 when it is created: the prefix of the project it is created in and a number,
 `WEB-012`; with no such project, the prefix of its parent's ID; otherwise the
 number alone, `012`. It keeps that ID when it is moved. The number comes from
-one counter for the whole instance, so no two tasks share a number. IDs are assigned by the service and never reused: a number is
+one counter for the whole instance, so no two tasks share a number. A
+[decision](#decisions) takes its number from the same counter. IDs are assigned by the service and never reused: a number is
 given once, and so is a prefix. A project that was deleted for good leaves its
 prefix used up, and no later project can have it.
 
@@ -1138,11 +1214,11 @@ act as `admin` unless given `--as <username>`.
 | `vigile list-tasks` | Lists tasks, filtered by project, group, top level, status, type, user or problems. |
 | `vigile list-history` | Lists retained changes newest first; filter by project, group (`--parent`), text (`--text`), item kind, actor, action, previous status (`--status-from`), new status (`--status-to`) or time range, and continue with `--continuation`. |
 | `vigile list-next-tasks` | Lists the tasks that can start now, most important first. |
-| `vigile get` | Reads one project, task or user in full; `--history` adds the recorded changes. A list of more than 100 entries says so and gives the `--continuation` that reads on. |
-| `vigile delete` | Deletes a project, task or user. |
+| `vigile get` | Reads one project, task, decision or user in full; `--history` adds the recorded changes. A list of more than 100 entries says so and gives the `--continuation` that reads on. |
+| `vigile delete` | Deletes a project, task, decision or user. |
 | `vigile restore` | Brings a deleted item back. |
 | `vigile override-timestamp` | For imports: sets when an item was really created, or when a done task was really completed. Checked, and recorded in the history. |
-| `vigile add-link` | Links two items: "contains", "depends on" or "assigned to". |
+| `vigile add-link` | Links two items: "contains", "depends on", "assigned to" or "affects". |
 | `vigile remove-link` | Removes a link. |
 | `vigile list-link-types` | Lists the link types and what each one does. |
 | `vigile list-users` | Lists the users, to find who work can be assigned to, 100 at a time, with the `--continuation` for the next 100. `vigile user list` shows them all. |

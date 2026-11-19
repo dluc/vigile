@@ -26,6 +26,23 @@ What the settings mean in use:
 
 API keys, under `[auth.keys]`, are not settings to set by hand: they are made and removed with [`vigile user`](/docs/cli/#user-add).
 
+## Tasks, decisions or both {#features}
+
+`features` is what the instance offers: `tasks`, `decisions` or both.
+
+- **Left out**, as `config init` leaves it, every feature of the installed version is on, also after an upgrade that brings a new one.
+- **A list** turns on what it names and nothing else. `features = ["decisions"]` makes an instance that keeps decisions for a team whose tasks are elsewhere; `features = ["tasks"]` one without decisions.
+- **An empty list** is refused, and the service does not start with it.
+
+Set it with `vigile config set features decisions`, and name both as `tasks,decisions`; `vigile config unset features` is back to everything. It applies when the service starts.
+
+The MCP tools, the guide, the HTTP API, the commands and the page all follow the setting, and a call to what is off is refused without writing.
+
+- **Decisions alone.** The decision operations, and with them projects, links, history and users. A project gives decisions their prefix and is what an "affects" link can lead to. No operation on tasks is offered, an agent that connects is told how to keep the register, and [the register](/docs/web-page/#decisions) is the home page.
+- **Tasks alone.** No decision operation and no "affects" link type, and the page has no "Decisions".
+
+Turning a feature off deletes nothing: its items and links are kept, out of sight, and are there again when it is turned on.
+
 ## Changing a setting
 
 ```sh terminal=your
@@ -48,7 +65,7 @@ The same check runs when a value is set, when the service starts, and in the doc
 ## When a change applies
 
 - **Users and keys** (`[auth]`) apply at once, without a restart.
-- **Everything else** (`name`, `data_dir`, `log_level`, `[listen]`, `[backup]`) applies when the service starts. Stop it and run `vigile serve` again.
+- **Everything else** (`features`, `name`, `data_dir`, `log_level`, `[listen]`, `[backup]`) applies when the service starts. Stop it and run `vigile serve` again.
 
 Until the restart, after a change of `name`, `data_dir` or `[listen]`, the commands that call the service do not: it is still what it was started as, and no longer what the config describes. The doctor's check "running settings match the config" says when a restart is due.
 

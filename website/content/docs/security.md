@@ -11,7 +11,7 @@ terminals: running
 - **It listens on `127.0.0.1` only.** Any wider exposure is something you choose, by setting `listen.address`.
 - **`admin` always needs its key.** Creating users, resetting keys and the status of the service are for admins only.
 - **Other users need no key.** A connection without one acts as `agent1`, and can read and change the plan. On `127.0.0.1` that is whoever can run a program on your machine.
-- **The page mostly reads.** In a task's panel, the priority −/+ controls call `update_task` as the current browser user. The board, the graph, History and the other panel fields only read.
+- **The page mostly reads.** In a task's panel, the priority −/+ controls call `update_task` as the current browser user. The board, the graph, History, the decision register and the other panel fields only read.
 - **It sends nothing anywhere.** The service makes no connections of its own: no account, no telemetry, no check for updates. The page loads only the files the service serves.
 
 ## Before it faces a network

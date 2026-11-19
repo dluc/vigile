@@ -139,3 +139,4 @@ Before starting it again, look: `vigile doctor` checks the config and the data, 
 - **The page says it lost the service.** It keeps what it had on screen and finds the service again by itself once it answers.
 - **History opens with filters already set.** The browser remembers the filters applied last. "Clear" empties and forgets them.
 - **The graph is not drawn.** A graph of more than 300 items is drawn when asked for: press "Draw the graph".
+- **The page opens on the decision register and has no board, or has no "Decisions".** The instance offers one of the two only. `vigile config show` says which, under `features`: see [Tasks, decisions or both](/docs/configuration/#features).

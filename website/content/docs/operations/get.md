@@ -20,8 +20,9 @@ The item in full: everything a list says of it, and more, by its kind.
 ## Rules
 
 - Deleted items can still be read; they carry `deleted_at`.
-- A bare number can be a project or a task. When it matches both, the call is refused and says how to tell them apart: put the kind in front, as in `task:042`, or give `kind`.
+- A bare number can be a project as well as a task or a decision. When it matches more than one, the call is refused and says how to tell them apart: put the kind in front, as in `task:042`, or give `kind`.
 - A user can be read by its username or by its ID.
+- A [decision](/docs/model/#decisions) is read like any item. Its "affects" links read from both ends: the decision lists what it `affects`, and a task or a project the decisions it `is affected by`.
 - IDs are read without regard to capitals.
 
 ## Errors

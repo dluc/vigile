@@ -1,6 +1,6 @@
 ---
 title: The model
-description: The reference of what a Vigile plan is made of. The kinds of item, the statuses of tasks and projects and the moves between them, the types of task and of user, the link types, IDs and limits.
+description: The reference of what a Vigile plan is made of. The kinds of item, the statuses of tasks, projects and decisions and the moves between them, the types of task and of user, the link types, IDs and limits.
 card: Statuses and moves, types, link types, IDs and limits, for looking things up.
 lead: What a plan is made of, for looking things up. Every table on this page is made from the program: from what `vigile describe` prints, or from what a service did when this site was built.
 ---
@@ -9,7 +9,9 @@ For the ideas, read [The plan as a graph](/how/plan-as-a-graph/) and [Statuses a
 
 ## Kinds of item
 
-A plan holds projects, tasks and users, and links between them. In an ID or a reference the kind can be put in front: `project:042`, `task:042`, `user:agent1`.
+A plan holds projects, tasks, decisions and users, and links between them. In an ID or a reference the kind can be put in front: `project:042`, `task:042`, `decision:043`, `user:agent1`.
+
+Which of them an instance offers is [a setting](/docs/configuration/#features): tasks, decisions or both.
 
 ## Fields of a task
 
@@ -42,6 +44,18 @@ Besides the table, a move to `in_progress` or `done` is refused while something 
 
 Any move between them is allowed, other than to the status the project already has.
 
+## Decisions {#decisions}
+
+A decision has a `title`, the decision as one statement; a `description`, what is decided and what follows from it, which is required and never empty; optionally `why`, the reasons and what was ruled out; and a `status`:
+
+- `proposed`: a choice under consideration.
+- `active`: a choice that was adopted and is stood by.
+- `withdrawn`: no longer considered or stood by. It stays readable, and [`list_decisions`](/docs/operations/list-decisions/) returns it.
+
+[`create_decision`](/docs/operations/create-decision/) takes `proposed` or `active` and has no default. [`update_decision`](/docs/operations/update-decision/) moves a decision between the three in any direction. Nothing else changes its status: no link, and no change to another item.
+
+A decision is in no group, and nothing depends on it. The project named when it is created gives its ID a prefix, and nothing more. What it affects is said by "affects" links, below.
+
 ## Types of task
 
 {{task-types}}
@@ -51,6 +65,8 @@ Any move between them is allowed, other than to the status the project already h
 {{link-types}}
 
 Either name of a type works when adding or removing a link; with the reverse name the two ends are swapped. A link is stored once.
+
+An instance has the link types of [the features it offers](/docs/configuration/#features): "affects" with decisions, the other three with tasks. Set up for decisions alone, "affects" goes from a decision to a project.
 
 ## What is worked out {#what-is-worked-out}
 
@@ -82,12 +98,13 @@ A username has lowercase letters, digits, "-" and "_", starts with a letter, and
 |---|---|---|
 | Project | Its prefix: 2 to 8 letters. Without a prefix, a number | `WEB` |
 | Task | {{=ids.rule}} | `WEB-012`, `012` |
+| Decision | As a task's, with the prefix of the project it was created with, if any | `WEB-013`, `013` |
 | User | `USER-` and a number | `USER-004` |
 
 {{task-ids}}
 
 - IDs are given by the service. Numbers have at least three digits.
-- Task numbers come from one counter for the whole instance, so no two tasks share a number.
+- Task and decision numbers come from one counter for the whole instance, so no two of them share a number.
 - A number is given once, and so is a prefix, also after its project was deleted for good.
 - IDs are read without regard to capitals: `web-12` finds `WEB-012`.
 

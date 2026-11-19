@@ -1,7 +1,7 @@
 ---
 title: Vigile
 nav: Overview
-description: Vigile is a planning and coordination layer for people and AI agents. One graph of the work, changed only through checked operations, that every person and agent works from. Today a self-hosted service over MCP, HTTP and the command line, with a board, a graph and a history of changes.
+description: Vigile is a planning and coordination layer for people and AI agents. One graph of the work, changed only through checked operations, that every person and agent works from. Today a self-hosted service over MCP, HTTP and the command line, with a board, a graph, a history of changes and a register of decisions.
 layout: home
 terminals: fresh
 ---
@@ -16,7 +16,7 @@ terminals: fresh
 <article id="today" data-horizon="today">
 <p class="tag">Use today</p>
 <h2>One service, on your machine</h2>
-<p>For coordinating several agents and people. MCP, HTTP, a command line, a board, a graph and a history; quiet claims and automatic backups. Version {{=version}}: no TLS, no access by team.</p>
+<p>For coordinating several agents and people. MCP, HTTP, a command line, a board, a graph, a history, a decision register; quiet claims and automatic backups. Version {{=version}}: no TLS, no access by team.</p>
 <p class="links"><a href="#start">Try it</a><a href="#why">What it does</a><a href="#limits">Limits</a></p>
 </article>
 <article id="direction" data-horizon="direction">
@@ -96,7 +96,7 @@ terminals: fresh
 <ul class="also">
 <li><h3>Groups, as deep as the work</h3><p>A task that contains tasks is a group, and reports how far along it is. <a href="/how/plan-as-a-graph/#groups">Groups</a></p></li>
 <li><h3>Contradictions are flagged</h3><p>Reopen a dependency after the work that needed it went on, and the task and its project say so. <a href="/how/problems/">Problems</a></p></li>
-<li><h3>Who changed what, and when</h3><p>A task and a project keep what was done to them and each status they went through. <a href="/how/versions-and-history/#history">History</a></p></li>
+<li><h3>Decisions and history, kept with the work</h3><p>A decision has its reasons and a state, and is listed on the work it affects. Every item keeps its history. <a href="/how/plan-as-a-graph/#decisions">Decisions</a><a href="/how/versions-and-history/#history">History</a></p></li>
 <li><h3>A board, a graph and a history</h3><p>Zoom the board into a project or through nested groups, filter it, read who changed what across the plan, inspect an item and adjust task priority. Every view, selection, item and zoom has an address. <a href="/docs/web-page/">The web page</a></p></li>
 </ul>
 <div class="pair">

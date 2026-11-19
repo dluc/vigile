@@ -1691,6 +1691,10 @@ describe("the web site", () => {
       // Decisions and history stay with the task.
       const full = await call("get", { id: here.id, history: true });
       assert.ok(typeof full.description === "string" && Object.hasOwn(full, "why") && full.history[0].by === "agent1" && full.timeline.length > 0);
+      // A decision that affects the task is listed on it, with its state.
+      const decision = await call("create_decision", { title: "Prices include tax", description: "Every price the shop shows includes tax.", status: "active" });
+      await call("add_link", { from: decision.id, type: "affects", to: here.id });
+      assert.deepEqual((await call("get", { id: here.id })).links["is affected by"].map((one) => [one.id, one.status]), [[decision.id, "active"]]);
       // The loop, where the page says it is taught.
       const routine = guide("working").text;
       for (const step of ["list_next_tasks lists what can start now, following priorities from the outermost group to the task", "get shows the task in full: its description, its reason, its links and its version", "in_progress when implementation really starts", "Set done only when the outcome is shipped and verified", "## Keep the plan true"]) assert.ok(routine.includes(step), `the guide teaches: ${step}`);
@@ -1705,7 +1709,7 @@ describe("the web site", () => {
       assert.equal(described.users.types.length, 3);
       // And the page says these things in the rows it marks as today.
       const today = markedIn(mainOf("vision/")).filter((mark) => mark.horizon === "today").map((mark) => mark.text).join(" ");
-      for (const said of ["read the plan from the top, ask what is next, read the task and its version, start only when the work starts, keep statuses and structure true, finish when the work is shown to work", "list_next_tasks answers from each task's priority, its dependencies and who has it", "Users of three types", "a second store already meets", "The description, the reason, each status and who changed what stay with the task"]) assert.ok(today.includes(said), `said as today: ${said}`);
+      for (const said of ["read the plan from the top, ask what is next, read the task and its version, start only when the work starts, keep statuses and structure true, finish when the work is shown to work", "list_next_tasks answers from each task's priority, its dependencies and who has it", "Users of three types", "a second store already meets", "The description, the reason, each status, who changed what and the decisions affecting it stay with the task"]) assert.ok(today.includes(said), `said as today: ${said}`);
     }
   });
 

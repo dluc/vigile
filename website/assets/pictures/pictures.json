@@ -114,6 +114,32 @@
       "dark"
     ]
   },
+  "decisions": {
+    "kind": "window",
+    "width": 1180,
+    "height": 1139,
+    "widths": [
+      590,
+      1180
+    ],
+    "schemes": [
+      "light",
+      "dark"
+    ]
+  },
+  "decision-panel": {
+    "kind": "window",
+    "width": 1180,
+    "height": 900,
+    "widths": [
+      590,
+      1180
+    ],
+    "schemes": [
+      "light",
+      "dark"
+    ]
+  },
   "problem": {
     "kind": "window",
     "width": 1180,

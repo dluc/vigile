@@ -64,7 +64,7 @@ An error does not always mean that nothing was changed. After {{=errors.unchange
 | Endpoint | Answers | Needs |
 |---|---|---|
 | `GET /health` | `{"status": "ok", "name", "version"}`: that a Vigile service is here, which instance and which version | nothing, never a key |
-| `GET /api/instance` | The instance's `name` and `version`, and under `you` who the request acts as: `username`, `type`, and whether no key was needed | to be let in |
+| `GET /api/instance` | The instance's `name` and `version`, the `features` it offers, and under `you` who the request acts as: `username`, `type`, and whether no key was needed | to be let in |
 | `GET /api/operations` | The operations the caller may call, each with its `name`, `path`, `kind` (read or write), `access`, `description` and the JSON Schema of its `input` | to be let in |
 | `GET /api/events` | The stream of changes, below | to be let in |
 | `GET /api/admin/status` | Details of the running service, for the doctor: process, uptime, settings with keys masked, counts, and what a check of the graph found | an admin |

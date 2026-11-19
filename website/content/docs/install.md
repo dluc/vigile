@@ -164,9 +164,12 @@ pnpm build
 
 A running service goes on running the code it was started with. The doctor says so: its check "service runs the code on disk" fails until the service is restarted.
 
+A version that brings a new feature, as [decisions](/how/plan-as-a-graph/#decisions) were, turns it on for an instance whose config does not name its `features`. One that names them keeps what it names: see [Tasks, decisions or both](/docs/configuration/#features).
+
 ## Next
 
 - [Several agents, each with its own user and key](/docs/mcp/#several-agents).
 - [Before the service faces a network](/docs/security/#before-it-faces-a-network).
 - [Backups](/docs/storage/#backups).
+- [Decisions](/how/plan-as-a-graph/#decisions): keep the choices behind the work in the plan, or run an instance for them alone.
 - [How it works](/how/), if you have not read it.
