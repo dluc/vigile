@@ -1238,8 +1238,17 @@ function comeBack() {
     history.replaceState({ ...(history.state ?? {}), historyFilters: route.historyFilters, historyFiltersSnapshot: true }, "", routeOf(route.view, route.open, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters));
     rememberHistoryFilters(route.historyFilters);
   }
-  Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, trail: history.state?.trail ?? [], project: route.project ?? kept.project ?? null, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
+  Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, trail: trailOf(), project: route.project ?? kept.project ?? null, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
 }
+
+/** Whether this instance offers the kind of an item. Until the instance has answered, nothing is ruled out. */
+const offered = (item) => item.kind !== "decision" || !state.instance || state.instance.features?.includes("decisions") === true;
+
+/**
+ * The items the panel came through, as the entry in the browser's history keeps them, from after the last one
+ * of a feature that is switched off: "back" names an item only when every step back to it can still be read.
+ */
+const trailOf = (trail = history.state?.trail ?? []) => trail.slice(trail.findLastIndex((item) => !offered(item)) + 1);
 
 /** Shows what the address says: called when it changes, by this page or by Back and Forward. */
 function applyRoute() {
@@ -1276,7 +1285,7 @@ function applyRoute() {
   if (route.view === "history" && (viewChanged || historyChanged)) syncHistoryControls();
   state.group = route.into.at(-1) ?? null;
   // The items the panel came through have titles: locked out, they stay with the entry and out of the page.
-  state.trail = locked ? [] : (history.state?.trail ?? []);
+  state.trail = locked ? [] : trailOf();
   // The address may name a group that is not there: once the plan is known, it is put right.
   if (state.loadedAt && !locked) settleZoom();
   if (route.view === "history" && (viewChanged || projectChanged || historyChanged)) {
@@ -1287,6 +1296,15 @@ function applyRoute() {
   if (viewChanged || zoomChanged || projectChanged || historyChanged) render();
   if ((zoomChanged || projectChanged) && state.loadedAt && !locked) sayZoom();
   if (!route.open) return hidePanel();
+  // The address names an item of a feature that was off when the instance last answered. It may have been
+  // started again since, so it is asked first: the refresh opens the item, or takes it out of the address.
+  if (!offered(route.open)) {
+    hidePanel();
+    $("detail").replaceChildren();
+    state.open = route.open;
+    void refresh();
+    return;
+  }
   const reopen = !sameItem(route.open, state.open) || $("panel").hidden;
   if (priorityWork && !sameItem(route.open, { kind: "task", id: priorityWork.id })) priorityWork.pending = 0;
   priorityWork = route.open.kind === "task" ? (priorityWorkers.get(taskIdentity(route.open.id)) ?? null) : null;
@@ -1440,7 +1458,7 @@ async function readOn(item, where, had) {
   if (!part) return null;
   const [field, name] = listAt(where);
   const shown = name === undefined ? (item[field] ?? []) : Object.hasOwn(item.links, name) ? item.links[name] : [];
-  const list = describeItemList({ kind: item.kind, id: item.id }, name === undefined ? [field] : ["links", name]);
+  const list = describeItemList(item, name === undefined ? [field] : ["links", name]);
   let page;
   let read;
   let on;
@@ -3022,7 +3040,13 @@ async function refresh() {
   try {
     const session = sessions;
     let turn = ++readings;
-    const [instance, projects, firstTasks] = await Promise.all([api("instance"), all("list-projects", "projects"), all("list-tasks", "tasks")]);
+    const instance = await api("instance");
+    if (session !== sessions) return;
+    if (instance.features && !instance.features.includes("tasks")) {
+      location.replace("/decisions.html");
+      return;
+    }
+    const [projects, firstTasks] = await Promise.all([all("list-projects", "projects"), all("list-tasks", "tasks")]);
     // An empty plan is valid, but losing every task for one successful-looking reading is also the most damaging
     // transient answer the page can draw: it looks exactly like lost data. Confirm that boundary before replacing
     // a populated board. The second ordinary reading also lets the page recover immediately without a reload.
@@ -3037,7 +3061,8 @@ async function refresh() {
     // credential and route from before that lockout and may restore neither the plan nor its hidden address.
     if (session !== sessions) return;
     // Redraw only when something changed, so a refresh never swaps a card out from under a click.
-    const snapshot = JSON.stringify([projects, tasks]);
+    // The same task summaries can have different visible detail links after a profile change.
+    const snapshot = JSON.stringify([instance.features, projects, tasks]);
     const changed = snapshot !== state.snapshot;
     Object.assign(state, { instance, projects, tasks, snapshot, byId: new Map(tasks.map((t) => [t.id, t])), failed: false });
     // The successful read is the gate back in: only now may the kept address and its filters be restored.
@@ -3049,9 +3074,21 @@ async function refresh() {
       state.projectZoom = false;
       history.replaceState(history.state, "", routeOf(state.view, readRoute().open, state.zoom, state.into, null, false));
     }
+    // What belongs to a feature this instance no longer offers goes from the page. An open decision loses its
+    // panel and its address: the read that would follow is refused, and a refused read keeps what the panel
+    // showed before. An item that was reached through a decision loses the way back to it.
+    if (state.open && !offered(state.open)) {
+      hidePanel();
+      $("detail").replaceChildren();
+      history.replaceState({ ...(history.state ?? {}), trail: [] }, "", routeOf(state.view, null, state.zoom, state.into, state.project, state.projectZoom));
+    } else if (state.trail.some((item) => !offered(item))) {
+      state.trail = trailOf(state.trail);
+      history.replaceState({ ...(history.state ?? {}), trail: state.trail }, "", location.hash);
+    }
     // A group the board was in may be gone, or no longer hold the one after it in the trail.
     const left = settleZoom();
     $("instance").textContent = instance.name ?? "";
+    $("view-decisions").hidden = !instance.features?.includes("decisions");
     if (!state.open) document.title = instance.name ? `${instance.name} · Vigile` : "Vigile";
     $("you").textContent = `${instance.you.username}${instance.you.keyless ? " (no key)" : ""}`;
     state.failed = false;
@@ -4232,7 +4269,7 @@ document.addEventListener("visibilitychange", () => !locked && (auto || state.fa
       history.replaceState({ ...(history.state ?? {}), historyFilters: route.historyFilters, historyFiltersSnapshot: true }, "", canonical);
     }
   }
-  Object.assign(state, { view: route.view, open: route.open, trail: history.state?.trail ?? [], zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, project: route.project, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
+  Object.assign(state, { view: route.view, open: route.open, trail: trailOf(), zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, project: route.project, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
   linkViews();
 }
 if (locked) showKeyForm("Reconnect to restore your last view.");

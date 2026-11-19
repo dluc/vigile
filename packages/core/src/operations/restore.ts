@@ -17,7 +17,7 @@ export const restore = defineWrite({
     id: z.string().describe("The item's ID, or a username for a user."),
   }),
   run(ctx, input) {
-    const node = resolveRef(ctx.graph, input.id, input.kind ? [input.kind] : KINDS);
+    const node = resolveRef(ctx.graph, input.id, (input.kind ? [input.kind] : KINDS).filter(k => ctx.features.kind(k)));
     if (node.kind === "user" && ctx.caller.type !== "admin") throw forbidden("Only an admin can restore users.", ["Ask an admin to restore this user."]);
     if (isLive(node)) throw refused("not_deleted", `${describe(node)} is not deleted.`, {
       actions: [`Call get with kind "${node.kind}" and id "${node.id}" to read it; no restore is needed.`],
@@ -34,7 +34,7 @@ export const restore = defineWrite({
           throw afterStored(`User ${node.username} was restored. The key it had before no longer counts for it, but could not be removed from where keys are kept.`, [`Call reset_user_key for ${node.username}: it needs a new key in any case, and that replaces what was left behind.`], error);
         });
       }
-      return summary(ctx.graph, ctx.graph.node(node)!);
+      return summary(ctx.features.view(ctx.graph), ctx.graph.node(node)!);
     };
   },
 });

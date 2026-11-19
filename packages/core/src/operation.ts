@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { HistoryFeedPage, HistoryFeedPageRequest } from "@vigile/storage";
 import type { GraphView } from "./graph.js";
+import type { FeatureSelection } from "./features.js";
 import { RETIRED_PREFIX, type CounterName, type Link, type Node, type Ref, type StatusEntry, type UserNode, type UserType } from "./model.js";
 
 export interface Clock {
@@ -55,6 +56,7 @@ export interface TimelinePage {
 }
 
 export interface ReadContext {
+  readonly features: FeatureSelection;
   /**
    * The plan as the engine has it at the moment this is asked. A read that waits for the store asks again after
    * waiting, or holds on to one graph and checks afterwards that it is still this one: the engine puts another

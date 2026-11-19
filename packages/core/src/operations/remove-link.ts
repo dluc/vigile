@@ -14,7 +14,7 @@ export const removeLink = defineWrite({
     to: z.string().describe("The ID of the item the link points at; a username works for a user."),
   }),
   run(ctx, input) {
-    const { linkType, from, to } = resolveLink(ctx.graph, input);
+    const { linkType, from, to } = resolveLink(ctx.graph, input, ctx.features);
     const link = ctx.graph.findLink({ from, type: linkType.type, to });
     if (!link) {
       throw notFound(`There is no "${linkType.type}" link from ${describe(from)} to ${describe(to)}.`, [

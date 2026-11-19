@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ConfigError, checkUsers, isTooOpen, loadConfig, masked, samePlace as sameAs, unknownEnvironment, type LoadedConfig } from "@vigile/config";
-import { OPERATIONS, VERSION } from "@vigile/core";
+import { FEATURES, FeatureSelection, OPERATIONS, VERSION, type Feature } from "@vigile/core";
 import { FORMAT_VERSION } from "@vigile/storage";
 import { folderIsHeld, inspectTenantFile, tenantFiles } from "@vigile/storage-sqlite";
 import { UsageError, configPath, flag, type Args } from "../args.js";
@@ -571,11 +571,15 @@ export async function doctor(args: Args, ui: Ui, answerWithinMs = ANSWER_WITHIN_
           await mcp.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { fetch: unredirected, requestInit: { headers: { authorization: `Bearer ${config.auth.keys.admin}` }, redirect: "manual" } }), { timeout: answerWithinMs });
           const listed: unknown = await mcp.listTools(undefined, { timeout: answerWithinMs });
           const tools = isRecord(listed) && Array.isArray(listed.tools) ? listed.tools.length : -1;
+          const enabled = status.settings?.features;
+          if (enabled !== undefined && (!Array.isArray(enabled) || !enabled.every(f => FEATURES.includes(f)))) throw new NotVigile('"settings.features" is not a list of supported features');
+          const selection = new FeatureSelection(enabled as Feature[] | undefined);
+          const expected = OPERATIONS.filter(o => selection.operation(o.name)).length;
           add({
             section: "Service",
-            level: tools === OPERATIONS.length ? "ok" : "fail",
+            level: tools === expected ? "ok" : "fail",
             title: "MCP endpoint answers",
-            detail: tools < 0 ? `${base}/mcp did not answer with a list of tools` : `${base}/mcp lists ${plural(tools, "tool")}${tools === OPERATIONS.length ? "" : `, expected ${OPERATIONS.length}`}`,
+            detail: tools < 0 ? `${base}/mcp did not answer with a list of tools` : `${base}/mcp lists ${plural(tools, "tool")}${tools === expected ? "" : `, expected ${expected}`}`,
             fix: "The service and this CLI are different versions; restart the service.",
           });
         } catch (error) {

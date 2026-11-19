@@ -21,7 +21,7 @@ export const AS: BuiltinOption = { name: "as", value: "username", text: "act as 
 
 const firstSentence = (text: string): string => text.split(/(?<=[.:])\s/)[0]!.replace(/[.:]$/, "");
 
-const operationCalled = (name: string): Operation | undefined => OPERATIONS.find((o) => toHyphens(o.name) === name || o.name === name);
+const operationCalled = (name: string, operations: readonly Operation[]): Operation | undefined => operations.find((o) => toHyphens(o.name) === name || o.name === name);
 
 /** A command as JSON says it: what it is called, how, what it does, and each of its options. */
 const builtinAsJson = (builtin: Builtin) => ({
@@ -54,9 +54,9 @@ function options(ui: Ui, list: readonly BuiltinOption[], indent: string, size = 
  * name of a command is refused too, unless the help was asked of the command itself with `--help`: there it is
  * what the command was given, as in `vigile config set name main --help`, and is not looked at.
  */
-export function help(ui: Ui, topic: string[] = [], json = false, ofItself = false): void {
+export function help(ui: Ui, topic: string[] = [], json = false, ofItself = false, operations: readonly Operation[] = OPERATIONS): void {
   const [first, second] = topic;
-  if (first === undefined) return json ? ui.out(JSON.stringify(everythingAsJson(), null, 2)) : everything(ui);
+  if (first === undefined) return json ? ui.out(JSON.stringify(everythingAsJson(operations), null, 2)) : everything(ui, operations);
   /** Ends the reading of the topic: `name` is a command, and `further` is what was typed after it. */
   const nothingAfter = (name: string, further: string[]): void => {
     if (further.length && !ofItself) throw new UsageError(`Unexpected "${further[0]}" after "help ${name}".`, [`The help of this command: vigile help ${name}`, "The commands there are: vigile help"]);
@@ -64,7 +64,7 @@ export function help(ui: Ui, topic: string[] = [], json = false, ofItself = fals
   // `vigile help help` asks for the help itself, which is the help of everything.
   if (first === "help" && !ofItself) {
     nothingAfter("help", topic.slice(1));
-    return help(ui, [], json);
+    return help(ui, [], json, false, operations);
   }
 
   const under = builtinsUnder(first);
@@ -93,7 +93,7 @@ export function help(ui: Ui, topic: string[] = [], json = false, ofItself = fals
     return;
   }
 
-  const operation = operationCalled(first);
+  const operation = operationCalled(first, operations);
   if (operation) {
     nothingAfter(toHyphens(operation.name), topic.slice(1));
     if (json) return ui.out(JSON.stringify({ commands: [operationAsJson(operation)], everywhere: EVERYWHERE.map(optionAsJson) }, null, 2));
@@ -112,19 +112,19 @@ export function help(ui: Ui, topic: string[] = [], json = false, ofItself = fals
   throw new UsageError(`There is no command called "${first}".`, ["Run: vigile help"]);
 }
 
-const everythingAsJson = () => ({
+const everythingAsJson = (operations: readonly Operation[]) => ({
   version: VERSION,
-  commands: [...BUILTINS.map(builtinAsJson), ...OPERATIONS.map(operationAsJson)],
+  commands: [...BUILTINS.map(builtinAsJson), ...operations.map(operationAsJson)],
   everywhere: EVERYWHERE.map(optionAsJson),
 });
 
 /** How a built-in command stands in the list of all commands: its name and the words it takes. */
 const listed = (builtin: Builtin): string => [builtin.name, ...builtin.words.map((word) => `<${word.name}>`)].join(" ");
 
-function everything(ui: Ui): void {
+function everything(ui: Ui, operations: readonly Operation[]): void {
   ui.out();
   ui.out(`  ${bold(ui, "vigile")} ${dim(ui, VERSION)}  ${dim(ui, "a shared plan for people and AI agents")}`);
-  const size = Math.max(...BUILTINS.map((builtin) => listed(builtin).length), ...OPERATIONS.map((o) => o.name.length));
+  const size = Math.max(...BUILTINS.map((builtin) => listed(builtin).length), ...operations.map((o) => o.name.length));
   for (const group of ["Run", "Set up"] as const) {
     ui.out();
     ui.out(`  ${bold(ui, group)}`);
@@ -132,7 +132,7 @@ function everything(ui: Ui): void {
   }
   ui.out();
   ui.out(`  ${bold(ui, "Work with the plan")}  ${dim(ui, "the same operations as the MCP tools and the HTTP API")}`);
-  for (const o of OPERATIONS) ui.out(`    ${accent(ui, pad(toHyphens(o.name), size))}  ${dim(ui, firstSentence(o.description))}`);
+  for (const o of operations) ui.out(`    ${accent(ui, pad(toHyphens(o.name), size))}  ${dim(ui, firstSentence(o.description))}`);
   options(ui, [AS], "    ", size);
   ui.out();
   ui.out(`  ${bold(ui, "Everywhere")}`);

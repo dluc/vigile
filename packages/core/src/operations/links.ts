@@ -2,7 +2,7 @@ import { echo, invalidInput } from "../errors.js";
 import type { GraphView } from "../graph.js";
 import { refText } from "../ids.js";
 import { sameRef } from "../graph.js";
-import { CONTAINS, LINK_TYPES, findLinkType, type LinkType } from "../link-types.js";
+import { CONTAINS, findLinkType, type LinkType } from "../link-types.js";
 import type { Link, Node, Ref } from "../model.js";
 import type { WriteContext } from "../operation.js";
 import { resolveRef } from "../rules.js";
@@ -18,15 +18,17 @@ export interface LinkEnds {
  * Works out the link a client means. Either name of a type is accepted; with the reverse name the two ends
  * are swapped, so every link has exactly one stored form.
  */
-export function resolveLink(graph: GraphView, input: { from: string; type: string; to: string }): LinkEnds {
+export function resolveLink(graph: GraphView, input: { from: string; type: string; to: string }, features: WriteContext["features"]): LinkEnds {
   const found = findLinkType(input.type);
-  if (!found) {
+  const available = features.links();
+  const linkType = available.find(t => t.type === found?.linkType.type);
+  if (!found || !linkType) {
     throw invalidInput(`"${echo(input.type)}" is not a link type.`, [
-      `Use one of: ${LINK_TYPES.map((t) => `"${t.type}" (or its reverse, "${t.reverse}")`).join(", ")}.`,
+      `Use one of: ${available.map((t) => `"${t.type}" (or its reverse, "${t.reverse}")`).join(", ")}.`,
       "Call list_link_types to see what each one connects and does.",
     ]);
   }
-  const { linkType, reversed } = found;
+  const { reversed } = found;
   const [fromInput, toInput] = reversed ? [input.to, input.from] : [input.from, input.to];
   return {
     linkType,

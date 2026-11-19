@@ -191,7 +191,9 @@ export function questionOfList(operation: string, input: Record<string, unknown>
 export type At = readonly ["links", string] | readonly ["timeline"] | readonly ["history"];
 
 /** The question of one of an item's lists: the item, by its kind and its ID as it is stored, and where the list stands. */
-export const itemListQuestion = (item: { kind: string; id: string }, at: At): unknown => ["get", item.kind, item.id, ...at];
+type PagedItem = { kind: string; id: string; feature_profile?: string };
+/** An unrestricted instance retains the original token form. Restricted projections are distinct lists. */
+export const itemListQuestion = (item: PagedItem, at: At): unknown => ["get", item.kind, item.id, ...at, ...(item.feature_profile ? ["features", item.feature_profile] : [])];
 
 /* What a list is: everything that making, reading and following its tokens goes by. */
 
@@ -323,7 +325,7 @@ export function describeList<O extends PagedOperation>(operation: O, input: Reco
 }
 
 /** One of the lists of an item that `get` returns in pages: its links under one name, its timeline, its history. They are the same for whoever asks. */
-export function describeItemList<A extends At>(item: { kind: string; id: string }, at: A): ListDescriptor<Parameters<(typeof ORDERS)[A[0]]["compare"]>[0]> {
+export function describeItemList<A extends At>(item: PagedItem, at: A): ListDescriptor<Parameters<(typeof ORDERS)[A[0]]["compare"]>[0]> {
   return { ...ORDERS[at[0]], question: itemListQuestion(item, at), owner: NOBODY } as ListDescriptor;
 }
 

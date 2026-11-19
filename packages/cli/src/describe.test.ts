@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { SETTINGS, configSchema } from "@vigile/config";
-import { ERROR_CODES, GUIDE_TOPICS, LINK_TYPES, OPERATIONS, PROBLEM_CODES, PROJECT_STATUSES, RULES, TASK_MOVES, TASK_STATUSES, VERSION, guide, httpStatus } from "@vigile/core";
+import { ERROR_CODES, FeatureSelection, GUIDE_TOPICS, LINK_TYPES, OPERATIONS, PROBLEM_CODES, PROJECT_STATUSES, RULES, TASK_MOVES, TASK_STATUSES, VERSION, instanceGuide, httpStatus } from "@vigile/core";
 import { INSTRUCTIONS } from "@vigile/mcp";
 import { COMMAND_LINE_CODES } from "./codes.js";
 import { BUILTINS, EVERYWHERE, calledAs } from "./commands/builtin.js";
@@ -162,7 +162,7 @@ describe("vigile describe", () => {
     const described = description();
     assert.deepEqual([described.tasks.statuses, described.tasks.moves, described.projects.statuses, described.link_types], [TASK_STATUSES, TASK_MOVES, PROJECT_STATUSES, LINK_TYPES]);
     for (const status of [...described.tasks.finished]) assert.ok(TASK_STATUSES.includes(status));
-    assert.deepEqual(described.guide.topics, GUIDE_TOPICS.map((topic) => guide(topic)));
+    assert.deepEqual(described.guide.topics, GUIDE_TOPICS.map((topic) => instanceGuide(new FeatureSelection(), topic)));
     assert.equal(described.mcp.instructions, INSTRUCTIONS);
     assert.deepEqual(described.mcp.prompts.map((prompt) => prompt.name), ["plan_work", "pick_up_work", "report_problem"]);
     for (const [group, limits] of Object.entries(described.limits)) {

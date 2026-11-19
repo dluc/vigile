@@ -58,6 +58,7 @@ describe("validation", () => {
   it("fills in defaults", () => {
     const config = validateConfig({ auth: { keys: { admin: KEY } } });
     assert.deepEqual(config, {
+      features: ["tasks", "decisions"],
       name: "vigile",
       data_dir: "data",
       log_level: "info",

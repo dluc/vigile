@@ -22,7 +22,8 @@ import {
   TASK_TYPES,
   USER_TYPES,
   VERSION,
-  guide,
+  FeatureSelection,
+  instanceGuide,
   httpStatus,
   toHyphens,
 } from "@vigile/core";
@@ -140,7 +141,7 @@ export function description() {
     link_types: LINK_TYPES,
     reserved_prefixes: RESERVED_PREFIXES,
     limits: { plan: members(PLAN_LIMITS), service: members(SERVICE_LIMITS), api: { body_bytes: MAX_BODY }, mcp: members(MCP_LIMITS) },
-    guide: { topics: GUIDE_TOPICS.map((topic) => guide(topic)), examples: GUIDE_EXAMPLES },
+    guide: { topics: GUIDE_TOPICS.map((topic) => instanceGuide(new FeatureSelection(), topic)), examples: GUIDE_EXAMPLES },
     mcp: {
       instructions: INSTRUCTIONS,
       prompts: PROMPTS.map(({ name, title, description, argument }) => ({ name, title, description, argument })),

@@ -65,6 +65,7 @@ export interface HistoryPlace {
 }
 
 export interface HistoryPageRequest {
+  excludeKind?: string;
   /** Only entries before this one. */
   before?: HistoryPlace;
   limit: number;
@@ -81,6 +82,8 @@ export interface HistoryPage {
 
 /** Filters for the tenant-wide History feed. Project membership follows current containment links. */
 export interface HistoryFeedFilters {
+  /** Exclude disabled item kinds before counting and paging. */
+  excludeKind?: string;
   /** A stored project ID; includes that project's events and events for items it contains. */
   project?: string;
   /** A stored task ID; includes events for its current contents at any depth, not the group itself. */
@@ -98,6 +101,13 @@ export interface HistoryFeedFilters {
   /** Inclusive ISO timestamp bounds. */
   from?: string;
   to?: string;
+}
+
+/** Link events are recorded on both ends. Retain the same visible relationships in historical reads
+ * as on the graph, including after an endpoint was permanently removed. Numbered project refs are qualified. */
+export function visibleLinkHistory(excluded: string, type: unknown, to: unknown): boolean {
+  if (type === "affects") return excluded !== "decision" && (excluded !== "task" || (typeof to === "string" && /^(?:[A-Z]{2,8}|project:\d+)$/.test(to)));
+  return excluded !== "task" || !["contains", "depends on", "assigned to"].includes(String(type));
 }
 
 export interface HistoryFeedPageRequest extends HistoryFeedFilters {

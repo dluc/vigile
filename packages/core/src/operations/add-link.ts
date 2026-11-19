@@ -14,7 +14,7 @@ export const addLink = defineWrite({
     to: z.string().describe("The ID of the item the link points at; a username works for a user."),
   }),
   run(ctx, input) {
-    const { linkType, from, to } = resolveLink(ctx.graph, input);
+    const { linkType, from, to } = resolveLink(ctx.graph, input, ctx.features);
     const link = newLink(ctx, from, linkType.type, to);
     const existing = ctx.graph.findLink(link);
     if (existing) return () => ({ created: false, link: linkView(existing) });

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { connect as openSocket, createServer } from "node:net";
@@ -119,6 +121,97 @@ it("keeps standalone decisions across interfaces and restarts without making the
       assert.deepEqual(reopened.engine.checkConsistency(), []);
     } finally { await reopened.stop(); }
   } finally { await client.close(); await instance.stop(); }
+});
+
+it("serves a decisions-only instance without advertising or dispatching task tools", async () => {
+  const instance = await start({ VIGILE_FEATURES: "decisions" });
+  const client = await connect(instance);
+  try {
+    const tools = (await client.listTools()).tools.map(t => t.name);
+    assert.ok(tools.includes("create_decision") && tools.includes("get_guide"));
+    assert.ok(!tools.includes("list_tasks") && !tools.includes("create_task"));
+    assert.ok(!(await client.listResources()).resources.some(r => r.description?.includes("nested groups")));
+    assert.doesNotMatch(client.getInstructions()!, /list_next_tasks|set_task_status/);
+    const guide = payload(await client.callTool({ name:"get_guide", arguments:{topic:"examples"} }));
+    for (const line of guide.text.split("\n")) {
+      const split = line.indexOf(" ");
+      assert.equal((await client.callTool({name:line.slice(0,split), arguments:JSON.parse(line.slice(split+1))})).isError, undefined);
+    }
+    assert.equal((await instance.call("/api/list-decisions", {})).body.decisions.length, 1);
+    const before = instance.service.engine.currentRevision;
+    assert.equal((await instance.call("/api/create-task", {title:"Unavailable", description:"A task"})).status, 404);
+    assert.equal((await client.callTool({name:"create_task",arguments:{title:"Unavailable",description:"A task"}})).isError, true);
+    assert.equal(instance.service.engine.currentRevision,before);
+    const html = await (await fetch(instance.service.urls.base)).text();
+    assert.match(html,/Decision register/); assert.doesNotMatch(html,/src="\/app.js"/);
+  } finally { await client.close(); await instance.stop(); }
+});
+
+it("omits decision tools and guidance when explicitly configured for tasks", async () => {
+  const instance = await start({ VIGILE_FEATURES: "tasks" });
+  const client = await connect(instance);
+  try {
+    assert.ok(!(await client.listTools()).tools.some(t => t.name.includes("decision")));
+    assert.doesNotMatch(client.getInstructions()!, /create_decision|update_decision/);
+    assert.doesNotMatch(payload(await client.callTool({ name:"get_guide", arguments:{} })).text,/create_decision|update_decision/);
+    assert.equal((await instance.call("/api/create-decision", {status:"active",title:"Choice",description:"Reason"})).status,404);
+    assert.equal((await fetch(`${instance.service.urls.base}/decisions.html`)).status,404);
+  } finally { await client.close(); await instance.stop(); }
+});
+
+it("keeps mixed records through feature changes and distinguishes empty from omitted configuration", async () => {
+  const instance = await start();
+  try {
+    await instance.call("/api/create-project", {title:"Shop",prefix:"SHOP"});
+    const task = (await instance.call("/api/create-task", {project:"SHOP",title:"Basket",description:"Work"})).body;
+    await instance.call("/api/set-project-status",{id:"SHOP",version:1,status:"ready"});
+    const decision = (await instance.call("/api/create-decision", {status:"active",title:"Tax",description:"Include tax"})).body;
+    await instance.call("/api/add-link",{from:decision.id,type:"affects",to:task.id});
+    // Keep an unrestricted token across restart without changing the stored plan.
+    for (let n=0; n<100; n++) {
+      const another = await instance.service.engine.execute("create_task","agent1",{title:`Basket ${n}`,description:"Work"}) as {id:string};
+      await instance.service.engine.execute("add_link","agent1", {from:`decision:${decision.id}`,type:"affects",to:`task:${another.id}`});
+    }
+    const fullPage = (await instance.call("/api/get",{kind:"decision",id:decision.id})).body;
+    const fullToken = fullPage.more.links.affects.continuation;
+    assert.equal(fullPage.links.affects.length,100);
+    // A bounded stop may return while the data folder is still held; each restart below waits for it.
+    const released = async () => { for (const until = Date.now() + 30_000; folderIsHeld(dataDir); await new Promise(r => setTimeout(r, 50))) if (Date.now() >= until) assert.fail(`the service did not let go of its data folder within 30 seconds of stopping: ${dataDir}`); };
+    const dataDir = loadConfig(instance.config,{}).dataDir;
+    await instance.service.stop(); await released();
+    assert.throws(() => loadConfig(instance.config,{VIGILE_FEATURES:""}), /enable at least one product feature/);
+    for (const focus of ["decisions", "tasks", undefined] as const) {
+      const loaded = loadConfig(instance.config,focus ? {VIGILE_FEATURES:focus} : {});
+      const service = await startService({loaded,log(){},warn(){}});
+      try {
+        const run = (name:string, args:Record<string,unknown>)=>service.engine.execute(name,"agent1",args) as Promise<any>;
+        if (focus) {
+          const visible = focus === "tasks" ? task : decision, hidden = focus === "tasks" ? decision : task;
+          await assert.rejects(run("get",{id:hidden.id,kind:hidden.kind}));
+          await assert.rejects(run("delete",{id:hidden.id,kind:hidden.kind,version:1}));
+          assert.equal(JSON.stringify((await run("get",{id:visible.id})).links).includes('affected by'),false);
+          const cli = fileURLToPath(new URL("./bin.js",import.meta.url));
+          const {stdout} = await promisify(execFile)(process.execPath,[cli,"doctor","--json","--config",instance.config], {env:{...process.env,VIGILE_FEATURES:focus}});
+          assert.equal(JSON.parse(stdout).checks.find((c:any)=>c.title==="MCP endpoint answers").level,"ok");
+          const events = (await run("list_history",{})).changes;
+          assert.ok(events.every((event:any)=>event.kind!==hidden.kind && event.data?.type!=="affects"));
+          assert.ok((await run("get",{id:visible.id,history:true})).history.every((event:any)=>event.data?.type!=="affects"));
+          if (focus === "decisions") {
+            await assert.rejects(run("get",{kind:"decision",id:decision.id,continuation:fullToken}), (e:any) => e.code === "invalid_input");
+            assert.deepEqual((await run("get",{kind:"decision",id:decision.id})).links,{});
+            assert.deepEqual((await run("get",{id:"SHOP"})).progress,{finished:0,total:0});
+            assert.deepEqual((await run("list_projects",{has_problems:true})).projects,[]);
+            const current = await run("get",{id:"SHOP"});
+            await assert.rejects(run("set_project_status",{id:"SHOP",version:current.version+1,status:"open"}), (e:any) => e.code === "version_conflict" && e.details.current.progress.total === 0);
+            assert.deepEqual((await run("set_project_status",{id:"SHOP",version:current.version,status:"open"})).progress,{finished:0,total:0});
+          }
+        } else {
+          const restored = await run("get",{id:decision.id,kind:"decision",continuation:fullToken});
+          assert.equal(restored.links.affects[0].id,task.id);
+        }
+      } finally { await service.stop(); await released(); }
+    }
+  } finally { await instance.stop(); }
 });
 
 describe("service over HTTP", () => {

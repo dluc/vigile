@@ -316,7 +316,7 @@ function folders(absolute: string, config: Config): ResultingConfig {
   return { path: absolute, config, dataDir: fromConfig("data_dir", config.data_dir), backupDir: fromConfig("backup.folder", config.backup.folder) };
 }
 
-function parseValue(key: string, value: string): string | number | boolean {
+function parseValue(key: string, value: string): string | string[] | number | boolean {
   const setting = findSetting(key);
   if (!setting) {
     const hint = key.startsWith("auth.keys") ? ' API keys are managed with "vigile user".' : "";
@@ -326,6 +326,7 @@ function parseValue(key: string, value: string): string | number | boolean {
     if (!/^-?\d+$/.test(value.trim())) throw new ConfigError([`${key}: must be a whole number`]);
     return Number(value);
   }
+  if (setting.type === "list") return value.trim() ? value.split(",").map(part => part.trim()) : [];
   if (setting.type === "decimal") {
     if (!/^\d+(\.\d+)?$/.test(value.trim())) throw new ConfigError([`${key}: must be a number, such as 4 or 0.5`]);
     return Number(value);

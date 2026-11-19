@@ -1,6 +1,8 @@
 export { Engine, MemoryKeyStore, type Caller, type EngineOptions, type EngineStatus, type OperationLog } from "./engine.js";
 export { ERROR_ALWAYS, ERROR_CODES, ERROR_DETAIL_WORDS, RULES, VigileError, echo, httpStatus, toErrorBody, type ErrorBody, type ErrorCode, type ErrorItem, type Rule } from "./errors.js";
 export { OPERATIONS, findOperation } from "./operations/index.js";
+export { FeatureSelection, FEATURES, type Feature } from "./features.js";
+export { instanceGuide, instanceInstructions } from "./guide.js";
 export { REPEATED_WITHOUT_VERSION, listed, operationFacts, versionAdvice, type OperationFacts } from "./operations/facts.js";
 export { mayCall, type Access, type Clock, type HistoryItem, type KeyStore, type Operation } from "./operation.js";
 export { LINK_TYPES, findLinkType, type LinkType } from "./link-types.js";

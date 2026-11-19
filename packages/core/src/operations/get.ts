@@ -1,7 +1,6 @@
 import { z } from "zod";
 import type { GraphView } from "../graph.js";
 import { comparePlaces, placeOf, type Place } from "../ids.js";
-import { LINK_TYPES } from "../link-types.js";
 import { KINDS, LIMITS, type Kind, type Node, type Ref } from "../model.js";
 import { defineRead, type ReadContext } from "../operation.js";
 import { resolveRef } from "../rules.js";
@@ -69,7 +68,7 @@ function tokenAfter<K>(list: Cursor<K>, key: K): string {
  * end whose ID is too long to be written into a token, as only damage leaves it, is named by the mark of its
  * key, and the next page finds it by that among the links there are.
  */
-function linkList(graph: GraphView, node: Node, name: string, others: () => Ref[]): LinkList {
+function linkList(graph: GraphView, node: Ref & {feature_profile?: string}, name: string, others: () => Ref[]): LinkList {
   const tokens = itemListCursors.links(node, name);
   return {
     at: ["links", name],
@@ -105,10 +104,11 @@ function linkList(graph: GraphView, node: Node, name: string, others: () => Ref[
 }
 
 /** The lists of an item's links, by the name each has seen from the item. */
-function linkLists(graph: GraphView, node: Node): LinkList[] {
-  return LINK_TYPES.flatMap((linkType) => [
-    linkList(graph, node, linkType.type, () => graph.out(node, linkType.type).map((link) => link.to)),
-    linkList(graph, node, linkType.reverse, () => graph.in(node, linkType.type).map((link) => link.from)),
+function linkLists(graph: GraphView, node: Node, features: ReadContext["features"]): LinkList[] {
+  const ref = {kind:node.kind, id:node.id, ...features.profileTag};
+  return features.links().flatMap((linkType) => [
+    linkList(graph, ref, linkType.type, () => graph.out(node, linkType.type).map((link) => link.to).filter(ref => features.kind(ref.kind))),
+    linkList(graph, ref, linkType.reverse, () => graph.in(node, linkType.type).map((link) => link.from).filter(ref => features.kind(ref.kind))),
   ]);
 }
 
@@ -118,7 +118,8 @@ function linkLists(graph: GraphView, node: Node): LinkList[] {
  * The token carries the place of the first entry returned, and the page before ends there.
  */
 function recordLists(ctx: ReadContext, graph: GraphView, node: Node): ItemList[] {
-  const places = itemListCursors.history(node);
+  const ref = {kind:node.kind, id:node.id, ...ctx.features.profileTag};
+  const places = itemListCursors.history(ref);
   const history: ItemList<readonly [number, number]> = {
     at: ["history"],
     cursor: places,
@@ -129,7 +130,7 @@ function recordLists(ctx: ReadContext, graph: GraphView, node: Node): ItemList[]
     },
   };
   if (node.kind === "user") return [history];
-  const counts = itemListCursors.timeline(node);
+  const counts = itemListCursors.timeline(ref);
   const timeline: ItemList<number> = {
     at: ["timeline"],
     cursor: counts,
@@ -179,10 +180,11 @@ export const get = defineRead({
     // revision of the plan all the same, and says since when its item is unchanged: see `readSteady`. Each try
     // finds the item anew, in the graph of that try, and takes from that graph whatever it reads of the plan.
     return readSteady(ctx, async (graph) => {
-      const node = resolveRef(graph, input.id, input.kind ? [input.kind] : KINDS);
+      const node = resolveRef(graph, input.id, (input.kind ? [input.kind] : KINDS).filter(k => ctx.features.kind(k)));
       const since = ctx.unchangedSince(node);
+      const visibleLinks = () => linkLists(graph, node, ctx.features);
       if (token !== undefined) {
-        const list = listOf<ItemList>(token, [...linkLists(graph, node), ...recordLists(ctx, graph, node)]);
+        const list = listOf<ItemList>(token, [...visibleLinks(), ...recordLists(ctx, graph, node)]);
         const reading = list.page(list.cursor.place(token, () => list.keys()));
         const read = reading instanceof Promise ? await reading : reading;
         return {
@@ -191,7 +193,7 @@ export const get = defineRead({
           finish: () => {
             const page: Partial<Lists> = {};
             put(page, list, read, true);
-            return { kind: node.kind, id: node.id, version: node.version, unchanged_since: since, ...page };
+            return { kind: node.kind, id: node.id, version: node.version, unchanged_since: since, ...ctx.features.profileTag, ...page };
           },
         };
       }
@@ -207,8 +209,8 @@ export const get = defineRead({
         // moved since the try began: the item, its links, what they show of other items and the names of users
         // are all of that one revision.
         finish: () => {
-          for (const list of linkLists(graph, node)) put(answer, list, list.page(), false);
-          return detail(graph, node, text, { ...answer, links: answer.links ?? {}, unchanged_since: since });
+          for (const list of visibleLinks()) put(answer, list, list.page(), false);
+          return { ...detail(graph, node, text, { ...answer, links: answer.links ?? {}, unchanged_since: since }), ...ctx.features.profileTag };
         },
       };
     });

@@ -11,6 +11,7 @@ import { Plan, mayCall, type Clock, type HistoryItem, type HistoryPage, type His
 import { OPERATIONS, findOperation } from "./operations/index.js";
 import { displayId, recordToEntry, recordToLink, recordToNode, storageId, storedAs, toChanges } from "./records.js";
 import { Unchanged } from "./unchanged.js";
+import { FeatureSelection, type Feature } from "./features.js";
 
 export interface OperationLog {
   operation: string;
@@ -25,6 +26,7 @@ export interface OperationLog {
 }
 
 export interface EngineOptions {
+  features?: readonly Feature[];
   storage: StorageAdapter;
   tenant?: string;
   clock?: Clock;
@@ -108,8 +110,10 @@ export class Engine {
   private readonly keys: KeyStore;
   private readonly onOperation?: (entry: OperationLog) => void;
   readonly tenant: string;
+  readonly features: FeatureSelection;
 
   private constructor(options: EngineOptions) {
+    this.features = new FeatureSelection(options.features);
     this.storage = options.storage;
     this.tenant = options.tenant ?? "default";
     this.clock = options.clock ?? { now: () => new Date() };
@@ -149,7 +153,7 @@ export class Engine {
 
   /** The operations a user of this type may call. */
   operationsFor(type: UserType): Operation[] {
-    return OPERATIONS.filter((o) => mayCall(o, type));
+    return OPERATIONS.filter((o) => this.features.operation(o.name) && mayCall(o, type)).map(o => this.features.profile(o));
   }
 
   user(username: string): UserNode | undefined {
@@ -183,7 +187,8 @@ export class Engine {
     const username = typeof as === "string" ? as : as.username;
     const letInAs = typeof as === "string" ? undefined : as.id;
     const started = performance.now();
-    const operation = findOperation(name);
+    const found = this.features.operation(name) ? findOperation(name) : undefined;
+    const operation = found && this.features.profile(found);
     let result = "ok";
     let rule: string | undefined;
     let cause: unknown;
@@ -252,8 +257,9 @@ export class Engine {
   private context(caller: UserNode, now: string): ReadContext {
     const engine = this;
     return {
+      features: this.features,
       get graph() {
-        return engine.graph;
+        return engine.features.view(engine.graph);
       },
       caller,
       now,
@@ -528,6 +534,7 @@ export class Engine {
       ...(before ? { before: { revision: before[0], seq: before[1] } } : {}),
       limit: LIMITS.page + 1,
       sinceLast: CREATED,
+      excludeKind: !this.features.has("tasks") ? "task" : !this.features.has("decisions") ? "decision" : undefined,
     });
     const shown = records.length > LIMITS.page ? records.slice(records.length - LIMITS.page) : records;
     const first = shown[0];
