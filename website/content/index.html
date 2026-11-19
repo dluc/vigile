@@ -1,0 +1,161 @@
+---
+title: Vigile
+nav: Overview
+description: Vigile is a planning and coordination layer for people and AI agents. One graph of the work, changed only through checked operations, that every person and agent works from. Today a self-hosted service over MCP, HTTP and the command line, with a board, a graph and a history of changes.
+layout: home
+terminals: fresh
+---
+<section class="hero" aria-labelledby="hero-title">
+<div class="band">
+<div class="hero-text">
+<p class="eyebrow">Planning and coordination for people and AI agents</p>
+<h1 id="hero-title">People and agents, working from <em>one plan</em>.</h1>
+<p class="lead">When agents do real work beside people, the plan is what they all share. Vigile holds it as one graph of outcomes, dependencies, responsibility, state and history, changed only through checked operations: true enough to act on, and open for an agent to inspect and improve.</p>
+</div>
+<div class="horizons-pair">
+<article id="today" data-horizon="today">
+<p class="tag">Use today</p>
+<h2>One service, on your machine</h2>
+<p>For coordinating several agents and people. MCP, HTTP, a command line, a board, a graph and a history; quiet claims and automatic backups. Version {{=version}}: no TLS, no access by team.</p>
+<p class="links"><a href="#start">Try it</a><a href="#why">What it does</a><a href="#limits">Limits</a></p>
+</article>
+<article id="direction" data-horizon="direction">
+<p class="tag t-idle">Direction · not built, no dates</p>
+<h2>A control plane for people and agents</h2>
+<p>The same graph and operations could carry one plan across teams and tools: access by team, a hosted service, an observer of plan health. None of it is built.</p>
+<p class="links"><a href="/vision/">The vision</a></p>
+</article>
+</div>
+<div class="hero-shot">
+{{picture board eager | The board of Vigile. Two projects at the top, each with its progress. Below, the tasks of two made-up projects in columns by state: in progress, next, in review, waiting for dependencies and done. A card names what a task waits for, who has it and which group it is in. | The board, with a made-up plan: what is in progress, what is next, what waits and for what. Every picture on this site shows made-up data.}}
+{{picture phone | The same board on a phone: the projects in a row that scrolls sideways, then the columns one under the other.}}
+</div>
+</div>
+</section>
+
+<section class="station" id="why" aria-labelledby="why-title">
+<div class="band">
+<p class="eyebrow">Today · why not a list of issues, or a file of notes</p>
+<h2 id="why-title">Three things a list does not do for you.</h2>
+<div class="features">
+
+<article class="feature">
+<div class="feature-text">
+<p class="tag">what can start now</p>
+<h3>It works out what can start</h3>
+<p>Say what depends on what and set priorities on areas and tasks. Vigile follows the active path from outermost group to task, holds work back for unfinished dependencies or inactive containers, and answers <strong>"what can I do next?"</strong> each time it is asked.</p>
+<p><a class="more" href="/how/next-and-waiting/">How next and waiting are worked out</a></p>
+</div>
+<div class="feature-show">
+{{diagram next}}
+</div>
+</article>
+
+<article class="feature">
+<div class="feature-text">
+<p class="tag t-stop">refusals</p>
+<h3>It refuses a wrong move, and says what to do</h3>
+<p>Starting a task whose dependency is unfinished, closing a group over open work, a jump of status the rules do not allow: each is refused, and the refusal says <strong>why, and what would resolve it</strong>, for a person to read or an agent to follow.</p>
+<p><a class="more" href="/how/statuses/">The rules, and what a refusal carries</a></p>
+</div>
+<div class="feature-show">
+<pre data-language="vigile"><code>$ vigile set-task-status --id WEB-003 --version 1 \
+    --status in_progress --as agent1
+
+✗ Task WEB-003 cannot be started: it is waiting for a
+  dependency to finish.
+  · WEB-002  Cart page lists the items and the total  open
+  → Finish or cancel the items it depends on.
+  → Or call remove_link with type "depends on" if the
+    dependency no longer applies.
+  → Or call list_next_tasks to pick work that can start now.</code></pre>
+</div>
+</article>
+
+<article class="feature">
+<div class="feature-text">
+<p class="tag t-busy">versions</p>
+<h3>Two agents cannot take the same task</h3>
+<p>Changing a task names the version the change was based on. Of two agents that start the same task, <strong>one is refused</strong>. Assigned work quiet for 24 hours can be listed for attention, but is never silently taken away.</p>
+<p><a class="more" href="/how/versions-and-history/">Versions, conflicts and history</a></p>
+</div>
+<div class="feature-show">
+{{diagram versions}}
+</div>
+</article>
+
+</div>
+</div>
+</section>
+
+<section class="station" id="show" aria-labelledby="show-title">
+<div class="band">
+<p class="eyebrow e-review">And it keeps the plan in sight</p>
+<h2 id="show-title">See the work without asking the agents.</h2>
+<p class="say">The whole plan in one picture, grouped into areas, with its dependencies, its work in progress and its priorities, also shows <strong>how the work is cut</strong>: tasks that belong to no group, a group grown too wide, too many unrelated things started at once. <a href="/how/plan-as-a-graph/#reading-the-plan">An agent can read the same plan</a> through the same lists.</p>
+<ul class="also">
+<li><h3>Groups, as deep as the work</h3><p>A task that contains tasks is a group, and reports how far along it is. <a href="/how/plan-as-a-graph/#groups">Groups</a></p></li>
+<li><h3>Contradictions are flagged</h3><p>Reopen a dependency after the work that needed it went on, and the task and its project say so. <a href="/how/problems/">Problems</a></p></li>
+<li><h3>Who changed what, and when</h3><p>A task and a project keep what was done to them and each status they went through. <a href="/how/versions-and-history/#history">History</a></p></li>
+<li><h3>A board, a graph and a history</h3><p>Zoom the board into a project or through nested groups, filter it, read who changed what across the plan, inspect an item and adjust task priority. Every view, selection, item and zoom has an address. <a href="/docs/web-page/">The web page</a></p></li>
+</ul>
+<div class="pair">
+{{picture problem half | A task that is in review although the task it depends on was reopened. Its panel says: status is in_review, but it depends on work that is not finished. Behind the panel, the card of its project carries a warning. | A contradiction, flagged: this task went to review, and then the task it depends on was reopened.}}
+{{picture graph half | The graph view. A box for each project and inside it a box for each group, with the tasks coloured by state. Arrows run from each task to the tasks that wait for it, and from three groups to the launch that waits for all of them. | The graph: groups as boxes, and an arrow from each task to what waits for it.}}
+</div>
+</div>
+</section>
+
+<section class="station" id="interfaces" aria-labelledby="ways-title">
+<div class="band">
+<p class="eyebrow e-busy">One plan, four ways in</p>
+<h2 id="ways-title">A tool, an endpoint and a command, under the same rules.</h2>
+<p class="say">Each of the {{=operations.count}} operations is defined once and offered as an MCP tool for agents, an HTTP endpoint for programs and a command for you. The page reads through the same operations, so a change made one way shows for all.</p>
+{{diagram interfaces}}
+<p class="links"><a href="/docs/mcp/">Connect an agent</a><a href="/docs/http-api/">The HTTP API</a><a href="/docs/cli/">The command line</a><a href="/docs/operations/">Every operation</a></p>
+</div>
+</section>
+
+<section class="station" id="start" aria-labelledby="start-title">
+<div class="band">
+<p class="eyebrow">Try it in two minutes</p>
+<div class="start">
+<div>
+<h2 id="start-title">One process. One folder. Yours.</h2>
+<p class="say">It needs Node.js {{=node.needed}} or later and <code>pnpm</code>. No database server and no account. It listens on <code>127.0.0.1</code>, <a href="/docs/security/#the-defaults">sends nothing anywhere</a>, and takes a backup every 24 hours by default.</p>
+<p><a class="button" href="/docs/install/">Install and first run, step by step</a></p>
+</div>
+<ol class="steps">
+<li><p><strong>Get it and build it.</strong></p>
+<pre data-language="sh" data-skip="network"><code>git clone {{=repo.url}}.git ~/code/vigile
+cd ~/code/vigile
+pnpm install
+pnpm build</code></pre></li>
+<li><p><strong>Create an instance and start it.</strong></p>
+<pre data-language="sh" data-terminal="first" data-stays="running"><code>cd ~/code/vigile
+bin/vigile config init --config ~/vigile/main/config.toml --name main
+bin/vigile serve --config ~/vigile/main/config.toml</code></pre></li>
+<li><p><strong>Open the board, and point an agent at the plan.</strong> <code>serve</code> prints where everything is:</p>
+<pre data-language="text"><code>  MCP      http://127.0.0.1:8700/mcp
+  Web      http://127.0.0.1:8700/
+  API      http://127.0.0.1:8700/api</code></pre></li>
+</ol>
+</div>
+</div>
+</section>
+
+<section class="station" id="limits" aria-labelledby="limits-title">
+<div class="band">
+<p class="eyebrow e-wait">Today · said plainly</p>
+<h2 id="limits-title">What it does not do.</h2>
+<ul class="limits" data-horizon="limits">
+<li>No comments, attachments or due dates.</li>
+<li>No access by team or by project: whoever is let in can change the whole plan.</li>
+<li>No general editing in the browser: only a task's priority has −/+ controls.</li>
+<li>No hosted service, and no import, export or links to other tools.</li>
+<li><a href="/docs/security/#there-is-no-tls">No TLS of its own</a>, and it does not install itself as a service: you keep the process running.</li>
+</ul>
+<p class="say fine">Vigile is new: version {{=version}}, developed and tested on Linux, under the MIT licence. Where it could go, and why that is credible, is on <a href="/vision/">the vision</a>, marked as direction.</p>
+<p class="cta"><a class="button go" href="/docs/install/">Install it</a><a class="button" href="/how/">How it works</a></p>
+</div>
+</section>

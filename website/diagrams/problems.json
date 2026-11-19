@@ -1,0 +1,18 @@
+{
+  "shows": "A task in review whose dependency was done and is reopened: the task and its project carry a problem.",
+  "ids": ["WEB-007", "WEB-008"],
+  "terms": ["contains_task_with_problems", "unfinished_dependency"],
+  "scenario": {
+    "items": [
+      { "kind": "project", "id": "WEB", "title": "Website relaunch" },
+      { "id": "WEB-007", "title": "Index all products every night", "status": "done", "in": ["WEB"] },
+      { "id": "WEB-008", "title": "Search box with suggestions", "status": "in_review", "in": ["WEB"], "depends_on": ["WEB-007"] }
+    ],
+    "then": [{ "id": "WEB-007", "status": "open" }],
+    "expect": {
+      "WEB-007": { "status": "open", "problems": [] },
+      "WEB-008": { "status": "in_review", "problems": ["unfinished_dependency"] },
+      "WEB": { "problems": ["contains_task_with_problems"] }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+kind: `task`.
+id: Its ID, as in `WEB-003`, given when it was created.
+title: Its title.
+type: Its type.
+status: Its status.
+priority: As set.
+value: As set, or `null`.
+size: As set, or `null`.
+version: The version to send with the next change that takes one.
+contained_in: The IDs of the projects and tasks that contain it. A project whose ID is a number is written with its kind, as `project:001`.
+live_containers: Only for a task with a deleted group among its containers: the IDs of the live projects and tasks that hold it now, through the deleted ones. `contained_in` still names the deleted group.
+depends_on: The IDs of what it depends on.
+assigned_to: The usernames of who has it.
+is_assigned: Whether anyone has it.
+is_next: Whether it can be started now: {{=next.is}}. See [Next and waiting](/how/next-and-waiting/).
+is_waiting: Whether it is held back: {{=waiting.is}}.
+waiting_for: The IDs of what it waits for; empty when it is not waiting.
+has_problems: Whether it has a [problem](/how/problems/).
+completed_at: Only for a task that is done: when it was last set to done.
+progress: Only for a task that contains tasks: `finished` and `total`.
+problems: Only when there are some: what is wrong.
+deleted_at: Only for a deleted task: when.

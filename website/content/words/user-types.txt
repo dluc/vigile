@@ -1,0 +1,3 @@
+admin: Whoever maintains the instance. Creates users, resets keys, deletes for good, reads the service's status.
+person: A human that work can be assigned to.
+agent: An AI agent.

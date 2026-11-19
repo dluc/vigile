@@ -22,6 +22,17 @@ Linux, but other systems are untested.
 
 The pictures in this file show made-up data.
 
+**More than this file:** the web site has three areas. [Product](https://dluc.github.io/vigile/)
+says what Vigile is for and what it does today, with [the vision](https://dluc.github.io/vigile/vision/)
+marking what is a direction and not built; [How it works](https://dluc.github.io/vigile/how/) explains the
+ideas one at a time, and the [Documentation](https://dluc.github.io/vigile/docs/) is the
+reference for every [operation](https://dluc.github.io/vigile/docs/operations/),
+[setting](https://dluc.github.io/vigile/docs/configuration/),
+[command](https://dluc.github.io/vigile/docs/cli/) and
+[error](https://dluc.github.io/vigile/docs/errors/). The site is made from the folder
+[`website/`](website/README.md) of this repository; to read it where it is not published,
+build it and serve it on your machine: `pnpm build && node website/build.mjs && node website/serve.mjs`.
+
 ## When you'd use it
 
 - **More than one agent is working, and they must not pick the same task.**
@@ -1006,6 +1017,10 @@ Chromium: it uses one installed by Playwright
 or the one named by `VIGILE_TEST_BROWSER`. Without any of these that suite is
 skipped and says so; the others still run.
 
+The web site in `website/` has tests of its own, which `pnpm test` does not
+run: `pnpm build && node --test website/*.test.mjs`. They use a Chromium the
+same way.
+
 ### What is not there yet?
 
 Planned and not built yet, among others: teams and per-item access; facts and
@@ -1025,7 +1040,13 @@ views by person and by calendar.
 | `web` | The web page |
 | `cli` | The `vigile` command, which also assembles the service |
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) says how to make a change.
+The folder `website/` holds the web site: its hand-written pages, and the script
+that builds it from them, from what `vigile describe` prints and from running
+the program. It reads none of the code above, and has tests of its own:
+`pnpm build && node --test website/*.test.mjs`.
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) says how to make a change, and
+[`website/README.md`](website/README.md) how the web site is built and checked.
 
 ## Command reference
 

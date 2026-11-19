@@ -1,0 +1,15 @@
+{
+  "shows": "Four tasks in a row, each depending on the one before it: what is stored of them, and what is worked out.",
+  "ids": ["WEB-002", "WEB-003", "WEB-004", "WEB-013"],
+  "terms": [],
+  "scenario": {
+    "items": [
+      { "kind": "project", "id": "WEB", "title": "Website relaunch" },
+      { "id": "WEB-002", "title": "Cart page", "name": "the cart page", "status": "done", "in": ["WEB"] },
+      { "id": "WEB-003", "title": "Payment form", "name": "the payment form", "status": "open", "in": ["WEB"], "depends_on": ["WEB-002"] },
+      { "id": "WEB-004", "title": "Confirmation email", "name": "the confirmation email", "status": "open", "in": ["WEB"], "depends_on": ["WEB-003"] },
+      { "id": "WEB-013", "title": "Launch", "name": "the launch", "status": "open", "in": ["WEB"], "depends_on": ["WEB-004"] }
+    ],
+    "after": { "finish": "WEB-003", "next": "WEB-004" }
+  }
+}

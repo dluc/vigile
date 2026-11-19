@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+<title>Vigile</title>
+<rect x="2" y="13" width="44" height="22" rx="11" fill="#1d1f23" stroke="#4a5059" stroke-width="1"/>
+<circle cx="13.5" cy="24" r="5" fill="#e0524b"/>
+<circle cx="24" cy="24" r="5" fill="#e9b23d"/>
+<circle cx="34.5" cy="24" r="5" fill="#43c178"/>
+</svg>

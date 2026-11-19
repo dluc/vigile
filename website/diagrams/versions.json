@@ -1,0 +1,6 @@
+{
+  "shows": "Two agents read one task at version 1 and both try to start it: the first is done, the second is refused with the task as it is now.",
+  "ids": ["WEB-005"],
+  "terms": ["version_conflict"],
+  "conflict": { "first": "agent1", "second": "agent2", "read": { "status": "open", "version": 1 }, "after": { "status": "in_progress", "version": 2, "assigned_to": ["agent1"] }, "refusal": "version_conflict" }
+}

@@ -1,0 +1,7 @@
+draft: An idea nobody should start yet. It has a title and a description, and is never listed as next.
+open: Ready to be worked on. A new task starts here unless it is created as a draft.
+in_progress: Someone is working on it now. Set when the work really starts, never to reserve it.
+paused: Work was started and has stopped without finishing.
+in_review: The work is done and someone else has to check it.
+done: Finished, and shown to work.
+cancelled: It will not be done.

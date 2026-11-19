@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 372" font-size="13" role="img" aria-labelledby="interfaces-title interfaces-desc">
+<title id="interfaces-title">Four ways into one service</title>
+<desc id="interfaces-desc">AI agents reach the service over MCP at /mcp. Programs call the HTTP API at /api, and so does the vigile command line. People open the web page, which reads through the API. All of them arrive at one engine, where every operation is defined once with its input, rules and refusals. The engine keeps the plan in one data folder, in SQLite.</desc>
+<defs><marker id="interfaces-head" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" class="head"/></marker></defs>
+<rect x="8" y="8" width="160" height="62" rx="10" class="box"/>
+<text x="88" y="34" text-anchor="middle" class="t-strong">AI agents</text>
+<text x="88" y="54" text-anchor="middle" class="t-small t-muted">tools, over MCP</text>
+<rect x="188" y="8" width="160" height="62" rx="10" class="box"/>
+<text x="268" y="34" text-anchor="middle" class="t-strong">Programs</text>
+<text x="268" y="54" text-anchor="middle" class="t-small t-muted">JSON, over HTTP</text>
+<rect x="368" y="8" width="160" height="62" rx="10" class="box"/>
+<text x="448" y="34" text-anchor="middle" class="t-strong">You, and scripts</text>
+<text x="448" y="54" text-anchor="middle" class="t-small t-muted">the vigile command</text>
+<rect x="548" y="8" width="164" height="62" rx="10" class="box"/>
+<text x="630" y="34" text-anchor="middle" class="t-strong">People</text>
+<text x="630" y="54" text-anchor="middle" class="t-small t-muted">a browser</text>
+<rect x="8" y="104" width="704" height="180" rx="14" class="box-group"/>
+<rect x="28" y="124" width="120" height="36" rx="8" class="box-busy"/>
+<text x="88" y="147" text-anchor="middle" class="t-mono t-strong">/mcp</text>
+<rect x="188" y="124" width="340" height="36" rx="8" class="box-busy"/>
+<text x="358" y="147" text-anchor="middle" class="t-mono t-strong">/api/&lt;operation&gt;</text>
+<rect x="570" y="124" width="120" height="36" rx="8" class="box-busy"/>
+<text x="630" y="147" text-anchor="middle" class="t-mono t-strong">/ the page</text>
+<path d="M88 70V122" class="wire" marker-end="url(#interfaces-head)"/>
+<path d="M268 70V122" class="wire" marker-end="url(#interfaces-head)"/>
+<path d="M448 70V122" class="wire" marker-end="url(#interfaces-head)"/>
+<path d="M630 70V122" class="wire" marker-end="url(#interfaces-head)"/>
+<path d="M570 142H530" class="wire-dash" marker-end="url(#interfaces-head)"/>
+<text x="549" y="178" text-anchor="middle" class="t-small t-muted">reads</text>
+<rect x="28" y="196" width="662" height="46" rx="9" class="box-ink"/>
+<text x="359" y="217" text-anchor="middle" class="t-strong t-ink">The engine: every operation, defined once</text>
+<text x="359" y="234" text-anchor="middle" class="t-small t-ink">its input, its rules, its refusals, and who may call it</text>
+<path d="M88 160V194" class="wire" marker-end="url(#interfaces-head)"/>
+<path d="M358 160V194" class="wire" marker-end="url(#interfaces-head)"/>
+<text x="28" y="268" class="t-label">ONE SERVICE: ONE PROCESS, ONE PORT</text>
+<path d="M359 242V318" class="wire" marker-end="url(#interfaces-head)"/>
+<rect x="239" y="320" width="240" height="44" rx="10" class="box"/>
+<text x="359" y="340" text-anchor="middle" class="t-strong">One data folder</text>
+<text x="359" y="356" text-anchor="middle" class="t-small t-muted">the plan, in one SQLite file</text>
+</svg>

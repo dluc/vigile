@@ -1,0 +1,1 @@
+{ "shows": "Who a connection acts as: with a valid key, with a key that is not valid, and without a key.", "ids": [], "terms": ["keyless_user"], "refusal": "unauthorized", "keyless": "agent1" }

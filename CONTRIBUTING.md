@@ -39,6 +39,37 @@ run `pnpm build` before a single package test.
 Public behavior belongs in the repository itself. A clean clone must not need a
 file from outside the repository.
 
+## The web site
+
+The site in `website/` is made from hand-written pages, from what the program
+says of itself (`vigile describe`) and from running the program. It does not
+reference the product's code: nothing under `website/` imports a package or
+reads a source file, and a test of the site fails when a file does.
+[`website/README.md`](website/README.md) says how to build it, how a page is
+written, and what its tests hold.
+
+```sh
+pnpm build && node website/build.mjs
+pnpm build && node --test website/*.test.mjs
+```
+
+`pnpm test` does not run the tests of the site. The workflow "Web site" runs
+them on every pull request.
+
+- What a reference page needs to know of the program comes from
+  `vigile describe`. When a page needs something the description does not
+  have, add it to the description, in the product, and not a reading of the
+  code to the site.
+- A sentence about what the service does is made from a fact that the build finds
+  out by asking a real service, or is held to one by a test. Do not write one
+  from memory.
+- What is not built is named as a limit, or stands in a place that is marked as
+  direction.
+- Every page has a row in `website/editorial/README.md`.
+- The pictures, in `images/` and in `website/assets/pictures/`, are kept by the
+  project's maintainers. Leave the picture files as they are, and say in the pull
+  request when the look of the page changed.
+
 ## Security
 
 Do not disclose vulnerabilities in an issue. Follow [SECURITY.md](SECURITY.md).

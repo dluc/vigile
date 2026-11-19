@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 396" font-size="13" role="img" aria-labelledby="plan-graph-title plan-graph-desc">
+<title id="plan-graph-title">A plan as a graph</title>
+<desc id="plan-graph-desc">The project WEB contains the group WEB-001, Checkout, and the incident WEB-014. The group contains three tasks: WEB-002, done; WEB-003, in progress and assigned to agent1, which depends on WEB-002; and WEB-004, which depends on WEB-003 and waits. The task WEB-013, Launch, depends on the whole group and waits for it.</desc>
+<defs><marker id="plan-graph-head" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" class="head"/></marker></defs>
+<rect x="8" y="8" width="704" height="380" rx="14" class="box-group"/>
+<text x="26" y="34" class="t-label">PROJECT</text>
+<text x="88" y="34" class="t-mono t-strong">WEB</text>
+<text x="124" y="34">Website relaunch</text>
+<rect x="28" y="54" width="462" height="206" rx="12" class="box-group"/>
+<text x="46" y="80" class="t-label">GROUP</text>
+<text x="94" y="80" class="t-mono t-strong">WEB-001</text>
+<text x="160" y="80">Checkout</text>
+<text x="474" y="80" text-anchor="end" class="t-small t-go t-strong">1 of 3 done</text>
+<rect x="44" y="100" width="124" height="76" rx="9" class="box-go"/>
+<text x="56" y="123" class="t-mono t-strong">WEB-002</text>
+<text x="56" y="142" class="t-small">Cart page</text>
+<text x="56" y="162" class="t-small t-go t-strong">done</text>
+<rect x="190" y="100" width="124" height="76" rx="9" class="box-busy"/>
+<text x="202" y="123" class="t-mono t-strong">WEB-003</text>
+<text x="202" y="142" class="t-small">Payment form</text>
+<text x="202" y="162" class="t-small t-busy t-strong">in progress</text>
+<rect x="336" y="100" width="140" height="76" rx="9" class="box-wait"/>
+<text x="348" y="123" class="t-mono t-strong">WEB-004</text>
+<text x="348" y="142" class="t-small">Confirmation email</text>
+<text x="348" y="162" class="t-small t-wait t-strong">waiting</text>
+<path d="M168 138H188" class="wire" marker-end="url(#plan-graph-head)"/>
+<path d="M314 138H334" class="wire" marker-end="url(#plan-graph-head)"/>
+<path d="M252 176V202" class="wire-dash"/>
+<rect x="208" y="202" width="88" height="30" rx="15" class="box"/>
+<text x="252" y="222" text-anchor="middle" class="t-mono t-small">agent1</text>
+<text x="306" y="222" class="t-small t-muted">assigned to</text>
+<rect x="546" y="100" width="148" height="76" rx="9" class="box-wait"/>
+<text x="558" y="123" class="t-mono t-strong">WEB-013</text>
+<text x="558" y="142" class="t-small">Launch</text>
+<text x="558" y="162" class="t-small t-wait t-strong">waiting</text>
+<path d="M490 138H544" class="wire" marker-end="url(#plan-graph-head)"/>
+<text x="620" y="78" text-anchor="middle" class="t-small t-muted">waits for the</text>
+<text x="620" y="93" text-anchor="middle" class="t-small t-muted">whole group</text>
+<rect x="28" y="282" width="210" height="76" rx="9" class="box-stop"/>
+<text x="40" y="305" class="t-mono t-strong">WEB-014</text>
+<text x="108" y="305" class="t-small t-stop t-strong">incident</text>
+<text x="40" y="324" class="t-small">Staging site is down</text>
+<text x="40" y="344" class="t-small t-busy t-strong">in progress</text>
+<g>
+<text x="290" y="298" class="t-label">HOW TO READ IT</text>
+<rect x="290" y="310" width="26" height="16" rx="4" class="box-group"/>
+<text x="326" y="323" class="t-small">contains: a project or a group holds a task</text>
+<path d="M290 344H314" class="wire" marker-end="url(#plan-graph-head)"/>
+<text x="326" y="348" class="t-small">depends on: the arrow points at what waits</text>
+<path d="M290 368H316" class="wire-dash"/>
+<text x="326" y="372" class="t-small">assigned to: who works on it</text>
+</g>
+</svg>

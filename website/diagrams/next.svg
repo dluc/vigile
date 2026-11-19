@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 286" font-size="13" role="img" aria-labelledby="next-title next-desc">
+<title id="next-title">Next and waiting, worked out from statuses and links</title>
+<desc id="next-desc">Four tasks in a chain of dependencies. Stored: WEB-002 is done; WEB-003, WEB-004 and WEB-013 are open. Worked out on every read: WEB-002 is finished, WEB-003 is next, WEB-004 waits for WEB-003, and WEB-013 waits for WEB-004.</desc>
+<defs><marker id="next-head" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" class="head"/></marker></defs>
+<text x="8" y="22" class="t-label">STORED: STATUSES AND LINKS</text>
+<rect x="8" y="36" width="152" height="84" rx="9" class="box"/>
+<text x="20" y="60" class="t-mono t-strong">WEB-002</text>
+<text x="20" y="80" class="t-small">Cart page</text>
+<text x="20" y="104" class="t-small t-muted">status: <tspan class="t-strong">done</tspan></text>
+<rect x="192" y="36" width="152" height="84" rx="9" class="box"/>
+<text x="204" y="60" class="t-mono t-strong">WEB-003</text>
+<text x="204" y="80" class="t-small">Payment form</text>
+<text x="204" y="104" class="t-small t-muted">status: <tspan class="t-strong">open</tspan></text>
+<rect x="376" y="36" width="152" height="84" rx="9" class="box"/>
+<text x="388" y="60" class="t-mono t-strong">WEB-004</text>
+<text x="388" y="80" class="t-small">Confirmation email</text>
+<text x="388" y="104" class="t-small t-muted">status: <tspan class="t-strong">open</tspan></text>
+<rect x="560" y="36" width="152" height="84" rx="9" class="box"/>
+<text x="572" y="60" class="t-mono t-strong">WEB-013</text>
+<text x="572" y="80" class="t-small">Launch</text>
+<text x="572" y="104" class="t-small t-muted">status: <tspan class="t-strong">open</tspan></text>
+<path d="M160 78H190" class="wire" marker-end="url(#next-head)"/>
+<path d="M344 78H374" class="wire" marker-end="url(#next-head)"/>
+<path d="M528 78H558" class="wire" marker-end="url(#next-head)"/>
+<path d="M84 120V176M268 120V176M452 120V176M636 120V176" class="wire-dash"/>
+<text x="8" y="162" class="t-label">WORKED OUT ON EVERY READ</text>
+<rect x="8" y="176" width="152" height="34" rx="17" class="box-sunk"/>
+<text x="84" y="198" text-anchor="middle" class="t-small t-muted t-strong">finished</text>
+<rect x="192" y="176" width="152" height="34" rx="17" class="box-go"/>
+<circle cx="214" cy="193" r="5" class="dot-go"/>
+<text x="276" y="198" text-anchor="middle" class="t-small t-go t-strong">next: can start</text>
+<rect x="376" y="176" width="152" height="34" rx="17" class="box-wait"/>
+<text x="452" y="198" text-anchor="middle" class="t-small t-wait t-strong">waiting for WEB-003</text>
+<rect x="560" y="176" width="152" height="34" rx="17" class="box-wait"/>
+<text x="636" y="198" text-anchor="middle" class="t-small t-wait t-strong">waiting for WEB-004</text>
+<text x="8" y="246" class="t-small t-muted">Finish WEB-003, and WEB-004 is next for whoever asks after that.</text>
+<text x="8" y="264" class="t-small t-muted">No flag was updated, because there is none: only the status of WEB-003 changed.</text>
+</svg>

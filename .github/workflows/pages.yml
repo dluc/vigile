@@ -1,0 +1,126 @@
+# The web site in website/: its tests, and its publication with GitHub Pages.
+#
+# The tests run on every pull request, on every push to main, and before every publication. They build the
+# site from what the program describes of itself (vigile describe) and from running the program, and look at
+# it in a browser.
+#
+# Building and publishing are started by hand only, for now, and only a site whose tests passed in the same run
+# is published. No run fails on a repository where Pages is off. What is left to do to go public is in
+# website/README.md, in short:
+#   1. In the repository's settings, under Pages, set "Source" to "GitHub Actions".
+#   2. Start this workflow by hand once and look at the site.
+#   3. To publish on every change, let the jobs "build" and "publish" run on a push to main as well.
+#
+# Every action is named by the commit it is, in full, with its version beside it: a tag can be moved to other
+# code, a commit cannot. To take a newer version, look up the commit of its tag and change both.
+name: Web site
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Nothing more than to read the code, unless a job says what else it needs.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test the site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The tests read the code and nothing else.
+    permissions:
+      contents: read
+    # A newer push to the same branch makes the run for the older one pointless. A run that was started by hand
+    # is in a group of its own: a push does not end the tests a publication waits for.
+    concurrency:
+      group: site-tests-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The version of pnpm is the one package.json names in "packageManager".
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The site is made from the vigile program, which this makes.
+      - run: pnpm build
+
+      # The browser tests are skipped when no browser is found, which would pass for the wrong reason: make sure
+      # the one the runner comes with is there.
+      - name: Check that there is a browser for the browser tests
+        run: test -x /usr/bin/google-chrome && /usr/bin/google-chrome --version
+
+      - name: Run the tests of the site
+        run: node --test website/*.test.mjs
+        env:
+          VIGILE_TEST_BROWSER: /usr/bin/google-chrome
+
+  build:
+    name: Build the site
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # To read the code, and to ask Pages where the site is served.
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The version of pnpm is the one package.json names in "packageManager".
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The site is made from the vigile program, which this makes.
+      - run: pnpm build
+
+      # Says where the site will be served: under the project's path today, at a domain of its own once one is set.
+      - id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      # The build asks the program to describe itself and starts services through it, on this machine only, to
+      # run the examples. It looks at what it wrote and fails on a link or a picture that leads nowhere. It
+      # needs no browser: the pictures are files in the repository.
+      - name: Build the site for the address it is published at
+        run: node website/build.mjs --out website/dist --site-url "${{ steps.pages.outputs.base_url }}/"
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: website/dist
+
+  publish:
+    name: Publish it
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # What publishing needs and nothing else: to write the pages, and to say who it is to Pages.
+    permissions:
+      pages: write
+      id-token: write
+    # One publication at a time, and one that has begun is let finish: half a site is worse than an older one.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

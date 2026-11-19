@@ -1,0 +1,12 @@
+{
+  "shows": "The four steps of a change: check, store, apply, announce. And where a read is answered from: the plan in memory, or the store.",
+  "ids": [],
+  "terms": [],
+  "steps": ["CHECK", "STORE", "APPLY", "ANNOUNCE"],
+  "file": "default.sqlite",
+  "reads": {
+    "memory": "items, links, and next, waiting and problems are answered from here",
+    "store": "descriptions, history and timelines are read from the store when asked for",
+    "fromTheStore": ["description", "timeline", "history"]
+  }
+}
