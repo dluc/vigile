@@ -88,7 +88,7 @@ To make every connection need a key: `vigile config set auth.keyless_user ""`. S
 
 ## The tools
 
-Every [operation](/docs/operations/) is a tool of the same name, with the same input. The list an agent gets depends on its user's type: tools for admins are not listed for anyone else.
+Every [operation](/docs/operations/) is a tool of the same name, with the same input. The list an agent gets depends on its user's type: tools for admins are not listed for anyone else. It also depends on [what the instance offers](/docs/configuration/#features): one set up for tasks alone lists no decision tool, and one for decisions alone no task tool.
 
 {{mcp-tools}}
 
@@ -101,6 +101,8 @@ Every [operation](/docs/operations/) is a tool of the same name, with the same i
 On connecting, an agent receives instructions: the routine for a task, how to organise work, and where to read more.
 
 {{mcp-instructions}}
+
+That is what an instance with tasks says. One set up for [decisions alone](/docs/configuration/#features) tells its agents how to keep the register instead: record a choice as proposed or active, find decisions with `list_decisions`, and amend or withdraw one with the version just read.
 
 The routine, in short:
 

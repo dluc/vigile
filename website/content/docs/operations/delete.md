@@ -12,6 +12,7 @@ refusal: {"id": "WEB", "version": 1}
 - By default the item is only hidden: it leaves the lists, stops holding back what depends on it, can still be read with `get`, and comes back with [`restore`](/docs/operations/restore/).
 - A project that still contains tasks cannot be deleted: delete the tasks first, or move them out with `remove_link`.
 - A user that still has tasks assigned cannot be deleted. Its key stops working when it is deleted.
+- A [decision](/docs/model/#decisions) is deleted like a task. It leaves [`list_decisions`](/docs/operations/list-decisions/), which a withdrawn one does not.
 - The three built-in users cannot be deleted.
 - **Deleting a user, and deleting anything for good, is for admins.** `permanent: true` removes the item with its description, its links and its history, and cannot be undone. A {{=link.recorders}} that was linked to it records in its own history that the link is gone; a {{=link.silent}} does not.
 - A project cannot be deleted for good while deleted tasks are still in it. Its prefix is never given to another project.

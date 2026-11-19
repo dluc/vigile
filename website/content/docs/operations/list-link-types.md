@@ -8,7 +8,7 @@ example: {}
 
 ## Rules
 
-- The types are the three that are built in: "contains", "depends on" and "assigned to". See [link types](/docs/model/#link-types).
+- The types are built in, and an instance lists those of [the features it offers](/docs/configuration/#features): "contains", "depends on" and "assigned to" with tasks, "affects" with decisions. See [link types](/docs/model/#link-types).
 - [`add_link`](/docs/operations/add-link/) and [`remove_link`](/docs/operations/remove-link/) take either name of a type.
 
 ## Errors

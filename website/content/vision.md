@@ -39,7 +39,7 @@ Direction | Guidance fitted to an agent's role and state, measured by evaluation
 Mixed | A dependency between two teams is visible | Today a task can wait for a task, or a whole project, elsewhere in the same plan, and [the graph](/docs/web-page/#the-graph) draws the arrow. Across plans that are kept apart, it is a direction.
 Mixed | A stale claim is noticed | Today [`list_stale_tasks`](/docs/operations/list-stale-tasks/) finds assigned work quiet for 24 hours, on demand. A proactive observer is direction; neither releases or reassigns it.
 Mixed | A policy refuses a move that conflicts | Today the built-in rules do, and of two agents that take one task [one is refused](/how/versions-and-history/#taking-a-task). Rules that a team sets for itself are a direction.
-Today | Decisions and history survive a handoff | The description, the reason, each status and who changed what stay with the task. The next agent or person reads them with [`get`](/docs/operations/get/).
+Today | Decisions and history survive a handoff | The description, the reason, each status, who changed what and [the decisions affecting it](/how/plan-as-a-graph/#decisions) stay with the task. The next agent or person reads them with [`get`](/docs/operations/get/).
 }}
 
 ## Why the ceiling is higher than the product {#why-credible}

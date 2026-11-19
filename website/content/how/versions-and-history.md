@@ -11,7 +11,7 @@ terminals: running-demo
 
 ## Changing an item names its version
 
-Every project, task and user has a `version`. It starts at 1 and goes up by one with each change to the item. A call that changes or deletes an item that is there sends the version it last read. Those are {{=ops.versioned}}:
+Every project, task, decision and user has a `version`. It starts at 1 and goes up by one with each change to the item. A call that changes or deletes an item that is there sends the version it last read. Those are {{=ops.versioned}}:
 
 ```sh terminal=your
 vigile set-task-status --id WEB-005 --version 1 --status in_progress
@@ -31,14 +31,14 @@ Two agents that both read a task as next and both try to start it cannot both su
 
 ## Links count as a change to the task
 
-`add_link` and `remove_link` take no version: they add to or take from a set, and two of them do not overwrite each other. But a new or removed link moves the version of the task it is about, the one that is contained, depends or is assigned. Whoever read that task earlier gets a conflict and reads it again.
+`add_link` and `remove_link` take no version: they add to or take from a set, and two of them do not overwrite each other. But a new or removed link moves the version of the task it is about, the one that is contained, depends or is assigned. Whoever read that task earlier gets a conflict and reads it again. An "affects" link moves the version of the decision, not of what it affects.
 
 ## History
 
 A change to an item is written to its history in the same step as the change itself: when, by whom, and what. [`get`](/docs/operations/get/) with `history` returns it. [`list_history`](/docs/operations/list-history/) lists the changes of the whole plan, newest first, and the page shows them in its [History view](/docs/web-page/#history).
 
-- Creation, and every later change of a field, with what the text was before.
-- Every change of status. A task's **timeline** lists each status it went through.
+- Creation, and every later change of a field, with what the text was before. That is how a [decision](/how/plan-as-a-graph/#decisions) that was amended still says what it said.
+- Every change of status. The **timeline** of a task, a project or a decision lists each status it went through.
 - Links added and removed, in the history of each end that is a {{=link.recorders}}. A {{=link.silent}} keeps no history of the tasks it is given: who had a task, and from when to when, is in the history of the task. See [who records a link](/docs/operations/add-link/#who-records-a-link).
 - Deleting and restoring.
 

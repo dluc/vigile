@@ -43,7 +43,7 @@ Do that before the service can be reached from another machine. `serve` and the 
 
 ## What a user may do
 
-Everyone in an instance sees the whole plan, and every user may call the operations that read and change projects, tasks and links. What depends on the type:
+Everyone in an instance sees the whole plan, and every user may call the operations that read and change projects, tasks, decisions and links. What depends on the type:
 
 - **Creating users and resetting keys** are operations for admins. They are not even listed for anyone else: an agent's list of tools does not have them.
 - **Deleting for good**, and deleting or restoring a user, are for admins, within operations everyone may call.

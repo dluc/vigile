@@ -1,8 +1,8 @@
 ---
 title: The web page
-description: The web page of Vigile shows the plan as a board by state, as a graph of what waits for what, and as a history of recorded changes. It can adjust task priority, has an address for every view and item, and can follow changes live.
-card: The board, the graph, History, the panel of an item, addresses, settings and themes.
-lead: The page is where people look at the plan. It shows a board, a graph and the history of changes, opens any item in a panel, and lets the current browser user adjust a task's priority.
+description: The web page of Vigile shows the plan as a board by state, as a graph of what waits for what, as a history of recorded changes, and as a register of decisions. It can adjust task priority, has an address for every view and item, and can follow changes live.
+card: The board, the graph, History, the decision register, the panel of an item, addresses, settings and themes.
+lead: The page is where people look at the plan. It shows a board, a graph, the history of changes and a register of decisions, opens any item in a panel, and lets the current browser user adjust a task's priority.
 ---
 
 {{picture board | The board. The projects at the top with their progress, a filter and counts, then the tasks in columns by state: in progress, next, in review, waiting for dependencies, done.}}
@@ -90,6 +90,22 @@ The browser also remembers the filters that were applied last, in its local stor
 
 History changes nothing in the plan. It is read again when the page is refreshed and, with auto-refresh on, when the plan changes.
 
+## Decisions {#decisions}
+
+{{picture decisions | The decision register. Seven decisions listed by ID, each with its title and its state: five active, one proposed, one withdrawn. Below the list the chosen decision, "Prices include tax": its ID, state and version, its text, its rationale, the two tasks it affects, and its recent changes with who made each.}}
+
+"Decisions" in the header opens the register, a page of its own at `/decisions.html`. It lists the decisions by ID, each with its title and state, and "State" narrows the list to the proposed, the active or the withdrawn ones.
+
+Choosing a decision shows it below the list: its text, its rationale, what it affects, and its recent changes with who made each. The address then names the decision, as in `/decisions.html#WEB-018`, and shows it again when it is reloaded or shared. A decision that was deleted is no longer listed; opened by its address, it says that it was deleted and when.
+
+The register reads the plan and changes nothing. Decisions are recorded, amended and withdrawn through [the operations](/docs/operations/create-decision/), by an agent or from the command line.
+
+{{picture decision-panel | A task open in the panel on the board. Its links start with "is affected by": the two decisions that affect the task, each with its ID, its title and its state, active. Below them the group and the project the task is in, what it depends on, what needs it and who has it.}}
+
+A decision is not a card on the board or a node in the graph. It is met where the work is: the panel of a task or a project lists the decisions that affect it under "is affected by", first among its links. Following one opens the decision in the panel, with its state, its text, its reasons, what it affects and its status timeline, and a way back to the task. [History](#history) lists the changes made to decisions among the others, each marked "Decision".
+
+When an instance is [set up for decisions alone](/docs/configuration/#features), the register is its home page, and there is no board. Set up for tasks alone, the page has no "Decisions" and no register.
+
 ## Addresses {#addresses}
 
 The views, a selected or zoomed project, a zoomed group, the filters of History and an open item each have an address:
@@ -101,6 +117,8 @@ The views, a selected or zoomed project, a zoomed group, the filters of History 
 | `/#history` | History |
 | `/#graph/WEB-012` | The graph, with WEB-012 open in the panel |
 | `/#board/project:WEB` | The board, with the project WEB open in the panel |
+| `/#board/decision:WEB-018` | The board, with the decision WEB-018 open in the panel |
+| `/decisions.html#WEB-018` | The decision register, with the decision WEB-018 shown |
 | `/#board?project=WEB` | The board, with the project WEB selected |
 | `/#board?project=WEB&projectZoom=1` | The board, zoomed into the project WEB |
 | `/#board?in=WEB-003&zoom=1` | The top level inside group WEB-003 |

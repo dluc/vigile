@@ -21,7 +21,7 @@ Each page below is made from the operation's own definition: its description, it
 
 - **Input is checked before anything is done.** A field of the wrong type, a required field that is missing or a field the operation does not know is refused as `invalid_input`, and the message names the field. An operation for admins asks who is calling before that.
 - **A change to the plan is one step.** It is stored whole, with its history, or not at all. A user's key is kept in the config file, apart from the plan: the exception below is about that.
-- **An item is named by its ID.** Where a bare number could be a project or a task, put the kind in front, as in `task:042`, or give `kind`. A user can be named by its username.
+- **An item is named by its ID.** Where a bare number could be a project as well as a task or a decision, put the kind in front, as in `task:042`, or give `kind`. A user can be named by its username.
 - **A refusal says what is wrong** and names actions to take. See [Errors and refusals](/docs/errors/).
 - **A refusal means nothing was changed, with one exception.** {{=errors.unchanged}} are given before anything is stored. After `internal` the message says what stands, or that the change was not confirmed: read the item again before sending the change again. See [what an error leaves behind](/docs/errors/#what-to-do-with-a-refusal).
 
