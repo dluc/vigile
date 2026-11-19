@@ -4,12 +4,11 @@
 # site from what the program describes of itself (vigile describe) and from running the program, and look at
 # it in a browser.
 #
-# Building and publishing are started by hand only, for now, and only a site whose tests passed in the same run
-# is published. No run fails on a repository where Pages is off. What is left to do to go public is in
-# website/README.md, in short:
-#   1. In the repository's settings, under Pages, set "Source" to "GitHub Actions".
-#   2. Start this workflow by hand once and look at the site.
-#   3. To publish on every change, let the jobs "build" and "publish" run on a push to main as well.
+# Building and publishing are started by hand only, and only a site whose tests passed in the same run is
+# published: a change to the site is public once this workflow was started on main after it. The site is
+# served at the address the repository's Pages settings give it, where "Source" is "GitHub Actions". To publish
+# on every change instead, let the jobs "build" and "publish" run on a push to main as well. More in
+# website/README.md.
 #
 # Every action is named by the commit it is, in full, with its version beside it: a tag can be moved to other
 # code, a commit cannot. To take a newer version, look up the commit of its tag and change both.
@@ -90,7 +89,8 @@ jobs:
       # The site is made from the vigile program, which this makes.
       - run: pnpm build
 
-      # Says where the site will be served: under the project's path today, at a domain of its own once one is set.
+      # Says where the site is served: the domain that is set for it in the repository's Pages settings, or the
+      # project's path where none is.
       - id: pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 

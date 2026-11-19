@@ -2,7 +2,7 @@
 
 The site that presents Vigile: what it is (**Product**), the ideas behind it (**How it works**) and the
 reference (**Documentation**). It is a static site, built by a script with no framework and no dependency, and
-made to be served by GitHub Pages under the project's path.
+served by GitHub Pages at a domain of its own, <https://vigile.dev.ai/>. It works under any path.
 
 ## The site and the product
 
@@ -33,7 +33,7 @@ node website/serve.mjs --dir <folder> --base /vigile/ --host <address> --port <p
 ```
 
 Without options, `build.mjs` writes `website/dist` for the address in `site.mjs`, and `serve.mjs` serves that
-folder at `http://127.0.0.1:4173/vigile/`. So on your own machine: `pnpm build && node website/build.mjs && node website/serve.mjs`.
+folder at `http://127.0.0.1:4173/`. So on your own machine: `pnpm build && node website/build.mjs && node website/serve.mjs`.
 
 **`build.mjs`** builds the whole site in some seconds and ends with an error, saying why, when something is
 wrong: a page that is not in the navigation, a name the program has and the pages have no words for, an example
@@ -245,21 +245,23 @@ free port in its place; nothing else is changed.
 
 Nothing private goes on the site: no machine names, addresses, paths or keys, and nothing from a real plan.
 
-## Going public
+## Publishing
 
-The site is not published yet. The workflow `.github/workflows/pages.yml`, "Web site", is the site's own. It
-runs the site's tests on every pull request and on every push to `main`, with the Chrome the runner comes
+The site is public at <https://vigile.dev.ai/>. The workflow `.github/workflows/pages.yml`, "Web site", is the
+site's own. It runs the site's tests on every pull request and on every push to `main`, with the Chrome the runner comes
 with. It builds the site and publishes it with the official Pages actions only when it is started by hand,
 and then only after the tests passed in the same run.
 Each job asks for what it needs and no more: the tests read the code, the build also asks Pages for the
-address, and only publishing may write the pages. What is left to do:
+address, and only publishing may write the pages.
 
 The workflow names every action by its full commit, with its version in a comment beside it or on the line above, so that the repository can require actions to be pinned: a tag can be moved to other code, a commit cannot. To take a newer version of an action, look up the commit its tag points at and change the commit and the comment together, in every job that names it. `site.test.mjs` reads the workflow as YAML with `lib/yaml.mjs`, a reader of the small part of YAML the workflow uses, so a file that is not YAML, such as one with the marks of an unfinished merge, fails with its line; and it refuses a workflow that names an action by a tag, a branch or a short commit, or names one twice in a job.
 
-1. In the repository's settings, under **Pages**, set **Source** to **GitHub Actions**. That is the one switch.
-2. Start the workflow "Web site" by hand (Actions, "Web site", "Run workflow") and look at the result. The
-   address comes from Pages itself, so nothing has to be changed for it.
-3. To publish on every change, let the jobs `build` and `publish` run for a push to `main` as well: in the
-   workflow, each of the two says `if: github.event_name == 'workflow_dispatch'`.
-4. If the site moves to another address, such as a domain of its own, change `SITE_URL` in `site.mjs`, which
-   the README's links and a build without options go by.
+A change to the site is public only after the workflow is started again:
+
+1. Start the workflow "Web site" by hand (Actions, "Web site", "Run workflow") on `main` and look at the
+   result. The address comes from Pages itself: the domain set in the repository's settings, under **Pages**,
+   where **Source** is **GitHub Actions**.
+2. To publish on every change instead, let the jobs `build` and `publish` run for a push to `main` as well: in
+   the workflow, each of the two says `if: github.event_name == 'workflow_dispatch'`.
+3. If the site moves to another address, set it in the repository's Pages settings and change `SITE_URL` in
+   `site.mjs`, which the README's links and a build without options go by.

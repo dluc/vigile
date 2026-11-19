@@ -22,14 +22,14 @@ Linux, but other systems are untested.
 
 The pictures in this file show made-up data.
 
-**More than this file:** the web site has three areas. [Product](https://dluc.github.io/vigile/)
-says what Vigile is for and what it does today, with [the vision](https://dluc.github.io/vigile/vision/)
-marking what is a direction and not built; [How it works](https://dluc.github.io/vigile/how/) explains the
-ideas one at a time, and the [Documentation](https://dluc.github.io/vigile/docs/) is the
-reference for every [operation](https://dluc.github.io/vigile/docs/operations/),
-[setting](https://dluc.github.io/vigile/docs/configuration/),
-[command](https://dluc.github.io/vigile/docs/cli/) and
-[error](https://dluc.github.io/vigile/docs/errors/). The site is made from the folder
+**More than this file:** the web site has three areas. [Product](https://vigile.dev.ai/)
+says what Vigile is for and what it does today, with [the vision](https://vigile.dev.ai/vision/)
+marking what is a direction and not built; [How it works](https://vigile.dev.ai/how/) explains the
+ideas one at a time, and the [Documentation](https://vigile.dev.ai/docs/) is the
+reference for every [operation](https://vigile.dev.ai/docs/operations/),
+[setting](https://vigile.dev.ai/docs/configuration/),
+[command](https://vigile.dev.ai/docs/cli/) and
+[error](https://vigile.dev.ai/docs/errors/). The site is made from the folder
 [`website/`](website/README.md) of this repository; to read it where it is not published,
 build it and serve it on your machine: `pnpm build && node website/build.mjs && node website/serve.mjs`.
 
