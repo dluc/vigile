@@ -4,8 +4,10 @@ import { OPERATIONS, VERSION, toHyphens } from "@vigile/core";
 import { keyRefused } from "./answers.js";
 import { UsageError, flag, parseArgs, type Args } from "./args.js";
 import { NoAnswerError, NotRunningError, ServiceError } from "./client.js";
+import { EXIT_CODES, type CommandLineCode } from "./codes.js";
 import { backup } from "./commands/backup.js";
 import { config } from "./commands/config.js";
+import { describe } from "./commands/describe.js";
 import { doctor } from "./commands/doctor.js";
 import { help } from "./commands/help.js";
 import { restoreBackup } from "./commands/restore-backup.js";
@@ -20,7 +22,7 @@ import { createUi, failure, warningsOf, type Ui } from "./ui.js";
 /** Returns an exit code, or nothing for success. */
 type Command = (args: Args, ui: Ui) => Promise<number | void>;
 
-const COMMANDS: Record<string, Command> = { serve, config, user, doctor, backup, "restore-backup": restoreBackup };
+const COMMANDS: Record<string, Command> = { serve, config, user, doctor, backup, "restore-backup": restoreBackup, describe };
 
 async function run(args: Args, ui: Ui): Promise<number> {
   // `--version` alone asks for the CLI's version; after a command it is that command's own option.
@@ -47,15 +49,8 @@ async function run(args: Args, ui: Ui): Promise<number> {
   throw new UsageError(`There is no command called "${name}".`, ["Run: vigile help"]);
 }
 
-/**
- * The exit code when the service was reached and its answer did not come. Every other failure is 1 and means
- * that nothing was done. After this one a change may have been stored, may be stored yet, or never, and a script
- * must not take it for any of them.
- */
-const EXIT_NO_ANSWER = 2;
-
 /** What a failure of the command line itself is called, what it says, and what to do about it. */
-function told(error: unknown): [code: string, message: string, actions: string[]] {
+function told(error: unknown): [code: CommandLineCode, message: string, actions: string[]] {
   if (error instanceof NotReachedError) return [error.code, error.message, error.hints];
   if (error instanceof NotRunningError) return ["not_running", error.message, ["Start it: vigile serve --config <file>", "Or check it: vigile doctor --config <file>"]];
   if (error instanceof NoAnswerError) {
@@ -116,7 +111,7 @@ async function main(): Promise<number> {
       if (json) ui.err(JSON.stringify({ error: { code, message, ...(actions.length ? { actions } : {}) }, ...(warnings.length ? { warnings } : {}) }, null, 2));
       else failure(ui, message, actions);
     }
-    return error instanceof NoAnswerError ? EXIT_NO_ANSWER : 1;
+    return error instanceof NoAnswerError ? EXIT_CODES.no_answer : EXIT_CODES.failed;
   }
 }
 

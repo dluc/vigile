@@ -50,7 +50,7 @@ export interface McpOptions {
 export const INSTRUCTIONS = AGENT_INSTRUCTIONS;
 
 /** Ready-made requests a client can offer its user. Each one sends the agent to the guide and then to work. */
-const PROMPTS = [
+export const PROMPTS = [
   {
     name: "plan_work",
     title: "Plan a piece of work",

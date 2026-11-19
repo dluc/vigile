@@ -116,6 +116,14 @@ export const BUILTINS: readonly Builtin[] = [
   },
   { name: "user reset-key", group: "Set up", words: [{ name: "username" }], options: [], text: "issue a new key and cancel the old one" },
   { name: "user list", group: "Set up", words: [], options: [], text: "show the users and how each connects" },
+  {
+    name: "describe",
+    group: "Set up",
+    words: [],
+    options: [],
+    text: "print what this version offers, as JSON",
+    more: ["Operations with their inputs, commands, settings, errors, statuses, limits, the guide and what an agent is told over MCP.", "Needs no config and reads no plan: it describes the program, for documentation and for tools made from it."],
+  },
 ];
 
 /** The options every command takes, built-in or operation. */

@@ -5,7 +5,19 @@ import { BUILTINS, EVERYWHERE, builtinsUnder, calledAs, notOneOf, optionAsTyped,
 import { optionsOf, usage } from "./operation.js";
 
 /** What only the commands that are operations take, besides the fields of their input. */
-const AS: BuiltinOption = { name: "as", value: "username", text: "act as another user; operations act as admin by default" };
+/**
+ * The help itself, as a command. It is not among the built-in commands, whose arguments are read by their
+ * description: what follows `help` is the name of another command, of one word or of two.
+ */
+export const HELP = {
+  name: "help",
+  usage: "vigile help [command]",
+  text: "list the commands, or show what one command takes",
+  more: ["So does <command> --help.", "vigile --version, with no command, prints the version."],
+  words: ["command"],
+} as const;
+
+export const AS: BuiltinOption = { name: "as", value: "username", text: "act as another user; operations act as admin by default" };
 
 const firstSentence = (text: string): string => text.split(/(?<=[.:])\s/)[0]!.replace(/[.:]$/, "");
 
@@ -125,6 +137,6 @@ function everything(ui: Ui): void {
   ui.out();
   ui.out(`  ${bold(ui, "Everywhere")}`);
   options(ui, EVERYWHERE, "    ", size);
-  ui.out(`    ${accent(ui, pad("help <command>", size))}  ${dim(ui, "show a command's options; so does <command> --help")}`);
+  ui.out(`    ${accent(ui, pad(HELP.usage.slice("vigile ".length), size))}  ${dim(ui, `${HELP.text}; so does <command> --help`)}`);
   ui.out();
 }
