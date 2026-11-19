@@ -3,13 +3,19 @@
 [![CLI: vigile](https://img.shields.io/badge/CLI-vigile-2f62c4)](#the-command-line-and-the-http-api)
 [![MCP: streamable HTTP](https://img.shields.io/badge/MCP-streamable_HTTP-7a4fc4)](#what-an-agent-does)
 [![HTTP API: JSON](https://img.shields.io/badge/HTTP_API-JSON-1f8a4c)](#the-command-line-and-the-http-api)
-[![Web UI: board and graph](https://img.shields.io/badge/Web_UI-board_and_graph-b7791f)](#the-web-page)
+[![Web UI: board, graph and history](https://img.shields.io/badge/Web_UI-board%2C_graph_and_history-b7791f)](#the-web-page)
 
-Vigile keeps the plan that you and your AI agents work from. It stores
-projects, tasks and the links between them, works out what can be started next,
-and refuses a change that would leave the plan inconsistent. Agents reach it
-over MCP, you watch it in a browser, and scripts use the HTTP API or the command
-line: all of them see the same plan and follow the same rules.
+Vigile keeps the plan that your AI agents work from, where you can see it.
+Agents record and track their own work in it: what they take on, what they
+finish, what they find on the way. You watch all of it in one place, from the
+top or as deep as the work is nested, see what the plan flags, and steer by
+priority.
+
+It stores projects, tasks and the links between them, works out what can be
+started next, and refuses a change that would leave the plan inconsistent.
+Agents reach it over MCP, you watch it in a browser, and scripts use the HTTP
+API or the command line: all of them see the same plan and follow the same
+rules.
 
 You run it yourself, on your own machine: one Node.js process and one SQLite
 file, with no account anywhere. It listens on `127.0.0.1` only until you decide
@@ -35,6 +41,13 @@ build it and serve it on your machine: `pnpm build && node website/build.mjs && 
 
 ## When you'd use it
 
+- **Your agents run in different sessions, or on different machines, and you
+  want one view of them.** Every agent reports to the same service, from this
+  machine or from [another one](#how-do-i-reach-it-from-another-machine).
+  Give [each agent a user and a key of its own](#several-agents-one-plan), and
+  the board shows what each has in progress, and History what each did and
+  when. Agents that share a user, as all do without a key, cannot be told
+  apart.
 - **More than one agent is working, and they must not pick the same task.**
   Each agent asks for what can start now, marks a task as in progress when it
   really starts, and another agent is refused while it is in progress or
@@ -47,7 +60,19 @@ build it and serve it on your machine: `pnpm build && node website/build.mjs && 
   the second back until the first is finished. Nobody has to remember it.
 - **You want to see what is going on without asking.** A board and a graph in a
   browser show what is in progress, what is next, what is waiting and why, from
-  a desktop or a phone.
+  a desktop or a phone. Zoom out and each area of the work is one card with its
+  progress; zoom into a project, a group, or a group inside a group for the
+  detail.
+- **You want to steer without interrupting anyone.** Raise the priority of a
+  task or of a whole area in the page. `list_next_tasks` lists the work an
+  agent can start, which is open, has nothing unfinished in the way and is
+  assigned to that agent or to nobody, and orders it by priority from the
+  outermost group down to the task. Raising an area moves the work that can
+  start inside it ahead of the areas below it; raising a task moves it ahead
+  within its group.
+- **You run several projects, linked or not.** A task can wait for a task, or
+  for a whole project, elsewhere in the plan; projects that have nothing to do
+  with each other sit side by side.
 - **Bugs found on the way should not get lost.** An agent records a bug, an
   issue or an incident as its own item, in the feature it affects, and it stands
   out from planned work.
@@ -65,6 +90,9 @@ build it and serve it on your machine: `pnpm build && node website/build.mjs && 
 - **Groups, as flat or as deep as the work.** A task that contains tasks is a
   group: a feature, an epic, a release. Groups hold groups, each reports its
   progress, and every list can show the top level or one group.
+- **A graph, not a tree.** A task can sit in several groups, also in a group of
+  another project, and wait for work anywhere in the plan. The same work can be
+  organised and looked at in more than one way.
 - **Refusals that say what to do.** A change that breaks a rule is refused with
   what is in the way and the actions that would resolve it.
   An unchanged status or an item that is already restored needs no change:
@@ -79,9 +107,10 @@ build it and serve it on your machine: `pnpm build && node website/build.mjs && 
 - **A guide agents can read.** `get_guide` shows the ways to organise work, the
   routine for a task, and complete examples. The tests run every call the
   examples show.
-- **A web page for reading and steering.** A board by state, a graph of what
-  waits for what, a panel for each item, an address for every view and item,
-  and controls in a task's panel to raise or lower its priority.
+- **A web page for reading and steering.** A board by state that zooms from the
+  top level into any group, a graph of what waits for what, a history of
+  changes, a panel for each item, an address for every view and item, and
+  controls in a task's panel to raise or lower its priority.
 - **History.** Who changed what and when, for every item, and every status a
   task went through. Created and completed work is easy to spot, with the time
   from creation to completion in the feed and task details. Filter status
@@ -258,6 +287,8 @@ the task appears in `list_next_tasks`.
 
 ![The graph: a box for each project and each group, tasks coloured by state, and arrows from each task to the ones that wait for it](images/graph.webp)
 
+![History: filters for text, item kind, event, actor, status and dates, then the changes of the plan, newest first, each with what was done, by whom and when](images/history.webp)
+
 The graph's box reaches the bottom of the window, and "Full screen" gives the
 graph the whole screen; Escape brings the page back.
 
@@ -311,6 +342,8 @@ while it is read, it is read again, and an item that goes on changing is shown
 by itself, with a note that its further pages are not shown.
 
 ![A task open in the panel: its state, description, reason, links grouped by kind, and details](images/task.webp)
+
+![The board at its top level: each group is one card with its progress, what is in progress and waiting inside it, its open bugs, and a button to zoom in](images/overview.webp)
 
 The board can be zoomed out for a high-level view. It opens with every task
 shown. One compact, framed surface holds the minus, level, plus, current
