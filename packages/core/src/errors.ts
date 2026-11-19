@@ -80,7 +80,39 @@ export const notFound = (message: string, actions?: string[]) => new VigileError
 
 export const forbidden = (message: string, actions?: string[]) => new VigileError("forbidden", message, { actions });
 
-export const refused = (rule: string, message: string, details: Omit<ErrorDetails, "rule"> = {}) =>
+/**
+ * Every rule a change can be refused by, in the order of the alphabet. A refusal names one of these in `rule`,
+ * and nothing else: `refused` takes no other name, so the list is whole for as long as the code compiles.
+ */
+export const RULES = [
+  "active_contents",
+  "already_deleted",
+  "assigned_to_other",
+  "built_in",
+  "completed_before_created",
+  "completed_before_earlier_completion",
+  "completed_container",
+  "contains_deleted_tasks",
+  "contains_tasks",
+  "created_after_change",
+  "created_after_recorded",
+  "deleted",
+  "has_assigned_tasks",
+  "loop",
+  "not_completed",
+  "not_deleted",
+  "prefix_taken",
+  "same_status",
+  "self_link",
+  "status_move_not_allowed",
+  "timestamp_in_future",
+  "unfinished_contents",
+  "unfinished_dependencies",
+  "username_taken",
+] as const;
+export type Rule = (typeof RULES)[number];
+
+export const refused = (rule: Rule, message: string, details: Omit<ErrorDetails, "rule"> = {}) =>
   new VigileError("rule_violation", message, { rule, ...details });
 
 /**

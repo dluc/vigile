@@ -1,5 +1,5 @@
 export { Engine, MemoryKeyStore, type Caller, type EngineOptions, type EngineStatus, type OperationLog } from "./engine.js";
-export { ERROR_ALWAYS, ERROR_CODES, ERROR_DETAIL_WORDS, VigileError, echo, httpStatus, toErrorBody, type ErrorBody, type ErrorCode, type ErrorItem } from "./errors.js";
+export { ERROR_ALWAYS, ERROR_CODES, ERROR_DETAIL_WORDS, RULES, VigileError, echo, httpStatus, toErrorBody, type ErrorBody, type ErrorCode, type ErrorItem, type Rule } from "./errors.js";
 export { OPERATIONS, findOperation } from "./operations/index.js";
 export { REPEATED_WITHOUT_VERSION, listed, operationFacts, versionAdvice, type OperationFacts } from "./operations/facts.js";
 export { mayCall, type Access, type Clock, type HistoryItem, type KeyStore, type Operation } from "./operation.js";
@@ -9,7 +9,9 @@ export {
   BUILT_IN_USERS,
   KINDS,
   LIMITS,
+  PROJECT_FINISHED,
   PROJECT_STATUSES,
+  TASK_FINISHED,
   TASK_MOVES,
   TASK_STATUSES,
   TASK_TYPES,
@@ -33,3 +35,4 @@ export { readBody } from "./body.js";
 export { isToken, itemListQuestion } from "./paging.js";
 export * as paging from "./paging.js";
 export { VERSION } from "./version.js";
+export { PROBLEM_CODES, type ProblemCode } from "./calc.js";

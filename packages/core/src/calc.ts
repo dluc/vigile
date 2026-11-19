@@ -14,8 +14,20 @@ import {
 
 /** Everything here is worked out from the graph on each read and never stored. */
 
+/** Every problem a plan can have: a contradiction that is allowed to stand and is said where it is. */
+export const PROBLEM_CODES = [
+  "unfinished_dependency",
+  "inside_inactive_container",
+  "done_with_unfinished_contents",
+  "depends_on_broken_project",
+  "project_broken",
+  "ready_with_unfinished_tasks",
+  "contains_task_with_problems",
+] as const;
+export type ProblemCode = (typeof PROBLEM_CODES)[number];
+
 export interface Problem {
-  code: string;
+  code: ProblemCode;
   message: string;
   items: Ref[];
 }
