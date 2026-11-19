@@ -396,9 +396,9 @@ describe("the commands the site shows", () => {
 
   it("show, for every operation, a command and a request that do what the page says when they are typed", async () => {
     assert.equal(built.examples.length, built.facts.operations.length);
-    const tried = async (example) => {
+    const tried = async (example, ports) => {
       // On the command line, in one place: the call that is refused first, since it changes nothing, then the example.
-      const first = await place("running-demo", await freePorts(3));
+      const first = await place("running-demo", ports);
       try {
         for (const step of example.before) await first.service.call(step.operation, step.input, step.as ?? "agent1");
         if (example.refused) {
@@ -414,7 +414,7 @@ describe("the commands the site shows", () => {
         await first.close();
       }
       // Over HTTP, in a place of its own: the example is a change, and is made once.
-      const second = await place("running-demo", await freePorts(3));
+      const second = await place("running-demo", ports);
       try {
         for (const step of example.before) await second.service.call(step.operation, step.input, step.as ?? "agent1");
         const answered = await second.once(example.http, second.keys);
@@ -429,7 +429,9 @@ describe("the commands the site shows", () => {
     const waiting = [...built.examples];
     await Promise.all(
       Array.from({ length: 4 }, async () => {
-        for (let example = waiting.shift(); example; example = waiting.shift()) await tried(example);
+        // Each worker closes its demo before starting another. Reserve for concurrency, not catalog size.
+        const ports = await freePorts(3);
+        for (let example = waiting.shift(); example; example = waiting.shift()) await tried(example, ports);
       }),
     );
   });
