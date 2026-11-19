@@ -950,6 +950,23 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       assert.deepEqual(page.errors, []);
     });
 
+    it("follows a reverse impact link and restores its decision after reload", async () => {
+      const decision = await run("create_decision", { title: "Show tax", description: "Show gross prices.", status: "active" });
+      await run("add_link", { from: `decision:${decision.id}`, type: "affects", to: ids.address });
+      try {
+        await load(`/#board/${ids.address}`);
+        await page.until("return !!document.querySelector('[data-relation=\"is affected by\"] .link')", "reverse impact link");
+        await page.click('[data-relation="is affected by"] .link');
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Show tax'", "decision detail");
+        assert.equal(await page.run("return location.hash"), `#board/decision:${decision.id}`);
+        await load(`/#board/decision:${decision.id}`);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Show tax'", "bookmarked decision");
+      } finally {
+        const latest = await run("get", { kind: "decision", id: decision.id });
+        await service.engine.execute("delete", "admin", { kind: "decision", id: decision.id, version: latest.version, permanent: true });
+      }
+    });
+
     it("says in the history what each change was: a bug that was created, moved and rewritten", async () => {
       await page.scheme("light");
       await page.size(1280, 900);

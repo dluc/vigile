@@ -13,8 +13,8 @@ describe("what an agent is told over MCP", () => {
   const unversioned = OPERATIONS.filter((operation) => operation.kind === "write" && !has(operation.name, "version")).map((operation) => operation.name);
 
   it("names the operations that take a version and the changes that take none, as their inputs have it", () => {
-    assert.deepEqual(versioned, ["set_project_status", "update_task", "set_task_status", "delete", "override_timestamp"]);
-    assert.deepEqual(unversioned, ["create_project", "create_task", "restore", "add_link", "remove_link", "create_user", "reset_user_key"]);
+    assert.deepEqual(versioned, ["update_decision", "set_project_status", "update_task", "set_task_status", "delete", "override_timestamp"]);
+    assert.deepEqual(unversioned, ["create_decision", "create_project", "create_task", "restore", "add_link", "remove_link", "create_user", "reset_user_key"]);
     const lines = INSTRUCTIONS.split("\n");
     assert.ok(lines.includes(`- ${listed(versioned)} take the version you last read. If one fails with a version conflict, read the current item in the error and decide again; never overwrite it automatically.`), "the operations that take a version");
     assert.ok(lines.includes(`- ${listed(unversioned)} take no version, so a conflict does not catch one that is sent twice. get_guide says what a second call of each does.`), "the changes that take none");

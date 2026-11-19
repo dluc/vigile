@@ -622,6 +622,23 @@ export function runStorageContractTests(name: string, factory: () => AdapterFact
         assert.deepEqual(await store.readTimeline("default", "task", "001"), { records: [{ kind: "task", id: "001", place: 0, data: { status: "draft" } }], total: 1 });
       }));
 
+    it("advances the format only when the first decision commit succeeds", () => withStore(async store => {
+      const base = { expectedRevision: null, counters: { task: 1 }, changes: [task("001")] };
+      await store.commit("default", base);
+      const before = await store.load("default");
+      const changes: Change[] = [
+        { op: "put_object", record: {kind:"decision",id:"002",version:1,data:{title:"Use gross prices"}},text:"Include tax." },
+        { op:"add_timeline", record:{kind:"decision",id:"002",data:{status:"active"}} },
+      ];
+      const decision = { expectedRevision: 1, counters:{task:2}, changes };
+      await assert.rejects(store.commit("default", {...decision, changes:[...changes,{op:"patch_timeline",kind:"decision",id:"002",from:1,to:1,data:{at:"t"}}]}));
+      assert.deepEqual(await store.load("default"),before);
+      assert.equal(await store.readText("default","decision","002"),null);
+      assert.equal((await store.readTimeline("default","decision","002")).total,0);
+      assert.equal((await store.commit("default",decision)).format,3);
+      assert.equal((await store.commit("default",{expectedRevision:2,counters:{task:3},changes:[task("003")]})).format,3);
+    }));
+
     it("applies a failed commit not at all", () =>
       withStore(async (store) => {
         await store.commit("default", { expectedRevision: null, counters: { task: 1 }, changes: [task("001")] });

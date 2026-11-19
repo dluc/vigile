@@ -1068,11 +1068,29 @@ describe("links", () => {
     assert.deepEqual(
       link_types.map((t: any) => [t.type, t.reverse]),
       [
+        ["affects", "is affected by"],
         ["contains", "is contained"],
         ["depends on", "is depended on by"],
         ["assigned to", "is assigned"],
       ],
     );
+  });
+
+  it("pages matching decisions exactly once without mixing statuses or deleted records", async () => {
+    const {agent} = await setup();
+    const expected: string[] = [];
+    for (let i=0; i<205; i++) {
+      const d = await agent("create_decision", {title:`Rule ${i}`,description:"Price policy",status:i%2 ? "proposed" : "active"});
+      if (i===4) await agent("delete", {kind:"decision",id:d.id,version:d.version});
+      else if (i%2===0) expected.push(d.id);
+    }
+    const first = await agent("list_decisions", {status:"active"});
+    assert.equal(first.decisions.length,100);
+    assert.ok(first.continuation);
+    assert.equal((await refusal(agent("list_decisions", {status:"proposed",continuation:first.continuation}))).code,"invalid_input");
+    const last = await agent("list_decisions", {status:"active",continuation:first.continuation});
+    assert.equal(last.continuation,undefined);
+    assert.deepEqual([...first.decisions,...last.decisions].map(d=>d.id),expected);
   });
 
   it("lets a task sit in two projects", async () => {
@@ -3197,7 +3215,7 @@ describe("users", () => {
     assert.notEqual(reset.api_key, created.api_key);
     assert.equal(keys.keys.get("agent2"), reset.api_key);
     assert.deepEqual(engine.operationsFor("agent").map((o) => o.name).filter((n) => n.includes("user")), ["list_users"]);
-    assert.equal(engine.operationsFor("admin").length, 21);
+    assert.equal(engine.operationsFor("admin").length, 24);
   });
 
   it("deletes users only for admins, never built-in ones, and not while tasks are assigned", async () => {
@@ -4310,6 +4328,18 @@ describe("at most a page of anything", () => {
     assert.deepEqual([(await agent("get", { id: t })).description, (await agent("get", { id: t, history: true })).history.length], ["By the other engine, again", 3]);
   });
 
+  it("conflicts on a stale decision amendment even when the winning text makes it look unchanged", async () => {
+    const storage = new Interrupted();
+    const {agent} = await setup(storage);
+    const {id} = await agent("create_decision",{title:"Price",description:"Net price",status:"active"});
+    const other = await Engine.open({storage});
+    storage.duringText = () => other.execute("update_decision","user",{id,version:1,description:"Gross price"});
+    const stale = await refusal(agent("update_decision",{id,version:1,description:"Gross price"}));
+    assert.deepEqual([stale.code,(stale.current as {version:number}).version],["version_conflict",2]);
+    const current = await agent("get",{id,history:true});
+    assert.deepEqual([current.description,current.timeline.length,current.history.map((h:any)=>h.by)],["Gross price",1,["agent1","user"]]);
+  });
+
   it("says another revision on the pages that are read after the plan was read anew, unless nothing at all was stored in between", async () => {
     const { agent, engine, storage } = await setup();
     const group = (await agent("create_task", task("Group"))).id as string;
@@ -4519,7 +4549,7 @@ describe("at most a page of anything", () => {
       assert.ok(size < 1200, `a refusal of ${size} characters: ${error.message.slice(0, 200)}`);
       return error.message;
     };
-    assert.equal(await told(agent("get", { id: long })), `No project, task or user matches "${"x".repeat(80)}… (200000 characters)".`);
+    assert.equal(await told(agent("get", { id: long })), `No project, task, user or decision matches "${"x".repeat(80)}… (200000 characters)".`);
     assert.match(await told(agent("list_tasks", { project: long })), /^No project matches "x{80}… \(200000 characters\)"\.$/);
     assert.match(await told(agent("get", { kind: "task", id: `project:${long}` })), /^"project:x{72}… \(200008 characters\)" is a project, but a task is expected here\.$/);
     assert.match(await told(agent("add_link", { from: "001", type: long, to: "002" })), /^"x{80}… \(200000 characters\)" is not a link type\.$/);
@@ -4535,8 +4565,8 @@ describe("at most a page of anything", () => {
     assert.match(await told(agent("get", Object.fromEntries(Array.from({ length: 3000 }, (_, n) => [`field${n}`, n])))), /^The input for get is not valid\. id is required\. input: Unrecognized keys: "field0", .*… \(\d+ characters\)\.$/);
     assert.match(await told(agent("create_task", task("T", { depends_on: Array.from({ length: 30 }, (_, n) => n) }))), /^The input for create_task is not valid\. depends_on\.0: [^.]+\. depends_on\.1: [^.]+\. depends_on\.2: [^.]+\. depends_on\.3: [^.]+\. depends_on\.4: [^.]+\. And 25 more\.$/);
     // What is short is repeated whole, a character of two halves is not cut in two, and what a field may be is said in full.
-    assert.equal(await told(agent("get", { id: "nothing-like-this" })), 'No project, task or user matches "nothing-like-this".');
-    assert.equal(await told(agent("get", { id: `${"a".repeat(79)}😀b` })), `No project, task or user matches "${"a".repeat(79)}… (82 characters)".`);
+    assert.equal(await told(agent("get", { id: "nothing-like-this" })), 'No project, task, user or decision matches "nothing-like-this".');
+    assert.equal(await told(agent("get", { id: `${"a".repeat(79)}😀b` })), `No project, task, user or decision matches "${"a".repeat(79)}… (82 characters)".`);
     assert.equal(await told(agent("list_tasks", { status: "nearly" })), 'The input for list_tasks is not valid. status: Invalid option: expected one of "draft"|"open"|"in_progress"|"paused"|"in_review"|"done"|"cancelled".');
   });
 });
@@ -5520,7 +5550,7 @@ describe("continuation tokens", () => {
       assert.deepEqual([...text.matchAll(/^import .* from "(.*)";$/gm)].map((found) => found[1]), file === "paging.js" ? ["./ids.js"] : [], file);
       assert.equal(/\b(require|process|Buffer|globalThis\.crypto)\b|from "node:/.test(text), false, file);
     }
-    assert.deepEqual([...KINDS], ["project", "task", "user"]);
+    assert.deepEqual([...KINDS], ["project", "task", "user", "decision"]);
   });
 
   it("reads every list of every operation to its end by the steps that hold for whoever reads one, with any filters and as far as anyone reads: a thousand pages, a hundred thousand entries", async () => {

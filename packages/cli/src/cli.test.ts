@@ -398,7 +398,7 @@ describe("command line", () => {
     // What follows a bare "--" is a word, also one that looks like --json: the refusal is in words, not in JSON.
     const word = await run(["get", "--config", config, "--", "--json"]);
     assert.equal(word.code, 1);
-    assert.match(word.err, /No project, task or user matches "--json"/);
+    assert.match(word.err, /No project, task, user or decision matches "--json"/);
     assert.throws(() => JSON.parse(word.err), "the error is not JSON");
     const asked = await run(["get", "NOPE-999", "--json", "--config", config]);
     assert.equal(JSON.parse(asked.err).error.code, "not_found", "as an option before the --, it is");
@@ -1171,7 +1171,7 @@ describe("a backup that the version before took, with each item's timeline insid
         ["deep", `UPDATE objects SET data = '{"deep":' || replace(hex(zeroblob(1500)), '00', '[') || replace(hex(zeroblob(1500)), '00', ']') || ',' || substr(data, 2) WHERE id = 'ABC-003'`, /it is of an earlier data format, and the copy of it could not be brought to the present one \(.+\)\. Nothing was changed/],
         ["both", "CREATE TABLE timeline (kind TEXT, id TEXT, place INTEGER, data TEXT)", /it has a table "timeline" that the store does not make/],
         ["claims", "UPDATE head SET format = 2", /it has no table "timeline"/],
-        ["later", "UPDATE head SET format = 3", /data format 3 is newer than this version understands \(2\)/],
+        ["later", "UPDATE head SET format = 4", /data format 4 is newer than this version understands \(3\)/],
       ] as const) {
         const damaged = join(directory, `default-20260101-00${String(name.length).padStart(4, "0")}.sqlite`);
         copyFileSync(backup, damaged);
@@ -3131,7 +3131,11 @@ describe("the answer of each operation", () => {
     await call("delete", { id: "ALP-003", version: 1 });
     await call("add_link", { from: "ALP-009", type: "depends on", to: "ALP-010" });
     await call("create_user", { username: "resetme", type: "agent" });
+    const decision = await call("create_decision", { title: "Amend this choice", description: "Context", status: "proposed" });
     const made: Array<[string, Record<string, unknown>]> = [
+      ["create_decision", { title: "Choice", description: "Record a choice", status: "proposed" }],
+      ["update_decision", { id: decision.id, version: decision.version, status: "active" }],
+      ["list_decisions", {}],
       ["create_project", { title: "  Made by the call ", prefix: "gam" }],
       ["set_project_status", { id: "bet", version: 1, status: "in_preview" }],
       ["list_projects", {}],
@@ -3176,6 +3180,7 @@ describe("the answer of each operation", () => {
     // the call that makes one names no item that exists, so that the answer is held to being a task, a project,
     // a user with its key, and not to which one. No other answer of one operation is one of another.
     const alike = new Set([
+      "create_decision < update_decision",
       "list_tasks < list_next_tasks",
       // A task that is read in full carries all that a task carries where it is made or changed.
       "create_task < get",
@@ -4953,7 +4958,7 @@ describe("with --json", () => {
       assert.deepEqual(await printed("--json"), everything, "no command at all is the help");
       const get = (await printed("get", "--help", "--json")).commands[0];
       assert.equal(get.command, "get");
-      assert.deepEqual(get.options.map((option: { option: string; value?: string; required: boolean }) => [option.option, option.value, option.required]), [["--kind", "project|task|user", false], ["--id", "text", true], ["--history", undefined, false], ["--continuation", "text", false], ["--as", "username", false]]);
+      assert.deepEqual(get.options.map((option: { option: string; value?: string; required: boolean }) => [option.option, option.value, option.required]), [["--kind", "project|task|user|decision", false], ["--id", "text", true], ["--history", undefined, false], ["--continuation", "text", false], ["--as", "username", false]]);
       assert.deepEqual(await printed("help", "get", "--json"), await printed("get", "--help", "--json"));
 
       const told = async (...args: string[]) => {

@@ -85,6 +85,42 @@ async function connect(running: Running, key?: string): Promise<Client> {
 
 const payload = (result: any) => JSON.parse(result.content[0].text);
 
+it("keeps standalone decisions across interfaces and restarts without making them work", async () => {
+  const instance = await start();
+  const client = await connect(instance);
+  try {
+    const request = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
+    const input = { title: "Show tax", description: "Include tax in displayed prices.", project: "SHOP" };
+    await instance.call("/api/create-project", { title: "Store", prefix: "SHOP" });
+    for (const fields of [{}, { status: "withdrawn" }]) assert.equal((await request("create_decision", { ...input, ...fields })).isError, true);
+    assert.equal(instance.service.engine.status().format, 2);
+    const decision = payload(await request("create_decision", { ...input, status: "proposed" }));
+    assert.equal(decision.id, "SHOP-001");
+    assert.equal(instance.service.engine.status().format, 3);
+    const task = (await instance.call("/api/create-task", { project: "SHOP", title: "Basket", description: "Calculate totals." })).body;
+    assert.equal(task.id, "SHOP-002");
+    assert.deepEqual((await instance.call("/api/get", { id: decision.id })).body.links, {});
+    await instance.call("/api/add-link", { from: decision.id, type: "affects", to: task.id });
+    const before = payload(await request("get", { id: decision.id }));
+    assert.equal(before.links.affects[0].id, task.id);
+    assert.equal((await instance.call("/api/get", { id: task.id })).body.links["is affected by"][0].id, decision.id);
+    assert.equal((await request("update_decision", { id: decision.id, version: decision.version, status: "withdrawn" })).isError, true);
+    await request("update_decision", { id: decision.id, version: before.version, description: "Use gross prices.", status: "withdrawn" });
+    assert.deepEqual((await instance.call("/api/list-decisions", { status: "active" })).body.decisions, []);
+    await client.close();
+    await instance.service.stop();
+    const reopened = await startService({ loaded: loadConfig(instance.config, {}), log() {}, warn() {} });
+    try {
+      const read = await reopened.engine.execute("get", "agent1", { id: decision.id, history: true }) as any;
+      assert.equal(read.status, "withdrawn");
+      assert.equal(read.description, "Use gross prices.");
+      assert.ok(read.history.some((entry: any) => entry.data.changes?.description?.was === input.description));
+      assert.deepEqual((await reopened.engine.execute("list_next_tasks", "agent1", {}) as any).tasks.map((t: any) => t.id), [task.id]);
+      assert.deepEqual(reopened.engine.checkConsistency(), []);
+    } finally { await reopened.stop(); }
+  } finally { await client.close(); await instance.stop(); }
+});
+
 describe("service over HTTP", () => {
   let running: Running;
   before(async () => (running = await start()));
@@ -177,8 +213,8 @@ describe("service over HTTP", () => {
     });
     const agent = await running.call("/api/operations");
     const admin = await running.call("/api/operations", undefined, running.adminKey);
-    assert.equal(agent.body.operations.length, 19);
-    assert.equal(admin.body.operations.length, 21);
+    assert.equal(agent.body.operations.length, 22);
+    assert.equal(admin.body.operations.length, 24);
     const setStatus = agent.body.operations.find((o: any) => o.name === "set_task_status");
     assert.equal(setStatus.path, "/api/set-task-status");
     assert.deepEqual(setStatus.input.required, ["id", "version", "status"]);
@@ -1452,8 +1488,8 @@ describe("service over MCP", () => {
     const admin = await connect(running, running.adminKey);
     const agentTools = (await agent.listTools()).tools.map((t) => t.name);
     const adminTools = (await admin.listTools()).tools.map((t) => t.name);
-    assert.equal(agentTools.length, 19);
-    assert.equal(adminTools.length, 21);
+    assert.equal(agentTools.length, 22);
+    assert.equal(adminTools.length, 24);
     assert.deepEqual(adminTools.filter((name) => !agentTools.includes(name)).sort(), ["create_user", "reset_user_key"]);
     assert.ok(agentTools.includes("set_task_status") && agentTools.includes("list_next_tasks"));
 
@@ -2062,7 +2098,7 @@ describe("lists longer than a page, over HTTP and MCP on the store the service r
     const from = running.logged.length;
     for (const [name, input, message] of [
       [long, {}, /^There is no operation called "x{80}… \(200000 characters\)"\.$/],
-      ["get", { id: long }, /^No project, task or user matches "x{80}… \(200000 characters\)"\.$/],
+      ["get", { id: long }, /^No project, task, user or decision matches "x{80}… \(200000 characters\)"\.$/],
       ["get", { id: group, [long]: 1 }, /^The input for get is not valid\. input: Unrecognized key: "x+… \(\d+ characters\)\.$/],
       ["add_link", { from: group, type: long, to: busy }, /^"x{80}… \(200000 characters\)" is not a link type\.$/],
     ] as const) {

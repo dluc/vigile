@@ -72,7 +72,7 @@ build it and serve it on your machine: `pnpm build && node website/build.mjs && 
   work assigned to you from work assigned elsewhere or with no assignee.
   Invalid input says to correct the reported input; restricted operations say
   which role can perform them, and built-in users must stay in place.
-- **No silent overwrites.** `set_project_status`, `update_task`, `set_task_status`, `delete` and `override_timestamp` name the version the
+- **No silent overwrites.** `update_decision`, `set_project_status`, `update_task`, `set_task_status`, `delete` and `override_timestamp` name the version the
   change was based on. If someone else changed the item first, the call fails
   and returns the item as it is now. The changes that take no version are
   named under [conflicts](#why-was-my-change-refused-with-a-conflict).
@@ -930,14 +930,14 @@ status you set; they are worked out from the links each time you ask.
 
 ### Why was my change refused with a conflict?
 
-Someone changed the item after you read it. `set_project_status`, `update_task`,
+Someone changed the item after you read it. `update_decision`, `set_project_status`, `update_task`,
 `set_task_status`, `delete` and `override_timestamp` take the `version` you last
 read; if it is no longer the current one, the call fails and returns the item
 as it is now, in short. Look at what changed, with `get` when it may be the
 description, then call again with the new version if your change still makes
 sense.
 
-`create_project`, `create_task`, `restore`, `add_link`, `remove_link`,
+`create_decision`, `create_project`, `create_task`, `restore`, `add_link`, `remove_link`,
 `create_user` and `reset_user_key` take no version, so no conflict catches one
 that is sent twice; `vigile get-guide` says what a second call of each does.
 
@@ -1079,12 +1079,15 @@ it prints while it runs is the service's log.
 
 ### Operations
 
-The same twenty-one operations are MCP tools (`set_task_status`), HTTP endpoints
+The same twenty-four operations are MCP tools (`set_task_status`), HTTP endpoints
 (`POST /api/set-task-status`) and commands (`vigile set-task-status`). Commands
 act as `admin` unless given `--as <username>`.
 
 | Command | What it does |
 |---|---|
+| `vigile create-decision` | Records a standalone choice with a title, description and explicit `proposed` or `active` status. An optional project supplies the ID prefix only. |
+| `vigile update-decision` | Amends a versioned decision or changes its status, including withdrawal. Prior wording is available through `get --history`. |
+| `vigile list-decisions` | Discovers decisions by ID, optionally filtered by status; `affects` links explicitly associate decisions with projects or tasks. |
 | `vigile create-project` | Creates a project, with a title and a prefix. |
 | `vigile set-project-status` | Changes a project's status: open, in_preview, ready, broken or cancelled. |
 | `vigile list-projects` | Lists the projects with their status, progress and problems. |
@@ -1108,7 +1111,7 @@ act as `admin` unless given `--as <username>`.
 
 No answer holds more than 100 entries of anything:
 
-- **Paged reads.** `vigile list-projects`, `vigile list-history`, `vigile list-tasks`, `vigile list-next-tasks`, `vigile list-stale-tasks`, `vigile get` and `vigile list-users` return at most 100 entries and a continuation token for the next page.
+- **Paged reads.** `vigile list-decisions`, `vigile list-projects`, `vigile list-history`, `vigile list-tasks`, `vigile list-next-tasks`, `vigile list-stale-tasks`, `vigile get` and `vigile list-users` return at most 100 entries and a continuation token for the next page.
   `vigile list-link-types` returns the whole list. The
   token belongs to the list it came from: the same operation and the same
   filters are sent with it, and for `list_next_tasks` by the same user. A token

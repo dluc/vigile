@@ -2,6 +2,7 @@ import {
   GUIDE_TOPICS,
   KINDS,
   PROJECT_STATUSES,
+  DECISION_STATUSES,
   TASK_STATUSES,
   TASK_TYPES,
   USER_TYPES,
@@ -163,7 +164,8 @@ const USER: Record<string, Sort> = {
   version: VERSION_OF_ITEM,
   deleted_at: optional(MOMENT),
 };
-const SUMMARY: Record<Kind, Record<string, Sort>> = { task: TASK, project: PROJECT, user: USER };
+const DECISION = { kind: exactly("decision"), id: idOf("decision"), title: WORDS, status: oneOf(DECISION_STATUSES, "a decision status"), version: VERSION_OF_ITEM, deleted_at: optional(MOMENT) };
+const SUMMARY: Record<Kind, Record<string, Sort>> = { task: TASK, project: PROJECT, user: USER, decision: DECISION };
 
 /**
  * What `get` adds to an item: its links in both directions, by the name each reads by; when it was made and
@@ -215,6 +217,7 @@ const timelineOf = (statuses: readonly string[]): Sort => each({ status: oneOf(s
 const DETAIL: Record<Kind, Record<string, Sort>> = {
   task: { ...READ, description: WORDS, why: orNothing(WORDS), timeline: timelineOf(TASK_STATUSES) },
   project: { ...READ, description: WORDS, timeline: timelineOf(PROJECT_STATUSES) },
+  decision: { ...READ, description: WORDS, why: orNothing(WORDS), timeline: timelineOf(DECISION_STATUSES) },
   user: READ,
 };
 
@@ -480,6 +483,9 @@ export const EXPECTED: Record<string, Judge> = {
   // so the answer is held to being a project, a task, a user with its key: which one, and with what values, is
   // the service's to say.
   create_project: (answer) => summary(answer, ["project"]),
+  create_decision: (answer) => summary(answer, ["decision"]),
+  update_decision: theItem(["decision"]),
+  list_decisions: listed("list_decisions", "decisions", DECISION, "decisions"),
   set_project_status: theItem(["project"]),
   // A list is of whatever the service found for what was asked: which items those are is the service's to say,
   // and the command line, which does not have the plan, holds a list to nothing but that each item is one.

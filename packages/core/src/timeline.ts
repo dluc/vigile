@@ -1,4 +1,4 @@
-import type { ProjectNode, TaskNode } from "./model.js";
+import type { DecisionNode, ProjectNode, TaskNode } from "./model.js";
 import type { ReadContext, TimelinePage } from "./operation.js";
 
 export type { TimelinePage };
@@ -12,6 +12,6 @@ export type { TimelinePage };
  * each change of status, and a page is read from there: neither the item's record nor the plan in memory holds
  * them, so that a change of status costs the same however many came before it.
  */
-export function timelinePage(ctx: ReadContext, node: ProjectNode | TaskNode, before?: number): Promise<TimelinePage> {
+export function timelinePage(ctx: ReadContext, node: ProjectNode | TaskNode | DecisionNode, before?: number): Promise<TimelinePage> {
   return ctx.readTimelinePage(node, before);
 }

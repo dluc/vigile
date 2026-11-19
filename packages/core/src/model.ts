@@ -14,6 +14,15 @@ export type TaskType = (typeof TASK_TYPES)[number];
 export const PROJECT_STATUSES = ["open", "in_preview", "ready", "broken", "cancelled"] as const;
 export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
 
+export const DECISION_STATUSES = ["proposed", "active", "withdrawn"] as const;
+export type DecisionStatus = (typeof DECISION_STATUSES)[number];
+export interface DecisionNode extends BaseNode {
+  kind: "decision";
+  title: string;
+  status: DecisionStatus;
+  why: string | null;
+}
+
 export const USER_TYPES = ["admin", "person", "agent"] as const;
 export type UserType = (typeof USER_TYPES)[number];
 
@@ -136,7 +145,7 @@ export const areKeyMarks = (value: unknown): value is string[] | undefined => va
 /** What is kept of a key with its user: enough to know the key again, not enough to make it. */
 export const keyMark = (key: string): string => createHash("sha256").update(key).digest("base64url");
 
-export type Node = ProjectNode | TaskNode | UserNode;
+export type Node = ProjectNode | TaskNode | UserNode | DecisionNode;
 export type NodeOf<K extends Kind> = Extract<Node, { kind: K }>;
 
 export interface Link {

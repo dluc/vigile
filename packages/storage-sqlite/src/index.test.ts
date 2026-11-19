@@ -923,8 +923,8 @@ it("sqlite: holds a file to the tables of the format it says it is in: no more t
     assert.match(found(), /the timeline of task 001 has entries missing: their places are not counted from 0 without a gap/);
     change("UPDATE timeline SET place = 0; ALTER TABLE timeline RENAME TO statuses");
     assert.match(found(), /it has no table "timeline"/);
-    change("ALTER TABLE statuses RENAME TO timeline; UPDATE head SET format = 3");
-    assert.match(found(), /data format 3 is newer than this version understands \(2\)/);
+    change("ALTER TABLE statuses RENAME TO timeline; UPDATE head SET format = 4");
+    assert.match(found(), /data format 4 is newer than this version understands \(3\)/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

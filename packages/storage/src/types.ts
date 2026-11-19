@@ -12,6 +12,12 @@ export const MAX_RECORDS_PER_COMMIT = 100;
  *    was completed.
  */
 export const FORMAT_VERSION = 2;
+/** Format 3 uses the same tables, but older clients cannot interpret decision objects. */
+export const DECISION_FORMAT = 3;
+
+export function formatAfter(current: number, changes: readonly Change[]): number {
+  return changes.some(c => c.op === "put_object" && c.record.kind === "decision") ? Math.max(current, DECISION_FORMAT) : current;
+}
 
 export interface Head {
   format: number;

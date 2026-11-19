@@ -41,8 +41,8 @@ describe("what is said of every operation", () => {
       assert.ok(!hasVersion || operation.kind === "write", `${operation.name}: only an operation that changes something takes a version`);
     }
     // As they are on this branch. A change to this list is a change to what agents are told: look at the texts below.
-    assert.deepEqual(facts.versioned, ["set_project_status", "update_task", "set_task_status", "delete", "override_timestamp"]);
-    assert.deepEqual(facts.unversioned.map((one) => one.name), ["create_project", "create_task", "restore", "add_link", "remove_link", "create_user", "reset_user_key"]);
+    assert.deepEqual(facts.versioned, ["update_decision", "set_project_status", "update_task", "set_task_status", "delete", "override_timestamp"]);
+    assert.deepEqual(facts.unversioned.map((one) => one.name), ["create_decision", "create_project", "create_task", "restore", "add_link", "remove_link", "create_user", "reset_user_key"]);
     assert.deepEqual(Object.keys(REPEATED_WITHOUT_VERSION).sort(), facts.unversioned.map((one) => one.name).sort(), "what a second call does is said of each of them, and of no other");
   });
 
@@ -53,7 +53,7 @@ describe("what is said of every operation", () => {
       assert.equal(facts.paged.includes(operation.name), hasToken, `${operation.name}: said to answer in pages exactly when its input has a continuation`);
       assert.equal(facts.wholeLists.includes(operation.name), operation.name.startsWith("list_") && !hasToken, operation.name);
     }
-    assert.deepEqual(facts.paged, ["list_projects", "list_history", "list_tasks", "list_next_tasks", "list_stale_tasks", "get", "list_users"], "the reads that answer in pages, on this branch");
+    assert.deepEqual(facts.paged, ["list_decisions", "list_projects", "list_history", "list_tasks", "list_next_tasks", "list_stale_tasks", "get", "list_users"], "the reads that answer in pages, on this branch");
     assert.deepEqual(facts.wholeLists, ["list_link_types"]);
   });
 
