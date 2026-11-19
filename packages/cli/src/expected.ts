@@ -114,7 +114,7 @@ const VERSION_OF_ITEM: Sort = { is: isVersion, called: "a whole number from 1 up
 /** A count the service works out: of tasks, of those that are finished. */
 const HOW_MANY: Sort = { is: (value) => typeof value === "number" && Number.isInteger(value) && value >= 0, called: "a whole number from 0 up" };
 const MOMENT: Sort = { is: isMoment, called: "a moment" };
-const KIND = oneOf(KINDS, "project, task or user");
+const KIND = oneOf(KINDS, "project, task, decision or user");
 const PROGRESS = having({ finished: HOW_MANY, total: HOW_MANY }, "how many are finished, and of how many");
 // What a problem is called and what it says are the service's words, made of what is stored: text.
 const PROBLEMS = optional(each({ code: WORDS, message: WORDS }, "a list of problems"));

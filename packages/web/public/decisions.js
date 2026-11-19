@@ -27,7 +27,8 @@ function detailFailure(error, mine) {
   if (mine !== turn) return;
   if (error.status === 401) return lock(error.message);
   else { el("detail").replaceChildren(); el("detail").hidden = true; }
-  el("message").textContent = error.message;
+  // The address names something that is no decision here: say so, and leave the list as it is.
+  el("message").textContent = error.status === 404 ? `There is no decision ${decodeURIComponent(location.hash.slice(1))} on this instance.` : error.message;
 }
 function impactSection(detail, decision, type, items, mine) {
   const descriptor = describeItemList(decision, ["links",type]);

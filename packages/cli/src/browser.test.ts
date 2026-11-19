@@ -982,6 +982,10 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await page.until("return !document.querySelector('#access').hidden", "revoked key prompts for connection");
         await page.click("#access button");
         await page.until("return !document.querySelector('#records').hidden", "empty key reconnects to keyless account");
+        // An address that names no decision here says so and leaves the list in place.
+        await page.open(`${instance.urls.base}/decisions.html#SHOP-999`);
+        await page.until("return document.querySelector('#message')?.textContent === 'There is no decision SHOP-999 on this instance.'", "an address that names no decision");
+        assert.equal(await page.run("return !document.querySelector('#records').hidden && document.querySelector('#detail').hidden && document.querySelectorAll('#rows a').length > 0"), true);
         await page.run(`localStorage.setItem('vigile.key',${JSON.stringify(adminKey)});`);
         await page.open(instance.urls.base);
         await page.until("return !document.querySelector('#records').hidden", "keyed session");
@@ -1050,6 +1054,10 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await page.run("history.back()");
         await page.until("return document.getElementById('panel').hidden && !location.hash.includes('decision')", "the browser's Back does not open the disabled decision");
         assert.equal(page.requests.slice(refusedBefore).some((url) => url.endsWith("/api/get")), false, "and the decision is not asked for");
+        // History kept in an address as narrowed to decisions loses that filter, and shows what the instance has.
+        await page.open(`${instance.urls.base}/#history?kind=decision&toStatus=active`);
+        await page.until("return location.hash === '#history' && document.getElementById('history-kind').value === '' && document.getElementById('history-status-to').value === '' && document.getElementById('history-kind-decision').hidden && [...document.querySelectorAll('.history-decision-status')].every(o => o.hidden && o.disabled) && document.querySelectorAll('.history-event').length > 0", "History without the filters of a disabled kind");
+        assert.equal(await page.run("return [...document.querySelectorAll('.history-event')].some(e => e.dataset.kind === 'decision')"), false);
       } finally { await page.open("about:blank"); await instance.stop(); rmSync(dir,{recursive:true,force:true}); }
     });
 
@@ -1064,6 +1072,18 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.equal(await page.run("return location.hash"), `#board/decision:${decision.id}`);
         await load(`/#board/decision:${decision.id}`);
         await page.until("return document.querySelector('.detail-title')?.textContent === 'Show tax'", "bookmarked decision");
+        // History narrows to decisions, and a decision's row opens it.
+        await load("/#history?kind=decision");
+        await page.until("return document.querySelectorAll('.history-event').length > 0 && [...document.querySelectorAll('.history-event')].every(e => e.dataset.kind === 'decision')", "History of decisions only");
+        assert.equal(await page.run("return document.getElementById('history-kind').value"), "decision");
+        await page.click('.history-event-item[data-kind="decision"]');
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Show tax' && location.hash.includes('decision:')", "the decision opened from its row in History");
+        // A decision's statuses narrow History too, and stay in the address.
+        const current = await run("get", { kind: "decision", id: decision.id });
+        await run("update_decision", { id: decision.id, version: current.version, status: "withdrawn" });
+        await load("/#history?kind=decision&fromStatus=active&toStatus=withdrawn");
+        await page.until("return document.querySelectorAll('.history-event').length === 1 && document.querySelector('.history-event').dataset.action === 'status_changed'", "the one change of a decision from active to withdrawn");
+        assert.deepEqual(await page.run("return [location.hash, document.getElementById('history-status-from').value, document.getElementById('history-status-to').value]"), ["#history?kind=decision&fromStatus=active&toStatus=withdrawn", "active", "withdrawn"]);
       } finally {
         const latest = await run("get", { kind: "decision", id: decision.id });
         await service.engine.execute("delete", "admin", { kind: "decision", id: decision.id, version: latest.version, permanent: true });

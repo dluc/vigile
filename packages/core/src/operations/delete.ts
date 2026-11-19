@@ -47,7 +47,7 @@ function inTheWay(ctx: ReadContext, node: Node, permanent: boolean): void {
 export const deleteItem = defineWrite({
   name: "delete",
   description:
-    "Delete a project, task or user. By default the item is only hidden: it leaves the lists, stops holding back what depends on it, and can be brought back with restore. A project that still contains tasks cannot be deleted. Deleting users, and deleting anything permanently, is for admins only; a permanent delete also removes the item's links and its history and cannot be undone. A project cannot be deleted permanently while deleted tasks are still in it, and its prefix is never given to another project.",
+    "Delete a project, task, decision or user. By default the item is only hidden: it leaves the lists, stops holding back what depends on it, and can be brought back with restore. A project that still contains tasks cannot be deleted. Deleting users, and deleting anything permanently, is for admins only; a permanent delete also removes the item's links and its history and cannot be undone. A project cannot be deleted permanently while deleted tasks are still in it, and its prefix is never given to another project.",
   access: "all",
   input: z.strictObject({
     kind,
