@@ -199,6 +199,14 @@ it("keeps mixed records through feature changes and distinguishes empty from omi
           if (focus === "decisions") {
             await assert.rejects(run("get",{kind:"decision",id:decision.id,continuation:fullToken}), (e:any) => e.code === "invalid_input");
             assert.deepEqual((await run("get",{kind:"decision",id:decision.id})).links,{});
+            // In a list, too, a decision names nothing of a feature that is off; nor does the answer to a
+            // change of it, or the refusal of one made with an old version.
+            assert.deepEqual((await run("list_decisions",{})).decisions.find((d:any)=>d.id===decision.id).affects,[]);
+            const held = await run("get",{kind:"decision",id:decision.id});
+            await assert.rejects(run("update_decision",{id:decision.id,version:held.version+1,why:"Asked for."}), (e:any) => e.code === "version_conflict" && e.details.current.affects.length === 0);
+            const changed = await run("update_decision",{id:decision.id,version:held.version,why:"Asked for."});
+            assert.deepEqual(changed.affects,[]);
+            await run("update_decision",{id:decision.id,version:changed.version,why:null});
             assert.deepEqual((await run("get",{id:"SHOP"})).progress,{finished:0,total:0});
             assert.deepEqual((await run("list_projects",{has_problems:true})).projects,[]);
             const current = await run("get",{id:"SHOP"});
@@ -206,6 +214,13 @@ it("keeps mixed records through feature changes and distinguishes empty from omi
             assert.deepEqual((await run("set_project_status",{id:"SHOP",version:current.version,status:"open"})).progress,{finished:0,total:0});
           }
         } else {
+          // A decision in a list says everything it affects, as a task in a list says what it depends on;
+          // read by itself, the list is cut at a page and says how many there are.
+          const listed = (await run("list_decisions",{})).decisions.find((d:any)=>d.id===decision.id);
+          assert.equal(listed.affects.length,101);
+          assert.ok(listed.affects.includes(task.id));
+          const whole = await run("get",{id:decision.id,kind:"decision"});
+          assert.deepEqual([whole.affects.length,whole.more.affects],[100,{total:101}]);
           const restored = await run("get",{id:decision.id,kind:"decision",continuation:fullToken});
           assert.equal(restored.links.affects[0].id,task.id);
         }

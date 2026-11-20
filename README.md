@@ -313,16 +313,22 @@ vigile update-decision --id WEB-004 --version 2 --status withdrawn
   `vigile list-history --kind decision` lists them across all decisions.
   `delete` and `restore` work as for any item.
 
-![The decision register: seven decisions by ID with their state, and below them the chosen one with its text, its rationale, the two tasks it affects and its recent changes](images/decisions.webp)
+![The Decisions view: the projects above it as on the board, then seven decisions as cards in three columns by state, proposed, active and withdrawn, each card with its ID, its title and what it affects](images/decisions.webp)
 
-In the page, "Decisions" in the header opens the register, at
-`/decisions.html`: the decisions by ID, each with its title and state, a
-filter by state, and for the chosen one its text, its rationale, what it
-affects and its recent changes. `/decisions.html#WEB-004` is the address of
-one decision. A task's panel lists the decisions that affect it under "is
-affected by", and following one opens the decision in the panel, which has an
-address too: `/#board/decision:WEB-004`. The page only reads decisions: they
-are recorded and changed over MCP, through the API or from the command line.
+In the page, "Decisions" is a view of its own beside Board, Graph and History,
+at `/#decisions`, laid out as the board is: a column for each state, proposed,
+active and withdrawn, and in it the decisions as cards, newest first, each with
+its ID, its title and what it affects. Selecting a project narrows the view as
+it narrows the board, to the decisions that have the project's prefix or that
+affect it or a task inside it; the box above the columns narrows it to an ID or
+words of a title. Both are in the address, as in
+`/#decisions?project=WEB&text=tax`, so a narrowed view can be bookmarked and
+comes back with Back and Forward. A decision opens in the panel as a task does,
+with its text, its reasons, what it affects, its timeline and its history, at
+an address of its own: `/#decisions/decision:WEB-004`. A task's panel lists the
+decisions that affect it under "is affected by", and following one opens it.
+The page only reads decisions: they are recorded and changed over MCP, through
+the API or from the command line.
 
 ![A task open in the panel, with the two decisions that affect it listed first among its links](images/decision-panel.webp)
 
@@ -336,14 +342,14 @@ vigile config set features decisions
 After a restart it offers the decision operations, with projects for their
 prefixes and as what a decision affects, and no task operation: over MCP, over
 the API and on the command line alike. An agent that connects is told how to
-keep the register, and the page opens on it. `vigile config unset features`
+keep the register, and the page opens on a list of the decisions, at `/decisions.html`. `vigile config unset features`
 and a restart bring the tasks back as they were; see
 [Operations](#operations) for the setting.
 
 ### The web page
 
-The page has three views, linked from its header, and beside them a link to the
-[decision register](#decisions). It is for reading the plan, with
+The page has four views, linked from its header: Board, Graph and History, and
+[Decisions](#decisions) on an instance that has them. It is for reading the plan, with
 one small steering control: in a task's panel, − and + lower or raise its
 priority by one. The change uses the version the panel read, so another change
 meanwhile is shown as a conflict and never overwritten. Priority affects where
@@ -379,7 +385,7 @@ longer there is greyed out, and a greyed box says "no longer here"; what is new
 has no place in the drawing. The page says how many items and arrows are new
 and how many are gone, and offers "Draw it again".
 
-Selecting a project narrows all three views; typing in the filter narrows the
+Selecting a project narrows all four views; typing in the filter narrows the
 Board and Graph, while History has a bookmarkable text filter for item IDs,
 titles and usernames. Clicking a project keeps the current toggle behavior: only its
 tasks are shown; all project cards stay visible, and the other projects are dimmed. A separate
@@ -1204,7 +1210,7 @@ act as `admin` unless given `--as <username>`.
 |---|---|
 | `vigile create-decision` | Records a standalone choice with a title, description and explicit `proposed` or `active` status. An optional project supplies the ID prefix only. |
 | `vigile update-decision` | Amends a versioned decision or changes its status, including withdrawal. Prior wording is available through `get --history`. |
-| `vigile list-decisions` | Discovers decisions by ID, optionally filtered by status; `affects` links explicitly associate decisions with projects or tasks. |
+| `vigile list-decisions` | Discovers decisions by ID, optionally filtered by status; each names the projects and tasks its `affects` links lead to. |
 | `vigile create-project` | Creates a project, with a title and a prefix. |
 | `vigile set-project-status` | Changes a project's status: open, in_preview, ready, broken or cancelled. |
 | `vigile list-projects` | Lists the projects with their status, progress and problems. |

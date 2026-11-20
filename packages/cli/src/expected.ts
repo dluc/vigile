@@ -164,7 +164,7 @@ const USER: Record<string, Sort> = {
   version: VERSION_OF_ITEM,
   deleted_at: optional(MOMENT),
 };
-const DECISION = { kind: exactly("decision"), id: idOf("decision"), title: WORDS, status: oneOf(DECISION_STATUSES, "a decision status"), version: VERSION_OF_ITEM, deleted_at: optional(MOMENT) };
+const DECISION = { kind: exactly("decision"), id: idOf("decision"), title: WORDS, status: oneOf(DECISION_STATUSES, "a decision status"), version: VERSION_OF_ITEM, affects: refsTo(["project", "task"], "a list of the projects and tasks it affects"), deleted_at: optional(MOMENT) };
 const SUMMARY: Record<Kind, Record<string, Sort>> = { task: TASK, project: PROJECT, user: USER, decision: DECISION };
 
 /**
@@ -256,7 +256,7 @@ const theItem =
 /** Where a list that is read on by itself stands in an answer of `get`: a list of links under its name, the timeline, the history. */
 type At = paging.At;
 /** The lists of a task's summary, which `get` cuts and counts, and which are read on as lists of links. */
-const COUNTED = ["contained_in", "live_containers", "depends_on", "assigned_to", "waiting_for"] as const;
+const COUNTED = ["contained_in", "live_containers", "depends_on", "assigned_to", "waiting_for", "affects"] as const;
 
 /**
  * What an answer of `get` says of its lists that go on, `more`, held against those lists. The service names a
