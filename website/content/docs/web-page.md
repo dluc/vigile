@@ -1,8 +1,8 @@
 ---
 title: The web page
-description: The web page of Vigile shows the plan as a board by state, as a graph of what waits for what, as a history of recorded changes, and as a register of decisions. It can adjust task priority, has an address for every view and item, and can follow changes live.
-card: The board, the graph, History, the decision register, the panel of an item, addresses, settings and themes.
-lead: The page is where people look at the plan. It shows a board, a graph, the history of changes and a register of decisions, opens any item in a panel, and lets the current browser user adjust a task's priority.
+description: The web page of Vigile shows the plan as a board by state, as a graph of what waits for what, as a history of recorded changes, and its decisions by state. It can adjust task priority, has an address for every view and item, and can follow changes live.
+card: The board, the graph, History, Decisions, the panel of an item, addresses, settings and themes.
+lead: The page is where people look at the plan. It shows a board, a graph, the history of changes and the decisions, opens any item in a panel, and lets the current browser user adjust a task's priority.
 ---
 
 {{picture board | The board. The projects at the top with their progress, a filter and counts, then the tasks in columns by state: in progress, next, in review, waiting for dependencies, done.}}
@@ -92,19 +92,21 @@ History changes nothing in the plan. It is read again when the page is refreshed
 
 ## Decisions {#decisions}
 
-{{picture decisions | The decision register. Seven decisions listed by ID, each with its title and its state: five active, one proposed, one withdrawn. Below the list the chosen decision, "Prices include tax": its ID, state and version, its text, its rationale, the two tasks it affects, and its recent changes with who made each.}}
+{{picture decisions | The Decisions view. The projects at the top, as on the board. Below them a box that filters by ID or title and the counts: 7 decisions, 1 proposed, 5 active, 1 withdrawn. Then three columns, Proposed, Active and Withdrawn, with the decisions as cards: each with its ID, its title and the tasks or the project it affects; the withdrawn one is struck through.}}
 
-"Decisions" in the header opens the register, a page of its own at `/decisions.html`. It lists the decisions by ID, each with its title and state, and "State" narrows the list to the proposed, the active or the withdrawn ones.
+"Decisions" in the header is a view of its own, beside Board, Graph and History, and laid out as the board is. Each state has a column: proposed, active and withdrawn. In it the decisions are cards, newest first, each with its ID, its title and what it affects. The counts above the columns say how many decisions are in view and in which state.
 
-Choosing a decision shows it below the list: its text, its rationale, what it affects, and its recent changes with who made each. The address then names the decision, as in `/decisions.html#WEB-018`, and shows it again when it is reloaded or shared. A decision that was deleted is no longer listed; opened by its address, it says that it was deleted and when.
+The view is narrowed as the board is. Selecting a project shows the decisions that have the project's prefix and those that affect the project or a task inside it; a group in view does the same for what it holds. The box above the columns narrows the view to an ID or to words of a title. The project, the group and the words are part of the address, so a narrowed view can be bookmarked and comes back with the browser's Back and Forward.
 
-The register reads the plan and changes nothing. Decisions are recorded, amended and withdrawn through [the operations](/docs/operations/create-decision/), by an agent or from the command line.
+Choosing a decision opens it in [the panel](#the-panel), as choosing a task does: its state, its text, its reasons, what it affects, its status timeline and its history. A decision that was deleted is no longer in the view; opened by its address, it says that it was deleted and when.
+
+The view reads the decisions when it is come to and again with every refresh of the plan, and changes nothing. Decisions are recorded, amended and withdrawn through [the operations](/docs/operations/create-decision/), by an agent or from the command line.
 
 {{picture decision-panel | A task open in the panel on the board. Its links start with "is affected by": the two decisions that affect the task, each with its ID, its title and its state, active. Below them the group and the project the task is in, what it depends on, what needs it and who has it.}}
 
-A decision is not a card on the board or a node in the graph. It is met where the work is: the panel of a task or a project lists the decisions that affect it under "is affected by", first among its links. Following one opens the decision in the panel, with its state, its text, its reasons, what it affects and its status timeline, and a way back to the task. [History](#history) lists the changes made to decisions among the others, each marked "Decision".
+A decision is not a card on the board or a node in the graph. Outside its own view it is met where the work is: the panel of a task or a project lists the decisions that affect it under "is affected by", first among its links. Following one opens the decision in the panel, with its state, its text, its reasons, what it affects and its status timeline, and a way back to the task. [History](#history) lists the changes made to decisions among the others, each marked "Decision".
 
-When an instance is [set up for decisions alone](/docs/configuration/#features), the register is its home page, and there is no board. Set up for tasks alone, the page has no "Decisions" and no register.
+When an instance is [set up for decisions alone](/docs/configuration/#features), there is no board: the page opens on a plain list of the decisions, at `/decisions.html`, where choosing one shows it below the list. Set up for tasks alone, the page has no "Decisions".
 
 ## Addresses {#addresses}
 
@@ -118,7 +120,9 @@ The views, a selected or zoomed project, a zoomed group, the filters of History 
 | `/#graph/WEB-012` | The graph, with WEB-012 open in the panel |
 | `/#board/project:WEB` | The board, with the project WEB open in the panel |
 | `/#board/decision:WEB-018` | The board, with the decision WEB-018 open in the panel |
-| `/decisions.html#WEB-018` | The decision register, with the decision WEB-018 shown |
+| `/#decisions` | Decisions |
+| `/#decisions?project=WEB&text=tax` | Decisions, narrowed to the project WEB and to those whose ID or title has "tax" |
+| `/#decisions/decision:WEB-018` | Decisions, with the decision WEB-018 open in the panel |
 | `/#board?project=WEB` | The board, with the project WEB selected |
 | `/#board?project=WEB&projectZoom=1` | The board, zoomed into the project WEB |
 | `/#board?in=WEB-003&zoom=1` | The top level inside group WEB-003 |

@@ -38,7 +38,7 @@ Set it with `vigile config set features decisions`, and name both as `tasks,deci
 
 The MCP tools, the guide, the HTTP API, the commands and the page all follow the setting, and a call to what is off is refused without writing.
 
-- **Decisions alone.** The decision operations, and with them projects, links, history and users. A project gives decisions their prefix and is what an "affects" link can lead to. No operation on tasks is offered, an agent that connects is told how to keep the register, and [the register](/docs/web-page/#decisions) is the home page.
+- **Decisions alone.** The decision operations, and with them projects, links, history and users. A project gives decisions their prefix and is what an "affects" link can lead to. No operation on tasks is offered, an agent that connects is told how to keep the register, and the page opens on [a list of the decisions](/docs/web-page/#decisions).
 - **Tasks alone.** No decision operation and no "affects" link type, and the page has no "Decisions".
 
 Turning a feature off deletes nothing: its items and links are kept, out of sight, and are there again when it is turned on.
