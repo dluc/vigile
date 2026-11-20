@@ -1058,6 +1058,9 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         await page.open(`${instance.urls.base}/#history?kind=decision&toStatus=active`);
         await page.until("return location.hash === '#history' && document.getElementById('history-kind').value === '' && document.getElementById('history-status-to').value === '' && document.getElementById('history-kind-decision').hidden && [...document.querySelectorAll('.history-decision-status')].every(o => o.hidden && o.disabled) && document.querySelectorAll('.history-event').length > 0", "History without the filters of a disabled kind");
         assert.equal(await page.run("return [...document.querySelectorAll('.history-event')].some(e => e.dataset.kind === 'decision')"), false);
+        // Nor is there a view of decisions: its address leads to the board.
+        await page.open(`${instance.urls.base}/#decisions?text=tax`);
+        await page.until("return location.hash.startsWith('#board') && !document.getElementById('board').hidden && document.getElementById('decisions-panel').hidden && document.getElementById('view-decisions').hidden", "no Decisions view without the feature");
       } finally { await page.open("about:blank"); await instance.stop(); rmSync(dir,{recursive:true,force:true}); }
     });
 
@@ -1087,6 +1090,219 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       } finally {
         const latest = await run("get", { kind: "decision", id: decision.id });
         await service.engine.execute("delete", "admin", { kind: "decision", id: decision.id, version: latest.version, permanent: true });
+      }
+    });
+
+    it("shows the decisions in a view of their own, by state, narrowed by project and by text in the address", async () => {
+      await page.scheme("light");
+      await page.size(1280, 900);
+      const before = ((await run("list_decisions", {})) as { decisions: unknown[] }).decisions.length;
+      const made: Array<{ id: string; version: number }> = [];
+      const tasks: string[] = [];
+      const shown = () => page.run<string[]>("return [...document.querySelectorAll('.decision-card')].map((e) => e.dataset.id)");
+      const inColumn = (key: string) => page.run<string[]>(`return [...document.querySelectorAll('#decisions-board .column[data-key="${key}"] .decision-card')].map((e) => e.dataset.id)`);
+      const focusOn = (id: string) => page.run(`[...document.querySelectorAll('.decision-card')].find((e) => e.dataset.id === ${JSON.stringify(id)}).focus()`);
+      const decide = async (input: Record<string, unknown>) => {
+        const decision = (await run("create_decision", { description: "d", ...input })) as { id: string; version: number };
+        made.push(decision);
+        return decision;
+      };
+      try {
+        // One with the prefix of WEB, one that affects a task in WEB, one that has nothing to do with it.
+        const prefixed = await decide({ title: "Zeta prices include tax", status: "active", project: "WEB" });
+        const linked = await decide({ title: "Zeta shop stores no card numbers", status: "active" });
+        const apart = await decide({ title: "Zeta search is hosted", status: "proposed" });
+        await run("add_link", { from: `decision:${linked.id}`, type: "affects", to: ids.address });
+        const again = (await run("get", { kind: "decision", id: linked.id })) as { version: number };
+        await run("update_decision", { id: linked.id, version: again.version, status: "withdrawn" });
+        await load("/#board");
+        await page.click("#view-decisions");
+        await page.until(`return location.hash === '#decisions' && document.querySelectorAll('.decision-card').length === ${before + 3}`, "every decision in the view");
+        // The view is one of four, laid out as the board is: the projects above it, a column for each state.
+        assert.deepEqual(await page.run("return [document.getElementById('view-decisions').getAttribute('aria-current'), document.getElementById('view-board').getAttribute('aria-current'), document.getElementById('board').hidden, document.getElementById('board-filters').hidden, getComputedStyle(document.getElementById('projects-section')).display !== 'none', [...document.querySelectorAll('#decisions-board .column')].map((c) => c.dataset.key).join(' ')]"), ["page", null, true, true, true, "proposed active withdrawn"]);
+        assert.ok((await inColumn("active")).includes(prefixed.id) && (await inColumn("withdrawn")).includes(linked.id) && (await inColumn("proposed")).includes(apart.id), "each decision in the column of its state");
+        // Newest first within a column: the numbers come from one counter.
+        const numbers = (await inColumn("active")).map((id) => Number(/(\d+)$/.exec(id)![1]));
+        assert.deepEqual(numbers, [...numbers].sort((a, b) => b - a));
+        // A card says what the decision affects, and the counts say how many decisions there are and in which state.
+        assert.match(await page.run<string>(`return [...document.querySelectorAll('.decision-card')].find((e) => e.dataset.id === ${JSON.stringify(linked.id)}).innerText`), new RegExp(`affects\\s+${ids.address}`));
+        assert.match(await text("#decisions-status"), new RegExp(`^${before + 3} decisions`));
+        // The counts stay in sight on a phone: they are also where the view says that it is reading or could not read.
+        await page.size(390, 800, true);
+        await page.until("return getComputedStyle(document.getElementById('decisions-status')).display !== 'none' && document.getElementById('decisions-status').getBoundingClientRect().height > 0", "the counts at the width of a phone");
+        await page.size(1280, 900);
+        // A count chosen on the board, such as the one of items with problems, is not carried here: every
+        // project stays there to choose.
+        await run("add_link", { from: ids.address, type: "depends on", to: ids.receipts });
+        try {
+          await load("/#board");
+          await page.click('#summary [data-summary-filter="problems"]');
+          const every = ((await run("list_projects", {})) as { projects: unknown[] }).projects.length;
+          await page.until(`return document.querySelectorAll('#projects .project-id').length < ${every}`, "the projects with problems only, on the board");
+          await page.click("#view-decisions");
+          await page.until(`return location.hash === '#decisions' && document.querySelectorAll('#projects .project-id').length === ${every}`, "every project in the Decisions view");
+        } finally {
+          await run("remove_link", { from: ids.address, type: "depends on", to: ids.receipts });
+        }
+        await load("/#decisions");
+        await page.until(`return document.querySelectorAll('.decision-card').length === ${before + 3}`, "every decision in the view again");
+        // A project narrows the view as it narrows the board: to the decisions with its prefix and to those that
+        // affect it or a task inside it. The project is in the address.
+        await page.run("[...document.querySelectorAll('#projects .project, #projects .project-chip-wrap')].find((p) => p.querySelector('.project-id')?.textContent === 'WEB').querySelector('.project-main, .project-chip').click()");
+        await page.until("return location.hash === '#decisions?project=WEB'", "the project in the address");
+        assert.deepEqual([(await shown()).includes(prefixed.id), (await shown()).includes(linked.id), (await shown()).includes(apart.id)], [true, true, false]);
+        assert.match(await text("#decisions-status"), new RegExp(`of ${before + 3} decisions, for project WEB`));
+        assert.equal(await page.run("return document.getElementById('zoom-said').textContent"), "", "the counts of tasks are not announced for the decisions");
+        // The other views are in the same project, and it is there again on the way back.
+        await page.click("#view-board");
+        await page.until("return location.hash === '#board?project=WEB' && !document.getElementById('board').hidden && document.getElementById('decisions-panel').hidden", "the board with the same project");
+        await page.click("#view-decisions");
+        await page.until("return location.hash === '#decisions?project=WEB' && document.querySelectorAll('.decision-card').length > 0", "the view with the same project");
+        // The words typed narrow it further and are in the address; the link in the header follows them.
+        await page.click("#decisions-text");
+        await page.type("zeta shop");
+        await page.until("return location.hash === '#decisions?project=WEB&text=zeta%20shop' && document.querySelectorAll('.decision-card').length === 1", "the words in the address");
+        assert.deepEqual(await shown(), [linked.id]);
+        assert.equal(await page.run("return document.getElementById('view-decisions').getAttribute('href')"), "#decisions?project=WEB&text=zeta%20shop");
+        // The address alone brings the same view back.
+        await load("/#decisions?project=WEB&text=zeta%20shop");
+        await page.until("return document.querySelectorAll('.decision-card').length === 1 && document.getElementById('decisions-text').value === 'zeta shop'", "the bookmarked view");
+        assert.deepEqual(await shown(), [linked.id]);
+        // A decision opens in the panel as a task does, with an address of its own, and Back returns to the view.
+        await page.click(".decision-card");
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Zeta shop stores no card numbers'", "the decision in the panel");
+        assert.equal(await page.run("return location.hash"), `#decisions/decision:${linked.id}?project=WEB&text=zeta%20shop`);
+        // An open decision follows a change to it, which is no change to any task.
+        const amended = (await run("get", { kind: "decision", id: linked.id })) as { version: number };
+        await run("update_decision", { id: linked.id, version: amended.version, title: "Zeta shop keeps no card numbers" });
+        await page.run("document.getElementById('refresh').click()");
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Zeta shop keeps no card numbers'", "the amended decision in the open panel");
+        await page.run("history.back()");
+        await page.until("return document.getElementById('panel').hidden && location.hash === '#decisions?project=WEB&text=zeta%20shop'", "Back closes the panel");
+        // What is recorded while the page is on another view is there on the way back, without a refresh.
+        await load("/#decisions");
+        await page.until(`return document.querySelectorAll('.decision-card').length === ${before + 3}`, "every decision again");
+        await page.click("#view-board");
+        await page.until("return !document.getElementById('board').hidden", "the board meanwhile");
+        const later = await decide({ title: "Zeta shop closes on Sundays", status: "active" });
+        await page.click("#view-decisions");
+        await page.until(`return [...document.querySelectorAll('.decision-card')].some((e) => e.dataset.id === ${JSON.stringify(later.id)})`, "the decision recorded meanwhile");
+        // A refresh that is asked for while a reading is under way is not lost. The service has answered the
+        // first reading before the change; the page gets that answer only later.
+        await page.run("window.decisionsRealFetch = window.fetch; window.decisionsHeld = []; window.decisionsAnswered = false; window.fetch = (...args) => { if (!String(args[0]).endsWith('/api/list-decisions') || window.decisionsHeld.length > 0) return window.decisionsRealFetch(...args); const answer = window.decisionsRealFetch(...args).then(async (response) => { const body = await response.text(); window.decisionsAnswered = true; return new Response(body, { status: response.status, headers: response.headers }); }); return new Promise((resolve) => window.decisionsHeld.push(() => resolve(answer))); }");
+        await page.click("#refresh");
+        await page.until("return window.decisionsHeld.length === 1 && window.decisionsAnswered", "a reading answered by the service and not yet delivered");
+        const latest = await decide({ title: "Zeta shop opens at nine", status: "active" });
+        await page.click("#refresh");
+        await page.wait(300);
+        await page.run("window.decisionsHeld[0](); window.fetch = window.decisionsRealFetch");
+        await page.until(`return [...document.querySelectorAll('.decision-card')].some((e) => e.dataset.id === ${JSON.stringify(latest.id)})`, "the reading that followed the one under way");
+        // The keyboard returns to the decision the panel was opened from, also when the board was read again meanwhile.
+        await focusOn(later.id);
+        await page.key("Enter");
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Zeta shop closes on Sundays'", "the panel opened with the keyboard");
+        await page.run("window.decisionDrawn = document.querySelector('.decision-card'); document.getElementById('refresh').click()");
+        await page.until("return !window.decisionDrawn.isConnected", "the board drawn again behind the panel");
+        await page.key("Escape");
+        await page.until(`return document.getElementById('panel').hidden && document.activeElement?.matches('.decision-card') && document.activeElement.dataset.id === ${JSON.stringify(later.id)}`, "the keyboard back on the decision");
+        // A decision that changes state moves to the column of that state and keeps the keyboard.
+        const moving = (await run("get", { kind: "decision", id: later.id })) as { version: number };
+        await run("update_decision", { id: later.id, version: moving.version, status: "withdrawn" });
+        await page.run("document.getElementById('refresh').click()");
+        await page.until(`return [...document.querySelectorAll('#decisions-board .column[data-key="withdrawn"] .decision-card')].some((e) => e.dataset.id === ${JSON.stringify(later.id)})`, "the decision in the column of its new state");
+        assert.equal(await page.run("return document.activeElement?.dataset.id"), later.id);
+        // One that leaves the view while it has the keyboard hands the keyboard to the heading of the view.
+        const leaving = (await run("get", { kind: "decision", id: later.id })) as { version: number };
+        await run("delete", { kind: "decision", id: later.id, version: leaving.version });
+        await page.run("document.getElementById('refresh').click()");
+        await page.until(`return ![...document.querySelectorAll('.decision-card')].some((e) => e.dataset.id === ${JSON.stringify(later.id)})`, "the deleted decision out of the view");
+        assert.equal(await page.run("return document.activeElement?.id"), "decisions-heading");
+        // A group reached from a decision offers nothing that belongs to the board, and narrows the view when it is the group in view.
+        const group = (await run("create_task", { title: "Zeta group", description: "d", project: "WEB" })) as { id: string };
+        const inside = (await run("create_task", { title: "Zeta step", description: "d", project: "WEB", parent: group.id })) as { id: string };
+        tasks.push(inside.id, group.id);
+        await run("add_link", { from: `decision:${latest.id}`, type: "affects", to: inside.id });
+        await load(`/#decisions/decision:${latest.id}`);
+        await page.until("return !!document.querySelector('[data-relation=\"affects\"] .link')", "what the decision affects");
+        await page.click('[data-relation="affects"] .link');
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Zeta step'", "the affected task in the panel");
+        await load(`/#decisions/${group.id}`);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Zeta group'", "the group in the panel");
+        assert.equal(await page.run("return document.querySelector('#detail .open-group')"), null, "no board-only action in the Decisions view");
+        await load(`/#decisions?in=${group.id}`);
+        await page.until("return document.querySelectorAll('.decision-card').length === 1 && !document.getElementById('decisions-leave-group').hidden", "the decisions of the group in view");
+        assert.deepEqual(await shown(), [latest.id]);
+        await page.click("#decisions-leave-group");
+        await page.until(`return location.hash === '#decisions' && document.getElementById('decisions-leave-group').hidden && document.querySelectorAll('.decision-card').length > 1`, "the group left");
+        // An address that names a project that is not there keeps its words when the project is taken out of it.
+        await page.open(`${base}/#decisions?project=GONE&text=zeta%20shop`);
+        await page.until("return location.hash === '#decisions?text=zeta%20shop' && document.getElementById('decisions-text').value === 'zeta shop'", "the words kept without the project that is gone");
+        await page.open(`${base}/#decisions`);
+        await page.until("return location.hash === '#decisions' && document.getElementById('decisions-text').value === ''", "the whole view again");
+        // A filter that matches nothing says so.
+        await page.click("#decisions-text");
+        await page.type("zeta nowhere");
+        await page.until("return !document.getElementById('decisions-empty').hidden && document.getElementById('decisions-empty').textContent === 'No decision matches \"zeta nowhere\".'", "nothing matches");
+      } finally {
+        await page.run("if (window.decisionsRealFetch) window.fetch = window.decisionsRealFetch");
+        for (const decision of made) {
+          const latest = (await run("get", { kind: "decision", id: decision.id })) as { version: number; deleted_at?: string };
+          await service.engine.execute("delete", "admin", { kind: "decision", id: decision.id, version: latest.version, permanent: true });
+        }
+        for (const id of tasks) {
+          const latest = (await run("get", { id })) as { version: number };
+          await run("delete", { id, version: latest.version });
+        }
+      }
+    });
+
+    it("reads the decisions again when their view is come back to before its first reading has settled", async () => {
+      await page.size(1280, 900);
+      const made: Array<{ id: string }> = [];
+      try {
+        made.push((await run("create_decision", { title: "Zeta early choice", description: "d", status: "active" })) as { id: string });
+        await load("/#board");
+        // The service answers the first reading at once; the page gets that answer only when it is let go.
+        await page.run("window.decisionsRealFetch = window.fetch; window.decisionsHeld = []; window.decisionsAnswered = false; window.fetch = (...args) => { if (!String(args[0]).endsWith('/api/list-decisions') || window.decisionsHeld.length > 0) return window.decisionsRealFetch(...args); const answer = window.decisionsRealFetch(...args).then(async (response) => { const body = await response.text(); window.decisionsAnswered = true; return new Response(body, { status: response.status, headers: response.headers }); }); return new Promise((resolve) => window.decisionsHeld.push(() => resolve(answer))); }");
+        await page.click("#view-decisions");
+        await page.until("return window.decisionsHeld.length === 1 && window.decisionsAnswered", "the first reading answered and not yet delivered");
+        await page.click("#view-board");
+        await page.until("return !document.getElementById('board').hidden", "the board meanwhile");
+        made.push((await run("create_decision", { title: "Zeta late choice", description: "d", status: "active" })) as { id: string });
+        await page.click("#view-decisions");
+        await page.wait(300);
+        await page.run("window.decisionsHeld[0](); window.fetch = window.decisionsRealFetch");
+        await page.until("return [...document.querySelectorAll('.decision-card .card-title')].some((e) => e.textContent === 'Zeta late choice')", "the decision recorded while the first reading was under way");
+      } finally {
+        await page.run("if (window.decisionsRealFetch) window.fetch = window.decisionsRealFetch");
+        for (const decision of made) {
+          const latest = (await run("get", { kind: "decision", id: decision.id })) as { version: number };
+          await service.engine.execute("delete", "admin", { kind: "decision", id: decision.id, version: latest.version, permanent: true });
+        }
+      }
+    });
+
+    it("locks the page when a reading of the decisions is refused, and leaves none of them on it", async () => {
+      await page.size(1280, 900);
+      const made = (await run("create_decision", { title: "Zeta private choice", description: "d", status: "active" })) as { id: string };
+      try {
+        await load("/#decisions?text=zeta%20private");
+        await page.until("return document.querySelectorAll('.decision-card').length === 1", "the decision");
+        await page.run("window.decisionsRealFetch = window.fetch; window.decisionsAsked = 0; window.fetch = async (...args) => String(args[0]).endsWith('/api/list-decisions') ? (window.decisionsAsked++, new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'Decisions key was refused' } }), { status: 401, headers: { 'content-type': 'application/json' } })) : window.decisionsRealFetch(...args)");
+        await page.click("#refresh");
+        await page.until("return document.getElementById('main').hidden && Boolean(document.querySelector('#notice input'))", "the connection form after the decisions are refused");
+        assert.deepEqual(await page.run("return { hash: location.hash, cards: document.querySelectorAll('.decision-card').length, columns: document.getElementById('decisions-board').childElementCount, status: document.getElementById('decisions-status').textContent, words: document.getElementById('decisions-text').value }"), { hash: "#decisions", cards: 0, columns: 0, status: "", words: "" });
+        // Refused once, it is not asked again until the person connects.
+        await page.wait(700);
+        assert.equal(await page.run("return window.decisionsAsked"), 1);
+        // The link to the view in the header, used while locked out, keeps the words that were put away.
+        await page.run("window.fetch = window.decisionsRealFetch; document.getElementById('view-decisions').click(); document.querySelector('#notice form').requestSubmit()");
+        await page.until("return !document.getElementById('main').hidden && location.hash === '#decisions?text=zeta%20private' && document.querySelectorAll('.decision-card').length === 1 && document.getElementById('decisions-text').value === 'zeta private'", "the view as it was, once connected again");
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await page.run("if (window.decisionsRealFetch) window.fetch = window.decisionsRealFetch");
+        const latest = (await run("get", { kind: "decision", id: made.id })) as { version: number };
+        await service.engine.execute("delete", "admin", { kind: "decision", id: made.id, version: latest.version, permanent: true });
       }
     });
 
@@ -10371,6 +10587,8 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       await page.run("history.forward()");
       await page.until(`return location.hash === '#history?project=${project.id}&in=${outer.id}/${inner.id}'`, "Forward restored the nested group scope");
       await load(await page.run<string>("return location.hash"));
+      // The page says it is up to date before History has been read: wait for the events themselves.
+      await page.until("return document.querySelectorAll('#history-list .history-event').length > 0", "History of the nested group after the reload");
       const nested = await page.run<string[]>("return [...document.querySelectorAll('.history-event')].map((event) => event.dataset.id)");
       assert.deepEqual([...new Set(nested)], [child.id]);
       assert.equal(await page.run<boolean>("return document.getElementById('history-zoom-target').disabled"), true);

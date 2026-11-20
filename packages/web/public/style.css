@@ -339,6 +339,16 @@ main { padding: 18px clamp(14px, 3vw, 28px) 76px; display: grid; grid-template-c
 .history-more { justify-self: center; width: min(100%, 520px); min-height: 42px; }
 .history-list .empty { margin-left: -22px; }
 body.history-view .summary { display: none; }
+.decisions-panel { display: grid; align-content: start; gap: 0; min-width: 0; }
+/* The line above the columns looks as the board's does, and is its own: the counts of decisions also say that the
+   decisions are being read or could not be read, so nothing that hides the board's counts hides them. */
+.decisions-filters { display: flex; align-items: stretch; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; font-size: 13px; color: var(--muted); }
+.decision-counts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; max-width: 100%; min-width: 0; padding: 6px 12px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.decision-counts > span { display: inline-flex; align-items: center; gap: 0.25em; min-height: 24px; }
+.decision-counts > span + span::before { content: ""; width: 1px; height: 14px; margin: 0 10px; background: var(--line); }
+.decision-counts b { color: var(--text); font-weight: 650; }
+.decision-card[data-status="withdrawn"] .card-title { color: var(--muted); text-decoration: line-through; text-decoration-thickness: 1px; }
+body.decisions-view .project-zoom, body.decisions-view .project-chip-zoom { display: none !important; }
 body.history-view .project-zoom, body.history-view .project-chip-zoom { display: none !important; }
 
 .summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; width: max-content; max-width: 100%; min-width: 0; padding: 6px 12px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }

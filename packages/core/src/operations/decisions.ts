@@ -20,7 +20,8 @@ export const createDecision = defineWrite({
     ctx.plan.put(node, input.description);
     ctx.plan.status(node, statusEntry(node.status, ctx));
     ctx.plan.history(node, "created", { status: node.status });
-    return () => summary(ctx.graph, ctx.graph.get("decision", node.id)!);
+    // What it affects is said as the instance offers it: a task of a feature that is off is not named.
+    return () => summary(ctx.features.view(ctx.graph), ctx.graph.get("decision", node.id)!);
   },
 });
 
@@ -31,7 +32,7 @@ export const updateDecision = defineWrite({
   async run(ctx, input) {
     const node = resolveRef(ctx.graph, input.id, ["decision"]);
     requireLive(node);
-    requireVersion(node, input.version, () => summary(ctx.graph, node));
+    requireVersion(node, input.version, () => summary(ctx.features.view(ctx.graph), node));
     const next = touch(node, ctx, {});
     const changes: Record<string, unknown> = {};
     for (const field of ["title", "why", "status"] as const) {
@@ -51,12 +52,13 @@ export const updateDecision = defineWrite({
         ctx.plan.history(node, "status_changed", { from: node.status, to: next.status });
       }
     }
-    return () => summary(ctx.graph, ctx.graph.get("decision", node.id)!);
+    // What it affects is said as the instance offers it: a task of a feature that is off is not named.
+    return () => summary(ctx.features.view(ctx.graph), ctx.graph.get("decision", node.id)!);
   },
 });
 
 export const listDecisions = defineRead({
-  name: "list_decisions", access: "all", description: "List decisions by ID, optionally filtered by status. Includes standalone decisions and withdrawn records. Returns at most 100 per call.",
+  name: "list_decisions", access: "all", description: "List decisions by ID, optionally filtered by status. Includes standalone decisions and withdrawn records. Each names the projects and tasks it affects. Returns at most 100 per call.",
   input: z.strictObject({ status: z.enum(DECISION_STATUSES).optional(), continuation }),
   run(ctx, input) {
     const tokens = cursor<string>(describeList("list_decisions", input));

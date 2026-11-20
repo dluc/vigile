@@ -65,7 +65,11 @@ export interface UserView {
   deleted_at?: string;
 }
 
-export type DecisionSummary = Pick<import("./model.js").DecisionNode, "kind" | "id" | "title" | "status" | "version"> & { deleted_at?: string };
+export type DecisionSummary = Pick<import("./model.js").DecisionNode, "kind" | "id" | "title" | "status" | "version"> & {
+  /** The projects and tasks its "affects" links lead to, as `contained_in` names what holds a task. */
+  affects: string[];
+  deleted_at?: string;
+};
 export type Summary = TaskSummary | ProjectSummary | UserView | DecisionSummary;
 
 export interface LinkedItem {
@@ -82,8 +86,8 @@ export interface More {
   continuation?: string;
 }
 
-/** The lists of a task's summary: one for each kind of link it has, and what it waits for. */
-const SUMMARY_LISTS = ["contained_in", "live_containers", "depends_on", "assigned_to", "waiting_for"] as const;
+/** The lists of a summary: for a task one for each kind of link it has, and what it waits for; for a decision what it affects. */
+const SUMMARY_LISTS = ["contained_in", "live_containers", "depends_on", "assigned_to", "waiting_for", "affects"] as const;
 
 /** Which lists of an item were cut at the page size. A list that is returned whole is not named here. */
 export type MoreLists = Partial<Record<(typeof SUMMARY_LISTS)[number] | "timeline" | "history", More>> & {
@@ -177,7 +181,7 @@ export function userView(user: UserNode): UserView {
 export function summary(graph: GraphView, node: Node): Summary {
   switch (node.kind) {
     case "decision":
-      return { kind: node.kind, id: node.id, title: node.title, status: node.status, version: node.version, ...(node.deleted_at ? { deleted_at: node.deleted_at } : {}) };
+      return { kind: node.kind, id: node.id, title: node.title, status: node.status, version: node.version, affects: orderedNodes(affected(graph, node)).map(refText), ...(node.deleted_at ? { deleted_at: node.deleted_at } : {}) };
     case "task":
       return taskSummary(graph, node);
     case "project":
@@ -185,6 +189,16 @@ export function summary(graph: GraphView, node: Node): Summary {
     case "user":
       return userView(node);
   }
+}
+
+/** The projects and tasks a decision's "affects" links lead to, as the graph in view has them. */
+function affected(graph: GraphView, decision: Node): Node[] {
+  const found: Node[] = [];
+  for (const link of graph.out(decision, "affects")) {
+    const target = graph.node(link.to);
+    if (target?.kind === "project" || target?.kind === "task") found.push(target);
+  }
+  return found;
 }
 
 export function linkedItem(node: Node): LinkedItem {

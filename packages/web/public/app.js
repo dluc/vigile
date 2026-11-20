@@ -207,6 +207,7 @@ const COLUMNS = [
 const STATUS_TONE = {
   in_progress: "busy", in_review: "review", open: "go", done: "go", ready: "go",
   in_preview: "review", broken: "stop", paused: "idle", draft: "idle", cancelled: "idle",
+  active: "go", proposed: "review", withdrawn: "idle",
 };
 
 const HISTORY_ACTIONS = {
@@ -221,6 +222,7 @@ const HISTORY_ACTIONS = {
   timestamp_overridden: "Timestamp overridden",
 };
 const DECISION_STATUSES = ["proposed", "active", "withdrawn"];
+const VIEWS = ["board", "graph", "history", "decisions"];
 const HISTORY_STATUSES = ["draft", "open", "in_progress", "paused", "in_review", "done", "cancelled", "in_preview", "ready", "broken", ...DECISION_STATUSES];
 
 const label = (status) => status.replaceAll("_", " ");
@@ -240,7 +242,7 @@ const isOpenTrouble = (task) => isTrouble(task) && !FINISHED.includes(task.statu
  */
 const boardColumn = (task) => (state.bugsApart && isOpenTrouble(task) ? "trouble" : columnOf(task));
 
-const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, historyFilters: { text: null, kind: null, actor: null, action: null, status_from: null, status_to: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
+const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, historyFilters: { text: null, kind: null, actor: null, action: null, status_from: null, status_to: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null, decisionFilters: { text: null }, decisions: null, decisionsLoading: false, decisionsError: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
 let historyTurn = 0;
 let historyLoadingTurn = 0;
 
@@ -446,12 +448,16 @@ function pill(status) {
 }
 
 function renderProjects() {
-  $("projects-section").hidden = state.projectZoom;
+  // The Decisions view has no zoom into a project: there the projects stay in sight to choose among.
+  const zoomed = state.projectZoom && state.view !== "decisions";
+  $("projects-section").hidden = zoomed;
   $("projects-section").classList.toggle("folded", state.projectsFolded);
   $("projects-fold").setAttribute("aria-expanded", String(!state.projectsFolded));
   $("projects-chevron").textContent = state.projectsFolded ? "▸" : "▾";
-  const filterProjectsWithProblems = state.view !== "history" && state.summaryFilter === "problems";
-  const visibleProjects = state.projectZoom ? [] : state.projects.filter((project) => !filterProjectsWithProblems || project.has_problems);
+  // The count that narrows the projects to those with problems is the board's and the graph's: where it is
+  // neither shown nor applied, every project stays there to choose.
+  const filterProjectsWithProblems = state.view !== "history" && state.view !== "decisions" && state.summaryFilter === "problems";
+  const visibleProjects = zoomed ? [] : state.projects.filter((project) => !filterProjectsWithProblems || project.has_problems);
   const cards = visibleProjects.map((project) => {
     const { finished, total } = project.progress;
     const percent = total ? Math.round((finished / total) * 100) : 0;
@@ -1055,6 +1061,11 @@ const offered = (item) => item.kind !== "decision" || !state.instance || state.i
 /** A status History can be narrowed to: one of a task or a project, or of a decision where the instance has decisions. */
 const historyStatus = (value) => (HISTORY_STATUSES.includes(value) && (!DECISION_STATUSES.includes(value) || offered({ kind: "decision" })) ? value : null);
 
+/** What the Decisions view is narrowed to besides the project and the group, as the address says it: words of an ID or a title. */
+function normalizeDecisionFilters(values = {}) {
+  return { text: typeof values.text === "string" ? truncateAtCodePointBoundary(values.text.trim(), 128) || null : null };
+}
+
 /** Values kept in localStorage are only the History filters, never the events or credentials they can find. */
 function normalizeHistoryFilters(values = {}) {
   const historyFilters = {
@@ -1115,7 +1126,7 @@ function truncateAtCodePointBoundary(value, limit) {
  * #board?in=VIG-003/VIG-012&zoom=1 is the top level of VIG-012, reached through VIG-003.
  */
 function readRoute(address = location.hash) {
-  const [, view, item, asks] = /^#(board|graph|history)(?:\/([^?]*))?(?:\?(.*))?$/.exec(address) ?? [];
+  const [, view, item, asks] = /^#(board|graph|history|decisions)(?:\/([^?]*))?(?:\?(.*))?$/.exec(address) ?? [];
   // An address that was cut off or mistyped names no item, or no group: the view is shown without it.
   const decoded = (text) => {
     try {
@@ -1138,9 +1149,12 @@ function readRoute(address = location.hash) {
   const into = (asked.get("in") ?? "").split("/").map(decoded).filter(Boolean);
   const project = decoded(asked.get("project") ?? "") || null;
   const projectZoom = view !== "history" && Boolean(project && asked.get("projectZoom") === "1");
-  const hasHistoryFilterParameters = ["text", "kind", "actor", "action", "fromStatus", "toStatus", "from", "to"].some((key) => asked.has(key));
+  // The Decisions view has filters of its own in its address, and its "text" is not History's.
+  const decisionFilters = view === "decisions" ? normalizeDecisionFilters({ text: decoded(asked.get("text") ?? "") }) : state.decisionFilters;
+  const hasHistoryFilterParameters = view !== "decisions" && ["text", "kind", "actor", "action", "fromStatus", "toStatus", "from", "to"].some((key) => asked.has(key));
   const historyFilters = view === "history" && !hasHistoryFilterParameters && !locked
     ? readStoredHistoryFilters()
+    : view === "decisions" ? normalizeHistoryFilters()
     : normalizeHistoryFilters({
       text: decoded(asked.get("text") ?? ""),
       kind: asked.get("kind"),
@@ -1152,12 +1166,14 @@ function readRoute(address = location.hash) {
       to: decoded(asked.get("to") ?? ""),
     });
   const open = !id ? null : id.startsWith("project:") ? { kind: "project", id: id.slice(8) } : id.startsWith("decision:") ? { kind: "decision", id: id.slice(9) } : { kind: "task", id };
-  return { view: view ?? "board", open, zoom, into, project, projectZoom, historyFilters, hasHistoryFilterParameters };
+  return { view: view ?? "board", open, zoom, into, project, projectZoom, historyFilters, hasHistoryFilterParameters, decisionFilters };
 }
 
-function routeOf(view, open, zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom, historyFilters = state.historyFilters) {
+function routeOf(view, open, zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom, historyFilters = state.historyFilters, decisionFilters = state.decisionFilters) {
+  const item = open ? `/${open.kind === "task" ? "" : `${open.kind}:`}${encodeURIComponent(open.id)}` : "";
   const asks = [
     project && `project=${encodeURIComponent(project)}`,
+    view === "decisions" && decisionFilters.text && `text=${encodeURIComponent(decisionFilters.text)}`,
     view === "history" && historyFilters.text && `text=${encodeURIComponent(historyFilters.text)}`,
     view === "history" && historyFilters.kind && `kind=${encodeURIComponent(historyFilters.kind)}`,
     view === "history" && historyFilters.actor && `actor=${encodeURIComponent(historyFilters.actor)}`,
@@ -1170,7 +1186,7 @@ function routeOf(view, open, zoom = state.zoom, into = state.into, project = sta
     view !== "history" && zoom !== null && `zoom=${zoom}`,
     view !== "history" && projectZoom && "projectZoom=1",
   ].filter(Boolean).join("&");
-  return `#${view}${open ? `/${open.kind === "task" ? "" : `${open.kind}:`}${encodeURIComponent(open.id)}` : ""}${asks ? `?${asks}` : ""}`;
+  return `#${view}${item}${asks ? `?${asks}` : ""}`;
 }
 /** A task ID as the service stores it, for comparing supported bookmark spellings without losing large digits. */
 const taskIdentity = (id) => {
@@ -1186,8 +1202,8 @@ const sameTrail = (a, b) => a.length === b.length && a.every((id, at) => id === 
  * Goes to an address as a new entry in the browser's history. The entry remembers the items the panel came
  * through. The zoom stays as it is unless another one is given.
  */
-function go(view, open, trail = [], { zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom, historyFilters = state.historyFilters } = {}) {
-  const route = routeOf(view, open, zoom, into, project, projectZoom, historyFilters);
+function go(view, open, trail = [], { zoom = state.zoom, into = state.into, project = state.project, projectZoom = state.projectZoom, historyFilters = state.historyFilters, decisionFilters = state.decisionFilters } = {}) {
+  const route = routeOf(view, open, zoom, into, project, projectZoom, historyFilters, decisionFilters);
   if (route === location.hash) return;
   const entry = { trail };
   if (view === "history" && state.view === "history") {
@@ -1245,7 +1261,7 @@ function comeBack() {
     history.replaceState({ ...(history.state ?? {}), historyFilters: route.historyFilters, historyFiltersSnapshot: true }, "", routeOf(route.view, route.open, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters));
     rememberHistoryFilters(route.historyFilters);
   }
-  Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, trail: trailOf(), project: route.project ?? kept.project ?? null, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
+  Object.assign(state, { view: route.view, open: route.open, zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, decisionFilters: route.decisionFilters, trail: trailOf(), project: route.project ?? kept.project ?? null, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
 }
 
 /**
@@ -1262,6 +1278,14 @@ function applyRoute() {
   else takeRouteBack();
   let route = readRoute();
   if (!locked) route = historyRouteForEntry(route);
+  // An instance without decisions has no such view: the address leads to the board.
+  if (route.view === "decisions" && !offered({ kind: "decision" })) {
+    history.replaceState(history.state, "", routeOf("board", null));
+    route = readRoute();
+  }
+  // The Decisions view has the project, the group and the zoom of the other views in its address, and none of
+  // History's filters: those are kept for when History is come back to.
+  if (route.view === "decisions") route = { ...route, historyFilters: state.historyFilters };
   if (route.view === "history" && !locked) {
     const canonical = routeOf(route.view, route.open, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters);
     const snapshot = { ...history.state, historyFilters: route.historyFilters, historyFiltersSnapshot: true };
@@ -1272,13 +1296,15 @@ function applyRoute() {
   if (state.loadedAt && route.project && !state.projects.some((project) => projectRef(project) === route.project)) {
     history.replaceState(route.view === "history" && !locked
       ? { ...history.state, historyFilters: route.historyFilters, historyFiltersSnapshot: true }
-      : history.state, "", routeOf(route.view, route.open, route.zoom, route.into, null, false, route.historyFilters));
+      : history.state, "", routeOf(route.view, route.open, route.zoom, route.into, null, false, route.historyFilters, route.decisionFilters));
     route = { ...route, project: null, projectZoom: false };
   }
   const viewChanged = route.view !== state.view;
   const zoomChanged = route.zoom !== state.zoom || !sameTrail(route.into, state.into);
   const projectChanged = route.project !== state.project || route.projectZoom !== state.projectZoom;
   const historyChanged = JSON.stringify(route.historyFilters) !== JSON.stringify(state.historyFilters);
+  const decisionsChanged = JSON.stringify(route.decisionFilters) !== JSON.stringify(state.decisionFilters);
+  state.decisionFilters = route.decisionFilters;
   if (route.view === "history" && !locked && (historyChanged || route.hasHistoryFilterParameters)) rememberHistoryFilters(route.historyFilters);
   state.view = route.view;
   state.zoom = route.zoom;
@@ -1297,7 +1323,12 @@ function applyRoute() {
     historyRefreshPending = false;
   }
   if (zoomChanged) boardMoved = true;
-  if (viewChanged || zoomChanged || projectChanged || historyChanged) render();
+  if (route.view === "decisions" && (viewChanged || decisionsChanged)) syncDecisionControls();
+  // Coming to the view reads the decisions again: what is held may be from before another client's change, the
+  // reading before may have failed, or one that began before the view was left may still be under way, and is
+  // then followed by another. What is held stays in view meanwhile.
+  if (route.view === "decisions" && viewChanged && state.loadedAt && !locked) void loadDecisions();
+  if (viewChanged || zoomChanged || projectChanged || historyChanged || decisionsChanged) render();
   if ((zoomChanged || projectChanged) && state.loadedAt && !locked) sayZoom();
   if (!route.open) return hidePanel();
   // The address names an item of a feature that was off when the instance last answered. It may have been
@@ -1382,6 +1413,8 @@ let said = null;
  * button, not whenever it changes.
  */
 function sayZoom() {
+  // The Decisions view says its own counts where a screen reader hears them: those of the tasks are not its.
+  if (state.view === "decisions") return;
   const group = state.group ? state.byId.get(state.group) : null;
   const project = state.projects.find((p) => projectRef(p) === state.project);
   const named = group ?? project;
@@ -2100,7 +2133,7 @@ async function renderDetail(more) {
           },
           watched.has(item.id) ? "Watching. Stop" : "Tell me when it is done",
         ),
-        state.view !== "history" && item.kind === "task" && item.progress && state.byId.has(item.id) && el(
+        state.view !== "history" && state.view !== "decisions" && item.kind === "task" && item.progress && state.byId.has(item.id) && el(
           "button",
           { class: "open-group", type: "button", onclick: () => zoomInto(item.id) },
           `Show only this group (${item.progress.total} ${item.progress.total === 1 ? "task" : "tasks"})`,
@@ -2480,6 +2513,164 @@ function renderHistoryView() {
   if (state.loadedAt && state.historyKey !== historyQueryKey()) void loadHistory(true);
 }
 
+/** A decision's number, which says when it was made among the others: all of them come from one counter. */
+const decisionNumber = (id) => BigInt(/(\d+)$/.exec(id)?.[1] ?? "0");
+
+/** The columns of the Decisions view: one for each state a decision can be in, in the order a choice goes through them. */
+const DECISION_COLUMNS = [
+  { key: "proposed", title: "Proposed", tone: "review", note: "Under consideration" },
+  { key: "active", title: "Active", tone: "go", note: null },
+  { key: "withdrawn", title: "Withdrawn", tone: "idle", note: "No longer stood by" },
+];
+
+/**
+ * Whether a decision belongs to what a project or a group holds: it affects that project or group, or a task
+ * inside it; or, for a project, it was recorded with the project's prefix.
+ */
+function decisionIn(decision, ref) {
+  const prefix = /^[A-Z]{2,8}$/.test(ref) ? ref : null;
+  if (prefix && decision.id.startsWith(`${prefix}-`) && state.projects.some((project) => project.id === prefix)) return true;
+  const inside = heldIn(ref);
+  return decision.affects.some((other) => other === ref || inside.has(other));
+}
+
+/** The decisions in view: those of the selected project and group whose ID or title holds the words typed, newest first. */
+function decisionsShown() {
+  const words = (state.decisionFilters.text ?? "").toLowerCase();
+  return (state.decisions ?? [])
+    .filter((decision) => [state.project, state.group].every((ref) => !ref || decisionIn(decision, ref)) && (!words || `${decision.id} ${decision.title}`.toLowerCase().includes(words)))
+    .sort((a, b) => (decisionNumber(a.id) < decisionNumber(b.id) ? 1 : decisionNumber(a.id) > decisionNumber(b.id) ? -1 : a.id.localeCompare(b.id)));
+}
+
+/** A decision as a card, made as a task's card is: its ID, its title, and what it affects for tags. */
+function decisionCard(decision) {
+  const affects = decision.affects;
+  return el(
+    "button",
+    { class: "card decision-card", type: "button", "data-id": decision.id, "data-status": decision.status, "aria-label": `Open decision ${decision.id}: ${decision.title}, ${label(decision.status)}`, onclick: () => openItem("decision", decision.id) },
+    el("div", { class: "card-top" }, el("span", { class: "id" }, decision.id), el("span", { class: "kind" }, "decision")),
+    el("div", { class: "card-title" }, decision.title),
+    affects.length
+      ? el(
+          "div",
+          { class: "tags" },
+          el("span", { class: "tag", title: `Affects ${affects.join(", ")}` }, "affects"),
+          affects.slice(0, 3).map((other) => el("span", { class: "tag" }, other.replace(/^project:/, ""))),
+          affects.length > 3 && el("span", { class: "tag" }, `+${affects.length - 3}`),
+        )
+      : null,
+  );
+}
+
+/** A reading of the decisions that was asked for while one was under way: it follows when that one has settled. */
+let decisionsRefreshPending = false;
+
+/**
+ * Reads every decision. The view narrows them itself, so the counts by state are of all of them. A reading that
+ * is asked for while another is under way is not dropped: the one under way may have begun before the change
+ * that the asking is about, so it is followed by another.
+ */
+async function loadDecisions() {
+  if (state.view !== "decisions" || !state.loadedAt || locked) return;
+  if (state.decisionsLoading) {
+    decisionsRefreshPending = true;
+    return;
+  }
+  const session = sessions;
+  state.decisionsLoading = true;
+  try {
+    const decisions = await all("list-decisions", "decisions");
+    if (session !== sessions || locked) return;
+    Object.assign(state, { decisions, decisionsError: null });
+  } catch (error) {
+    if (session !== sessions || locked) return;
+    // A key that is refused locks the page, as it does for every other reading.
+    if (error.status === 401) return void handleUnauthorized(error);
+    // What was read before stays in view: a decision does not stop being one because one reading failed.
+    state.decisionsError = error.message || "The decisions could not be read.";
+  } finally {
+    if (session === sessions) state.decisionsLoading = false;
+  }
+  if (session !== sessions || locked) return;
+  if (state.view === "decisions") renderDecisionsView();
+  if (decisionsRefreshPending) {
+    decisionsRefreshPending = false;
+    void loadDecisions();
+  }
+}
+
+/** Takes everything of the decisions off the page: what was read, what was typed and what was drawn. */
+function clearDecisions() {
+  decisionsRefreshPending = false;
+  Object.assign(state, { decisionFilters: { text: null }, decisions: null, decisionsLoading: false, decisionsError: null });
+  $("decisions-text").value = "";
+  $("decisions-board").replaceChildren();
+  $("decisions-leave-group").hidden = true;
+  $("decisions-status").replaceChildren();
+  $("decisions-empty").textContent = "";
+  $("decisions-empty").hidden = true;
+}
+
+function renderDecisionsView() {
+  const board = $("decisions-board");
+  if (locked) return clearDecisions();
+  if (document.activeElement !== $("decisions-text")) syncDecisionControls();
+  const every = state.decisions ?? [];
+  // The board is drawn again when it is read again: the keyboard stays on the decision it was on.
+  const focusedId = document.activeElement?.closest?.("#decisions-board .decision-card")?.dataset.id;
+  const shown = decisionsShown();
+  board.replaceChildren(
+    ...(every.length === 0 ? [] : DECISION_COLUMNS).map((column) => {
+      const cards = shown.filter((decision) => decision.status === column.key);
+      return el(
+        "section",
+        { class: "column", "data-tone": column.tone, "data-key": column.key, "aria-label": `${column.title} decisions` },
+        el("div", { class: "column-head" }, el("span", { class: "dot" }), column.title, el("span", { class: "count" }, String(cards.length))),
+        column.note && el("p", { class: "column-note" }, column.note),
+        cards.length ? el("div", { class: "cards" }, cards.map(decisionCard)) : el("p", { class: "nothing" }, "Nothing here."),
+      );
+    }),
+  );
+  // A decision that had the keyboard may be gone from the board, deleted or narrowed away by someone else's
+  // change: the keyboard then goes to the heading of the view and not out of the page.
+  if (focusedId !== undefined) ([...board.querySelectorAll(".decision-card")].find((card) => card.dataset.id === focusedId) ?? $("decisions-heading")).focus({ preventScroll: true });
+  const scope = [state.project && `project ${state.project.replace(/^project:/, "")}`, state.group && `group ${state.group}`].filter(Boolean).join(", ");
+  const narrowed = Boolean(scope || state.decisionFilters.text);
+  // The counts read as the board's do: how many decisions, then how many in each state, of those in view.
+  const counted = (count, word) => el("span", {}, el("b", {}, String(count)), ` ${word}`);
+  $("decisions-status").replaceChildren(
+    ...(state.decisionsError ? [el("span", {}, `${state.decisionsError} Showing what was read before.`)]
+      : state.decisions === null ? [el("span", {}, "Reading the decisions…")]
+      : [
+          narrowed ? el("span", {}, el("b", {}, String(shown.length)), ` of ${every.length} ${every.length === 1 ? "decision" : "decisions"}${scope ? `, for ${scope}` : ""}`) : counted(every.length, every.length === 1 ? "decision" : "decisions"),
+          ...DECISION_COLUMNS.map((column) => counted(shown.filter((decision) => decision.status === column.key).length, column.key)),
+        ]),
+  );
+  $("decisions-leave-group").hidden = !state.group;
+  $("decisions-empty").hidden = state.decisions === null || shown.length > 0;
+  $("decisions-empty").textContent = every.length === 0 ? "No decisions yet."
+    : state.decisionFilters.text ? `No decision matches "${state.decisionFilters.text}"${scope ? ` for ${scope}` : ""}.`
+    : `No decision has the prefix of ${scope}, or affects it or a task inside it.`;
+  if (state.loadedAt && state.decisions === null && !state.decisionsError && !state.decisionsLoading) void loadDecisions();
+}
+
+/** The filter box says what the address says, also after Back and Forward. */
+function syncDecisionControls() {
+  $("decisions-text").value = state.decisionFilters.text ?? "";
+}
+
+$("decisions-leave-group").addEventListener("click", () => go("decisions", null, [], { into: [], zoom: null }));
+
+// Typing narrows the board at once. The address follows in place, so that Back leaves the view and does not
+// replay the typing letter by letter.
+$("decisions-text").addEventListener("input", () => {
+  state.decisionFilters = normalizeDecisionFilters({ ...state.decisionFilters, text: $("decisions-text").value });
+  if (!locked) history.replaceState(history.state, "", routeOf("decisions", state.open));
+  // The link to this view in the header leads to the list as it now is.
+  linkViews();
+  renderDecisionsView();
+});
+
 /** Keeps bookmarkable filter controls in sync with route changes, including Back and Forward. */
 function syncHistoryControls() {
   $("history-text").value = state.historyFilters.text ?? "";
@@ -2674,6 +2865,11 @@ function keyboardPlace() {
   }
   // "Open all" goes with the line it is in, once the columns are open: the keyboard is then on the first of them.
   if (at.matches("#board .columns-note button")) return () => $("board").querySelector(".columns-note button") ?? $("board").querySelector(".column-fold");
+  // A decision in its view is known by its ID: the list is drawn again whenever it is read again.
+  if (at.matches("#decisions-board .decision-card")) {
+    const id = at.dataset.id;
+    return () => [...$("decisions-board").querySelectorAll(".decision-card")].find((card) => card.dataset.id === id);
+  }
   if (at.matches(".history-event-item")) {
     const place = at.closest(".history-event")?.dataset.place;
     return () => [...$("history-list").querySelectorAll(".history-event")]
@@ -2796,6 +2992,28 @@ const TYPING_PAUSE_MS = 300;
 
 function draw() {
   renderProjects();
+  if (state.view === "decisions") {
+    if (state.full) stopFullScreen();
+    document.body.classList.remove("graph-view", "graph-full", "history-view");
+    document.body.classList.add("decisions-view");
+    document.body.classList.toggle("focus", state.focus);
+    document.body.classList.toggle("scoped", Boolean(state.project || state.group || state.decisionFilters.text));
+    $("focus").setAttribute("aria-pressed", String(state.focus));
+    $("focus").setAttribute("aria-label", state.focus ? "Show everything above the decisions again" : "Hide everything above the decisions");
+    $("focus").title = state.focus ? "Show the projects and controls above the decisions" : "Hide the projects and controls above the decisions";
+    for (const id of ["board-filters", "board", "graph-panel", "history-panel", "empty", "levels"]) $(id).hidden = true;
+    $("decisions-panel").hidden = false;
+    showLights();
+    for (const view of VIEWS) {
+      if (state.view === view) $(`view-${view}`).setAttribute("aria-current", "page");
+      else $(`view-${view}`).removeAttribute("aria-current");
+    }
+    linkViews();
+    renderDecisionsView();
+    return;
+  }
+  document.body.classList.remove("decisions-view");
+  $("decisions-panel").hidden = true;
   if (state.view === "history") {
     if (state.full) stopFullScreen();
     document.body.classList.remove("graph-view", "graph-full");
@@ -2812,7 +3030,7 @@ function draw() {
     $("empty").hidden = true;
     $("levels").hidden = true;
     showLights();
-    for (const view of ["board", "graph", "history"]) {
+    for (const view of VIEWS) {
       if (state.view === view) $(`view-${view}`).setAttribute("aria-current", "page");
       else $(`view-${view}`).removeAttribute("aria-current");
     }
@@ -2858,7 +3076,7 @@ function draw() {
   $("bugs-apart").checked = state.bugsApart;
   $("column-scroll").checked = state.columnScroll;
   $("graph-panel").hidden = !graph || tasks.length === 0;
-  for (const view of ["board", "graph", "history"]) {
+  for (const view of VIEWS) {
     if (state.view === view) $(`view-${view}`).setAttribute("aria-current", "page");
     else $(`view-${view}`).removeAttribute("aria-current");
   }
@@ -2869,7 +3087,7 @@ function draw() {
 }
 /** The links to the two views lead to the same group, and the board is at the same zoom when it is come back to. */
 function linkViews() {
-  for (const view of ["board", "graph", "history"]) {
+  for (const view of VIEWS) {
     const link = $(`view-${view}`);
     link.setAttribute("href", routeOf(view, null));
     link.onclick = (event) => {
@@ -2880,7 +3098,7 @@ function linkViews() {
       const before = history.state?.kept;
       const route = readRoute(before?.route ?? location.hash);
       const kept = {
-        route: routeOf(view, null, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters),
+        route: routeOf(view, null, route.zoom, route.into, route.project, route.projectZoom, route.historyFilters, route.decisionFilters),
         project: route.project ?? before?.project ?? null,
       };
       history.pushState({ kept }, "", `#${view}`);
@@ -2963,6 +3181,7 @@ function lockOut(refused = "") {
   Object.assign(state, { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, shown: null, drawn: null, item: null, have: null, further: null, troubled: false, openTitle: "", loadedAt: null, loadedMs: null, failed: true });
   $("instance").textContent = "";
   Object.assign(state, { project: null, projectZoom: false, zoom: null, into: [], group: null, open: null, trail: [] });
+  clearDecisions();
   Object.assign(state, { historyFilters: { text: null, kind: null, actor: null, action: null, status_from: null, status_to: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null });
   historyRefreshPending = false;
   for (const id of ["history-text", "history-kind", "history-actor", "history-action", "history-status-from", "history-status-to", "history-from", "history-to"]) $(id).value = "";
@@ -3089,6 +3308,11 @@ async function refresh() {
       state.trail = trailOf(state.trail);
       history.replaceState({ ...(history.state ?? {}), trail: state.trail }, "", location.hash);
     }
+    // Nor is there a view of decisions: the page is on the board instead.
+    if (state.view === "decisions" && !offered({ kind: "decision" })) {
+      state.view = "board";
+      history.replaceState(history.state, "", routeOf("board", state.open));
+    }
     // History cannot be narrowed to a kind or a status this instance does not offer: such a filter goes, from
     // the address too.
     const narrowed = normalizeHistoryFilters(state.historyFilters);
@@ -3126,6 +3350,9 @@ async function refresh() {
     const before = changed && !first && !left && state.view === "board" ? cardPlaces() : null;
     if (changed || state.view === "history") render();
     else fitBoard();
+    // The decisions in view are read again with the plan, so the view follows what others record. Not with the
+    // first reading of the plan: drawing the view then has asked for them already.
+    if (state.view === "decisions" && !first) void loadDecisions();
     if (!first && state.view === "history" && state.historyKey === historyQueryKey()) {
       if (state.historyLoading) historyRefreshPending = true;
       else if (state.historyPages > 0) void loadHistory(true, true);
@@ -3139,7 +3366,7 @@ async function refresh() {
     const panelKeyChanged = panelCredential !== null && panelCredential !== (localStorage.getItem(KEY_NAME) ?? "");
     const priority = state.open?.kind === "task" ? priorityWorkers.get(taskIdentity(state.open.id)) : null;
     const blockedPriority = Boolean(priority?.blocked && !priority.running && !priority.pending);
-    if (state.open && (changed || first || $("panel").hidden || state.troubled || panelKeyChanged || blockedPriority)) await renderDetail();
+    if (state.open && (state.open.kind === "decision" || changed || first || $("panel").hidden || state.troubled || panelKeyChanged || blockedPriority)) await renderDetail();
     return true;
   } catch (error) {
     $("sync").textContent = "Not connected";
@@ -4284,7 +4511,7 @@ document.addEventListener("visibilitychange", () => !locked && (auto || state.fa
       history.replaceState({ ...(history.state ?? {}), historyFilters: route.historyFilters, historyFiltersSnapshot: true }, "", canonical);
     }
   }
-  Object.assign(state, { view: route.view, open: route.open, trail: trailOf(), zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, project: route.project, projectZoom: route.projectZoom, historyFilters: route.historyFilters });
+  Object.assign(state, { view: route.view, open: route.open, trail: trailOf(), zoom: route.zoom, into: route.into, group: route.into.at(-1) ?? null, project: route.project, projectZoom: route.projectZoom, decisionFilters: route.decisionFilters, historyFilters: route.historyFilters });
   linkViews();
 }
 if (locked) showKeyForm("Reconnect to restore your last view.");

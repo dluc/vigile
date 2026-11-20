@@ -28,7 +28,7 @@
     <a id="view-board" href="#board">Board</a>
     <a id="view-graph" href="#graph">Graph</a>
     <a id="view-history" href="#history">History</a>
-    <a id="view-decisions" href="/decisions.html" hidden>Decisions</a>
+    <a id="view-decisions" href="#decisions" hidden>Decisions</a>
   </nav>
   <div class="meta">
     <div class="status">
@@ -195,6 +195,18 @@
       <ol id="history-list" class="history-list"></ol>
       <p id="history-empty" class="empty" hidden></p>
       <button id="history-more" class="more history-more" type="button" hidden>Load earlier changes</button>
+    </section>
+    <section id="decisions-panel" class="decisions-panel" aria-labelledby="decisions-heading" hidden>
+      <h2 id="decisions-heading" class="visually-hidden" tabindex="-1">Decisions</h2>
+      <div class="decisions-filters" aria-label="Decisions controls">
+        <div class="board-tool search"><label class="visually-hidden" for="decisions-text">Filter decisions</label>
+          <input id="decisions-text" type="search" maxlength="128" placeholder="Filter by ID or title" autocomplete="off">
+        </div>
+        <div id="decisions-status" class="board-tool decision-counts" role="status" aria-live="polite" aria-label="Decision counts"></div>
+        <button id="decisions-leave-group" class="wide leave" type="button" hidden>↑ Leave group</button>
+      </div>
+      <div id="decisions-board" class="board decisions-board"></div>
+      <p id="decisions-empty" class="empty" hidden></p>
     </section>
     <p id="empty" class="empty" hidden></p>
   </section>
