@@ -339,6 +339,8 @@ main { padding: 18px clamp(14px, 3vw, 28px) 76px; display: grid; grid-template-c
 .history-more { justify-self: center; width: min(100%, 520px); min-height: 42px; }
 .history-list .empty { margin-left: -22px; }
 body.history-view .summary { display: none; }
+/* The graph's tools with nothing to draw under them: only the switch that brings the decisions back. */
+#graph-panel.bare > :not(.graph-tools):not(.graph-decisions-note), #graph-panel.bare .graph-tools > :not(#show-decisions-choice):not(.graph-decisions-note) { display: none; }
 .decisions-panel { display: grid; align-content: start; gap: 0; min-width: 0; }
 /* The line above the columns looks as the board's does, and is its own: the counts of decisions also say that the
    decisions are being read or could not be read, so nothing that hides the board's counts hides them. */
@@ -500,6 +502,7 @@ body.graph-view:not(.focus):not(.graph-full) .filters > .summary:has(.summary-fi
 
 .graph-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
 .zoom { display: inline-flex; align-items: center; gap: 4px; }
+.graph-decisions-note { flex: 1 1 100%; color: var(--wait); }
 .levels { flex: 2 1 430px; min-width: 0; padding: 3px; border-color: color-mix(in srgb, var(--busy) 24%, var(--line)); border-radius: calc(var(--r-s) + 4px); background: var(--surface); box-shadow: 0 1px 3px color-mix(in srgb, var(--text) 7%, transparent); }
 .zoom > button { width: 40px; height: 40px; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--text); cursor: pointer; font-size: 18px; line-height: 1; transition-property: transform, background-color, color; transition-duration: 140ms; transition-timing-function: ease-out; }
 .zoom > button:hover:not(:disabled):not([aria-pressed="true"]) { border-color: var(--busy); background: var(--busy-soft); }
@@ -543,9 +546,14 @@ body.graph-full:has(.filters .summary-filter[aria-pressed="true"], .filters [dat
 .legend .line.open { border-color: var(--wait); }
 .legend .line.met { border-color: var(--go); opacity: 0.6; }
 .legend .line.contains { border-top-style: dashed; }
+.legend .line.affects { border-top: 2px dotted var(--text); opacity: 0.75; }
+.legend .shape { flex: none; }
+.legend .shape.decision polygon { fill: var(--surface); stroke: var(--text); stroke-width: 2; stroke-linejoin: round; }
 .legend .swatch { display: inline-block; width: 18px; height: 13px; border-radius: 3px; border: 2px solid var(--line); background: var(--surface); }
 .legend .swatch.problem { border: 2px dashed var(--stop); }
 .legend .swatch.trouble { border: 3px double var(--bug); background: var(--bug-soft); }
+/* Full screen on a phone: the legend is one line that is moved sideways, as the projects are, so that its rows do not take the room from the graph. */
+@media (max-width: 640px) { body.graph-full .legend { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; margin-bottom: 4px; padding-bottom: 6px; } }
 
 /*
  * What the page says about a large graph: that it waits to be asked for, is being worked out, or is out of date.

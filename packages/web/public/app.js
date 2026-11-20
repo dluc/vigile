@@ -113,6 +113,7 @@ const narrow = matchMedia("(max-width: 640px)");
 const KEY_NAME = "vigile.key";
 const AUTO_NAME = "vigile.auto-refresh";
 const BUGS_NAME = "vigile.bugs-apart";
+const GRAPH_DECISIONS_NAME = "vigile.graph-decisions";
 
 const $ = (id) => document.getElementById(id);
 
@@ -242,7 +243,7 @@ const isOpenTrouble = (task) => isTrouble(task) && !FINISHED.includes(task.statu
  */
 const boardColumn = (task) => (state.bugsApart && isOpenTrouble(task) ? "trouble" : columnOf(task));
 
-const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, historyFilters: { text: null, kind: null, actor: null, action: null, status_from: null, status_to: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null, decisionFilters: { text: null }, decisions: null, decisionsLoading: false, decisionsError: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
+const state = { projects: [], tasks: [], byId: new Map(), snapshot: "", instance: null, project: null, projectZoom: false, filter: "", summaryFilter: null, historyFilters: { text: null, kind: null, actor: null, action: null, status_from: null, status_to: null, from: null, to: null }, historyEvents: [], historyContinuation: null, historyPages: 0, historyKey: "", historyLoading: false, historyError: null, decisionFilters: { text: null }, decisions: null, decisionsLoading: false, decisionsError: null, expanded: new Set(), view: "board", trail: [], zoom: null, into: [], hideFinished: false, collapsed: true, showDecisions: localStorage.getItem(GRAPH_DECISIONS_NAME) !== "off", bugsApart: localStorage.getItem(BUGS_NAME) === "on", columnScroll: localStorage.getItem(SCROLL_NAME) !== "page", motion: localStorage.getItem(MOTION_NAME), lights: localStorage.getItem(LIGHTS_NAME) === "on", sounds: Object.fromEntries(Object.entries(SOUND_NAMES).map(([what, name]) => [what, localStorage.getItem(name) === "on"])), projectsFolded: localStorage.getItem(PROJECTS_NAME) === "folded", focus: localStorage.getItem(FOCUS_NAME) === "on", full: false, group: null, open: null, failed: false, large: false };
 let historyTurn = 0;
 let historyLoadingTurn = 0;
 
@@ -1327,7 +1328,8 @@ function applyRoute() {
   // Coming to the view reads the decisions again: what is held may be from before another client's change, the
   // reading before may have failed, or one that began before the view was left may still be under way, and is
   // then followed by another. What is held stays in view meanwhile.
-  if (route.view === "decisions" && viewChanged && state.loadedAt && !locked) void loadDecisions();
+  // The graph draws them too, and reads them again as it is come to.
+  if (viewChanged && decisionsWanted() && state.loadedAt && !locked) void loadDecisions();
   if (viewChanged || zoomChanged || projectChanged || historyChanged || decisionsChanged) render();
   if ((zoomChanged || projectChanged) && state.loadedAt && !locked) sayZoom();
   if (!route.open) return hidePanel();
@@ -2260,29 +2262,39 @@ function closeItem() {
 }
 
 /**
- * What the graph on screen is a graph of: the project, the group, the filter and the two switches above it. A
+ * What the graph on screen is a graph of: the project, the group, the filter and the switches above it. A
  * large graph is drawn again only when the person asks for something else, never because the plan changed.
  */
 let graphScope = null;
 /** Counts the drawings asked for, so that the answer to an earlier one is not shown over a later one. */
 let graphTurns = 0;
 
-async function renderGraphView(tasks) {
+async function renderGraphView(tasks, decisions) {
+  showDecisionsNote();
+  // The decisions are part of the drawing. It is made once they have been read, or could not be, so that it is
+  // not made twice: first without them, and again a moment later.
+  if (graphDecisions() && state.decisions === null && !state.decisionsError && state.loadedAt && !locked) {
+    if (!state.decisionsLoading) void loadDecisions();
+    return;
+  }
   const shown = state.hideFinished ? tasks.filter((t) => !FINISHED.includes(t.status)) : tasks;
-  $("graph-note").hidden = shown.length > 0;
-  $("graph-note").textContent = shown.length ? "" : "Every task here is finished. Untick “Hide finished tasks” to see them.";
-  $("graph-box").hidden = shown.length === 0;
+  // A withdrawn decision is finished as a cancelled task is, and is left out with it.
+  const decided = state.hideFinished ? decisions.filter((decision) => decision.status !== "withdrawn") : decisions;
+  const nothing = shown.length + decided.length === 0;
+  $("graph-note").hidden = !nothing;
+  $("graph-note").textContent = !nothing ? "" : decisions.length ? "Every task here is finished, and every decision withdrawn. Untick “Hide finished tasks” to see them." : "Every task here is finished. Untick “Hide finished tasks” to see them.";
+  $("graph-box").hidden = nothing;
   const turn = ++graphTurns;
-  if (!shown.length) return void showGraphStatus(null);
+  if (nothing) return void showGraphStatus(null);
   // Only the projects in view are drawn: all of them, or the one that is selected.
   const projects = state.project ? state.projects.filter((p) => projectRef(p) === state.project) : state.projects;
-  const scope = JSON.stringify([state.project, state.group, state.filter.trim().toLowerCase(), state.summaryFilter, state.hideFinished, state.collapsed]);
+  const scope = JSON.stringify([state.project, state.group, state.filter.trim().toLowerCase(), state.summaryFilter, state.hideFinished, state.collapsed, state.showDecisions]);
   // A large graph is drawn when the person has said they want large ones and now asks for another. One that is
   // there stays as it is when the plan changes under it: with auto-refresh on, that could be every few seconds.
   const large = scope === graphScope ? "keep" : state.large ? "draw" : "clear";
   try {
     resizeGraph();
-    const stands = await renderGraph($("graph-box"), { tasks: shown, projects, collapsed: state.collapsed }, { open: openItem, placed: graphPlaced, failed: graphFailed, large });
+    const stands = await renderGraph($("graph-box"), { tasks: shown, projects, decisions: decided, collapsed: state.collapsed }, { open: openItem, placed: graphPlaced, failed: graphFailed, large });
     if (!stands || turn !== graphTurns) return;
     graphScope = stands.waits ? null : scope;
     showGraphStatus(stands);
@@ -2535,11 +2547,32 @@ function decisionIn(decision, ref) {
 }
 
 /** The decisions in view: those of the selected project and group whose ID or title holds the words typed, newest first. */
-function decisionsShown() {
-  const words = (state.decisionFilters.text ?? "").toLowerCase();
+function decisionsShown(words = (state.decisionFilters.text ?? "").toLowerCase()) {
   return (state.decisions ?? [])
     .filter((decision) => [state.project, state.group].every((ref) => !ref || decisionIn(decision, ref)) && (!words || `${decision.id} ${decision.title}`.toLowerCase().includes(words)))
     .sort((a, b) => (decisionNumber(a.id) < decisionNumber(b.id) ? 1 : decisionNumber(a.id) > decisionNumber(b.id) ? -1 : a.id.localeCompare(b.id)));
+}
+
+/** Whether the graph draws decisions: the instance has them, and the switch above the graph is on. */
+const graphDecisions = () => state.showDecisions && offered({ kind: "decision" });
+
+/**
+ * The decisions the graph draws: those of the selected project and group, narrowed by the filter as the tasks
+ * are, to an ID or words of a title. A count that was chosen above the graph narrows it to tasks of one sort,
+ * which no decision is.
+ */
+const decisionsInGraph = (text = filterText()) => (graphDecisions() && !state.summaryFilter ? decisionsShown(text) : []);
+
+/** Whether the decisions are read: their own view is shown, or the graph is, and draws them. */
+const decisionsWanted = () => state.view === "decisions" || (state.view === "graph" && graphDecisions());
+
+/** Says beside the switch that the decisions could not be read, and what the graph shows instead. */
+function showDecisionsNote() {
+  const text = !graphDecisions() || !state.decisionsError ? ""
+    : state.decisions ? `The decisions could not be read again, and the graph shows those read before: ${state.decisionsError}`
+    : `The decisions could not be read, and the graph is drawn without them: ${state.decisionsError}`;
+  if ($("graph-decisions-note").textContent !== text) $("graph-decisions-note").textContent = text;
+  $("graph-decisions-note").hidden = !text;
 }
 
 /** A decision as a card, made as a task's card is: its ID, its title, and what it affects for tags. */
@@ -2566,24 +2599,26 @@ function decisionCard(decision) {
 let decisionsRefreshPending = false;
 
 /**
- * Reads every decision. The view narrows them itself, so the counts by state are of all of them. A reading that
- * is asked for while another is under way is not dropped: the one under way may have begun before the change
- * that the asking is about, so it is followed by another.
+ * Reads every decision, for the Decisions view or for the graph. Each narrows them itself, so the counts by
+ * state are of all of them. A reading that is asked for while another is under way is not dropped: the one
+ * under way may have begun before the change that the asking is about, so it is followed by another.
  */
 async function loadDecisions() {
-  if (state.view !== "decisions" || !state.loadedAt || locked) return;
+  if (!decisionsWanted() || !state.loadedAt || locked) return;
   if (state.decisionsLoading) {
     decisionsRefreshPending = true;
     return;
   }
   const session = sessions;
+  const before = JSON.stringify([state.decisions, state.decisionsError]);
   state.decisionsLoading = true;
   try {
     const decisions = await all("list-decisions", "decisions");
-    if (session !== sessions || locked) return;
+    // An instance that was restarted without decisions meanwhile has none to show.
+    if (session !== sessions || locked || !offered({ kind: "decision" })) return;
     Object.assign(state, { decisions, decisionsError: null });
   } catch (error) {
-    if (session !== sessions || locked) return;
+    if (session !== sessions || locked || !offered({ kind: "decision" })) return;
     // A key that is refused locks the page, as it does for every other reading.
     if (error.status === 401) return void handleUnauthorized(error);
     // What was read before stays in view: a decision does not stop being one because one reading failed.
@@ -2593,6 +2628,9 @@ async function loadDecisions() {
   }
   if (session !== sessions || locked) return;
   if (state.view === "decisions") renderDecisionsView();
+  // The graph follows a change to the decisions as it follows one to the tasks: a small graph is drawn again,
+  // and a large one is kept and says what it does not show. An unchanged reading draws nothing.
+  else if (state.view === "graph" && JSON.stringify([state.decisions, state.decisionsError]) !== before) render();
   if (decisionsRefreshPending) {
     decisionsRefreshPending = false;
     void loadDecisions();
@@ -2609,6 +2647,7 @@ function clearDecisions() {
   $("decisions-status").replaceChildren();
   $("decisions-empty").textContent = "";
   $("decisions-empty").hidden = true;
+  showDecisionsNote();
 }
 
 function renderDecisionsView() {
@@ -3045,6 +3084,9 @@ function draw() {
   const text = filterText();
   const tasks = inView.filter((task) => matchesVisibleTask(task, text));
   const graph = state.view === "graph";
+  // The graph has the decisions in view to draw as well, and is there when it has any of the two.
+  const decisions = graph ? decisionsInGraph(text) : [];
+  const nothing = tasks.length + decisions.length === 0;
   // The zoom is the board's: the graph has its own way of showing groups closed, and draws every task in view.
   const board = graph ? null : boardAt(inView);
   state.boardCards = board?.cards ?? null;
@@ -3053,7 +3095,7 @@ function draw() {
   state.closed = board ? board.closed : null;
   renderSummary(board ? board.cards : tasks, tasks.length, tasks);
   showLevels(board);
-  $("empty").hidden = tasks.length > 0;
+  $("empty").hidden = !nothing;
   $("empty").textContent =
     state.tasks.length === 0 ? "No tasks yet."
     : state.summaryFilter === "trouble" && !state.filter.trim() ? "No open bugs, issues or incidents in this view."
@@ -3062,7 +3104,7 @@ function draw() {
     : state.group ? `${state.group} holds no tasks${state.project ? " in this project" : ""}.`
     : "No tasks in this project.";
   // Full screen hides the header and the views. With no graph on screen, which is where its way out is, it ends.
-  if (state.full && (!graph || tasks.length === 0)) stopFullScreen();
+  if (state.full && (!graph || nothing)) stopFullScreen();
   document.body.classList.toggle("graph-view", graph);
   document.body.classList.toggle("graph-full", graph && state.full);
   document.body.classList.toggle("focus", state.focus);
@@ -3075,16 +3117,42 @@ function draw() {
   showLights();
   $("bugs-apart").checked = state.bugsApart;
   $("column-scroll").checked = state.columnScroll;
-  $("graph-panel").hidden = !graph || tasks.length === 0;
+  // With the decisions switched off there may be nothing to draw where there are decisions, as on a plan that
+  // has no tasks yet: the switch stays in reach then, alone above the line that says so.
+  const switchedOff = graph && nothing && offered({ kind: "decision" }) && !state.showDecisions;
+  if (switchedOff) $("empty").textContent += " “Show decisions” is off: switch it on to see the decisions here.";
+  // Nor is it hidden that the decisions could not be read, where no task is there to draw the graph for.
+  const unread = graph && nothing && graphDecisions() && Boolean(state.decisionsError);
+  const bare = switchedOff || unread;
+  $("graph-panel").hidden = !graph || (nothing && !bare);
+  $("graph-panel").classList.toggle("bare", bare);
+  if (graph) showGraphDecisions();
   for (const view of VIEWS) {
     if (state.view === view) $(`view-${view}`).setAttribute("aria-current", "page");
     else $(`view-${view}`).removeAttribute("aria-current");
   }
   linkViews();
   if (board) renderBoard(board.cards, board.closed);
-  else if (typing === null) renderGraphView(tasks);
+  else if (bare) showDecisionsNote();
+  else if (typing === null) renderGraphView(tasks, decisions);
   fitBoard();
 }
+
+/**
+ * What above the graph is about decisions: the switch that shows them, which an instance without decisions does
+ * not have, and what says how they are drawn, which is there while they are.
+ */
+function showGraphDecisions() {
+  const drawn = graphDecisions();
+  $("show-decisions-choice").hidden = !offered({ kind: "decision" });
+  $("show-decisions").checked = state.showDecisions;
+  for (const entry of $("legend").querySelectorAll(".of-decisions")) entry.hidden = !drawn;
+  $("hide-finished-choice").title = drawn ? "Leave out tasks that are done or cancelled, and decisions that are withdrawn" : "Leave out tasks that are done or cancelled";
+  $("graph-box").setAttribute("aria-label", drawn
+    ? "Graph of tasks and what they wait for, and of decisions and what they affect. The board view lists the same tasks as text, and the Decisions view the same decisions."
+    : "Graph of tasks and what they wait for. The board view lists the same tasks as text.");
+}
+
 /** The links to the two views lead to the same group, and the board is at the same zoom when it is come back to. */
 function linkViews() {
   for (const view of VIEWS) {
@@ -3313,6 +3381,16 @@ async function refresh() {
       state.view = "board";
       history.replaceState(history.state, "", routeOf("board", state.open));
     }
+    // The decisions that were read go too, so that neither that view nor the graph holds any.
+    // A graph that drew them is taken down with them, and what a drawing under way would still bring is
+    // dropped: a large graph is otherwise kept as it stands, with the decisions in it marked as gone.
+    if (!offered({ kind: "decision" }) && (state.decisions || state.decisionsError)) {
+      clearDecisions();
+      clearGraph();
+      graphTurns++;
+      graphScope = null;
+      showGraphStatus(null);
+    }
     // History cannot be narrowed to a kind or a status this instance does not offer: such a filter goes, from
     // the address too.
     const narrowed = normalizeHistoryFilters(state.historyFilters);
@@ -3350,9 +3428,10 @@ async function refresh() {
     const before = changed && !first && !left && state.view === "board" ? cardPlaces() : null;
     if (changed || state.view === "history") render();
     else fitBoard();
-    // The decisions in view are read again with the plan, so the view follows what others record. Not with the
-    // first reading of the plan: drawing the view then has asked for them already.
-    if (state.view === "decisions" && !first) void loadDecisions();
+    // The decisions in view are read again with the plan, so the view follows what others record, and so does
+    // the graph while it draws them. Not with the first reading of the plan: drawing the view then has asked for
+    // them already.
+    if (decisionsWanted() && !first) void loadDecisions();
     if (!first && state.view === "history" && state.historyKey === historyQueryKey()) {
       if (state.historyLoading) historyRefreshPending = true;
       else if (state.historyPages > 0) void loadHistory(true, true);
@@ -3435,6 +3514,13 @@ $("projects-fold").addEventListener("click", () => {
 $("legend").prepend(...STATES.map((s) => el("li", { "data-state": s.state }, el("i", { class: "swatch", style: `border-color: var(--${s.border}); background: var(--${s.fill});${s.dashed ? " border-style: dashed;" : ""}` }), s.label)));
 $("hide-finished").addEventListener("change", (event) => ((state.hideFinished = event.target.checked), render()));
 $("collapse-groups").addEventListener("change", (event) => ((state.collapsed = event.target.checked), render()));
+$("show-decisions").addEventListener("change", (event) => {
+  state.showDecisions = event.target.checked;
+  localStorage.setItem(GRAPH_DECISIONS_NAME, state.showDecisions ? "on" : "off");
+  // Switched on, the decisions are read again, as when the view is come to: what is held may be old.
+  if (state.showDecisions) void loadDecisions();
+  render();
+});
 $("zoom-out").addEventListener("click", () => zoomGraph("out"));
 $("zoom-in").addEventListener("click", () => zoomGraph("in"));
 $("zoom-fit").addEventListener("click", () => zoomGraph("fit"));

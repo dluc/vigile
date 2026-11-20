@@ -35,7 +35,7 @@ for (const el of scope.querySelectorAll("*")) {
   if (!r.width || !r.height) continue;
   const style = getComputedStyle(el);
   if (style.position === "absolute" && el.matches(".visually-hidden, .switch input")) continue;
-  const scroller = el.closest(".projects, .board");
+  const scroller = el.closest(".projects, .board, .legend");
   const inScroller = scroller && getComputedStyle(scroller).overflowX === "auto";
   if (!inScroller && (r.right > vw + 1 || r.left < -1)) issues.add("OUTSIDE viewport (" + Math.round(r.left) + ".." + Math.round(r.right) + " of " + vw + "): " + describe(el));
   const parent = el.parentElement;
@@ -1819,7 +1819,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
             return { id: input.id, role: input.getAttribute('role'), track: track ? Math.round(box.width) + 'x' + Math.round(box.height) : '', label: label?.textContent.trim() ?? '', seen: Boolean(box && box.width) };
           });
         `);
-        assert.deepEqual(choices.map((c) => c.id), ["auto", "column-scroll", "bugs-apart", "sound-created", "sound-started", "sound", "motion", "lights-on", "scheme-system", "scheme-dark", "collapse-groups", "hide-finished"]);
+        assert.deepEqual(choices.map((c) => c.id), ["auto", "column-scroll", "bugs-apart", "sound-created", "sound-started", "sound", "motion", "lights-on", "scheme-system", "scheme-dark", "collapse-groups", "hide-finished", "show-decisions"]);
         for (const choice of choices) assert.deepEqual([choice.role, choice.label.length > 3], ["switch", true], `${choice.id} is a switch with a label`);
         assert.deepEqual(
           await page.run("return ['sound-created', 'sound-started', 'sound', 'lights-on'].map((id) => document.getElementById(id).getAttribute('aria-label'))"),
@@ -1827,7 +1827,7 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
           "a switch whose name on screen leans on its drawing has a full name for those who cannot see it",
         );
         assert.equal(new Set(choices.filter((c) => c.seen).map((c) => c.track)).size, 1, "every switch in sight is drawn the same");
-        assert.deepEqual(choices.filter((c) => c.seen).map((c) => c.id), view === "/" ? ["auto", "column-scroll", "bugs-apart", "sound-created", "sound-started", "sound", "motion", "lights-on", "scheme-system"] : ["auto", "column-scroll", "bugs-apart", "sound-created", "sound-started", "sound", "motion", "lights-on", "scheme-system", "collapse-groups", "hide-finished"]);
+        assert.deepEqual(choices.filter((c) => c.seen).map((c) => c.id), view === "/" ? ["auto", "column-scroll", "bugs-apart", "sound-created", "sound-started", "sound", "motion", "lights-on", "scheme-system"] : ["auto", "column-scroll", "bugs-apart", "sound-created", "sound-started", "sound", "motion", "lights-on", "scheme-system", "collapse-groups", "hide-finished", "show-decisions"]);
       }
       await load();
       await openSettings();
@@ -6725,6 +6725,384 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
         assert.match(refused, new RegExp(`^(worker-src ${kind}|refused: SecurityError)$`), `a worker from a ${kind} address`);
       }
     });
+    describe("with decisions", () => {
+      /** The decisions a test recorded, to be taken out of the instance for good when it ends. */
+      const made: string[] = [];
+      const decide = async (input: Record<string, unknown>, affects: string[] = []) => {
+        const withdrawn = input.status === "withdrawn";
+        const decision = (await run("create_decision", { description: "d", ...input, status: withdrawn ? "active" : input.status })) as { id: string; version: number };
+        made.push(decision.id);
+        for (const to of affects) await run("add_link", { from: `decision:${decision.id}`, type: "affects", to });
+        if (withdrawn) await amend(decision.id, { status: "withdrawn" });
+        return decision.id;
+      };
+      /** Changes a decision at its present version, as another client would. */
+      const amend = async (id: string, input: Record<string, unknown>) => run("update_decision", { id, version: ((await run("get", { kind: "decision", id })) as { version: number }).version, ...input });
+      const asked = () => page.requests.filter((url) => url.endsWith("/api/list-decisions")).length;
+      const drawing = () => page.run<number>("return window.vigileGraph.scratch('drawing')");
+      /** Waits for the graph to have its places and to draw these decisions and no others. */
+      const drawn = (decisions: string[]) =>
+        page.until(
+          `const g = window.vigileGraph; return Boolean(g && g.scratch('settled')) && JSON.stringify(g.nodes('[kind = "decision"]').map((n) => n.data('ref')).sort()) === ${JSON.stringify(JSON.stringify([...decisions].sort()))}`,
+          `the graph with the decisions ${decisions.join(", ") || "gone"}`,
+          20_000,
+        );
+      /** The arrows from decisions, each as where it starts and where it ends. */
+      const arrows = () => page.run<string[]>("return window.vigileGraph.edges('[kind = \"affects\"]').map((e) => e.source().id() + ' > ' + e.target().id()).sort()");
+      /** Presses the refresh button and waits for the plan to have been read again, and what follows it to be asked for. */
+      const refreshed = async () => {
+        const loads = () => page.requests.filter((url) => url.endsWith("/api/list-tasks")).length;
+        const before = loads();
+        await page.click("#refresh");
+        for (const end = Date.now() + 5000; loads() === before && Date.now() < end; ) await page.wait(20);
+        await page.wait(300);
+      };
+
+      afterEach(async () => {
+        for (const id of made.splice(0)) {
+          const latest = (await run("get", { kind: "decision", id })) as { version: number };
+          await service.engine.execute("delete", "admin", { kind: "decision", id, version: latest.version, permanent: true });
+        }
+      });
+
+      it("draws each decision in view as an item of its own, with an arrow to what it affects, and narrows them as it narrows the tasks", async () => {
+        await page.scheme("light");
+        await page.size(1280, 900);
+        // One with the prefix of WEB that affects a task and a task inside a group, one that affects a project,
+        // one withdrawn that affects a task of that project, and two that affect nothing.
+        const prefixed = await decide({ title: "Zeta prices include tax", status: "active", project: "WEB" }, [ids.launch!, ids.card!]);
+        const proposed = await decide({ title: "Zeta shop ships abroad", status: "proposed" }, ["LONGNAME"]);
+        const withdrawn = await decide({ title: "Zeta shop takes cheques", status: "withdrawn" }, [ids.elsewhere!]);
+        const loose = await decide({ title: "Zeta shop closes on Sundays", status: "active" });
+        const apart = await decide({ title: "Zeta shop opens at nine", status: "proposed" });
+        const before = asked();
+        await load("/#graph");
+        await drawn([prefixed, proposed, withdrawn, loose, apart]);
+        assert.equal(asked(), before + 1, "the decisions are read once for the graph");
+        const look = (id: string) =>
+          page.run<{ kind: string; state: string; label: string; shape: string; border: string; opacity: number; box: string | null }>(
+            `const n = window.vigileGraph.getElementById('decision:${id}'); return { kind: n.data('kind'), state: n.data('state'), label: n.data('label'), shape: n.style('shape'), border: n.style('border-style'), opacity: Number(n.style('opacity')), box: n.parent().length ? n.parent().id() : null }`,
+          );
+        // A decision is no box of a task: it has a shape of its own, says its state, and is in no project's box.
+        assert.deepEqual(await look(prefixed), { kind: "decision", state: "active", label: `${prefixed} · active\nZeta prices include tax`, shape: "polygon", border: "solid", opacity: 1, box: "flow:plan" });
+        assert.deepEqual(await look(proposed), { kind: "decision", state: "proposed", label: `${proposed} · proposed\nZeta shop ships abroad`, shape: "polygon", border: "dashed", opacity: 1, box: "flow:plan" });
+        const subdued = await look(withdrawn);
+        assert.deepEqual([subdued.state, subdued.label, subdued.opacity < 1], ["withdrawn", `${withdrawn} · withdrawn\nZeta shop takes cheques`, true], "a withdrawn decision is subdued");
+        assert.equal(await page.run<string>(`return window.vigileGraph.nodes('[kind = "task"][state = "next"]').first().style('shape')`), "round-rectangle", "a task has another shape");
+        // An arrow of their own kind leads to what each affects: a task, the group that stands for a task
+        // inside it, a project. That of a withdrawn decision is subdued with it.
+        assert.deepEqual(await arrows(), [`decision:${prefixed} > task:${ids.checkout}`, `decision:${prefixed} > task:${ids.launch}`, `decision:${proposed} > project:LONGNAME`, `decision:${withdrawn} > task:${ids.elsewhere}`].sort());
+        const line = (id: string) => page.run<{ line: string; head: string; state: string; opacity: number }>(`const e = window.vigileGraph.edges('[source = "decision:${id}"]').first(); return { line: e.style('line-style'), head: e.style('target-arrow-shape'), state: e.data('state'), opacity: Number(e.style('opacity')) }`);
+        assert.deepEqual(await line(prefixed), { line: "dotted", head: "vee", state: "active", opacity: 0.75 });
+        assert.deepEqual(await line(withdrawn), { line: "dotted", head: "vee", state: "withdrawn", opacity: 0.5 });
+        // The decisions that affect nothing drawn stand loose, together, under everything else.
+        assert.deepEqual([(await look(loose)).box, (await look(apart)).box], ["shelf:decisions", "shelf:decisions"]);
+        assert.equal(await page.run<boolean>("const g = window.vigileGraph; return g.getElementById('shelf:decisions').boundingBox().y1 >= g.getElementById('flow:plan').boundingBox({ includeLabels: false }).y2"), true, "the loose decisions are under the rest");
+        assert.equal(await page.run<number>(`return window.vigileGraph.getElementById('decision:${loose}').degree()`), 0);
+        const overlaps = await page.run<string[]>(`
+          const leaves = window.vigileGraph.nodes().filter((n) => !n.isParent());
+          const found = [];
+          for (let i = 0; i < leaves.length; i++) for (let j = i + 1; j < leaves.length; j++) {
+            const a = leaves[i].boundingBox({ includeLabels: false }), b = leaves[j].boundingBox({ includeLabels: false });
+            if (Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1) > 1 && Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1) > 1) found.push(leaves[i].id() + " over " + leaves[j].id());
+          }
+          return found.slice(0, 5);
+        `);
+        assert.deepEqual(overlaps, [], "no decision is drawn on top of another item");
+        // The legend explains both as they are drawn, and the graph says what it is to those who cannot see it.
+        assert.deepEqual(await page.run("return [...document.querySelectorAll('#legend .of-decisions')].map((e) => [e.hidden, e.textContent.trim()])"), [[false, "decision"], [false, "affects"]]);
+        const plain = (colour: string) => colour.replaceAll(" ", "");
+        const colours = await page.run<{ node: string; swatch: string; arrow: string; line: string }>(
+          `const g = window.vigileGraph; return { node: g.getElementById('decision:${prefixed}').style('border-color'), swatch: getComputedStyle(document.querySelector('#legend .shape.decision polygon')).stroke, arrow: g.edges('[source = "decision:${prefixed}"]').first().style('line-color'), line: getComputedStyle(document.querySelector('#legend .line.affects')).borderTopColor }`,
+        );
+        assert.deepEqual([plain(colours.swatch), plain(colours.line)], [plain(colours.node), plain(colours.arrow)], "the legend shows a decision and its arrow in the colours the graph draws them in");
+        assert.match(await page.run<string>("return document.getElementById('graph-box').getAttribute('aria-label')"), /of decisions and what they affect.*the Decisions view the same decisions/);
+        await layout("in the graph with decisions");
+        await page.size(390, 800, true);
+        await layout("in the graph with decisions on a phone");
+        await page.size(1280, 900);
+        // With the groups open, the arrow goes to the task itself.
+        await page.click("label:has(#collapse-groups)");
+        await page.until(`return window.vigileGraph.edges('[source = "decision:${prefixed}"][target = "task:${ids.card}"]').length === 1 && window.vigileGraph.scratch('settled')`, "the arrow to the task inside the opened group", 20_000);
+        await page.click("label:has(#collapse-groups)");
+        // A project narrows them as it narrows the Decisions view: to those with its prefix, and to those that
+        // affect it or a task inside it.
+        await load("/#graph?project=LONGNAME");
+        await drawn([proposed, withdrawn]);
+        assert.deepEqual(await page.run<string[]>("return window.vigileGraph.nodes('[ref]').map((n) => n.id()).sort()"), [`decision:${proposed}`, `decision:${withdrawn}`, "project:LONGNAME", `task:${ids.elsewhere}`].sort());
+        await load("/#graph?project=WEB");
+        await drawn([prefixed]);
+        // A group in view narrows them to those that affect something inside it.
+        await load(`/#graph?in=${ids.checkout}`);
+        await drawn([prefixed]);
+        assert.deepEqual(await arrows(), [`decision:${prefixed} > task:${ids.payments}`]);
+        // The filter narrows them by ID and title, as it narrows the tasks. A decision alone is a graph too.
+        await load("/#graph");
+        await drawn([prefixed, proposed, withdrawn, loose, apart]);
+        await page.click("#filter");
+        await page.type("zeta shop closes");
+        await drawn([loose]);
+        assert.deepEqual(await page.run("return [window.vigileGraph.nodes('[ref]').length, document.getElementById('empty').hidden, document.getElementById('graph-box').getBoundingClientRect().height > 0]"), [1, true, true]);
+        await page.type(" nowhere");
+        await page.until("return !document.getElementById('empty').hidden && document.getElementById('graph-panel').hidden", "nothing to draw");
+        assert.equal(await text("#empty"), 'No task matches "zeta shop closes nowhere".');
+        // A count chosen above the board narrows the graph to tasks of one sort, which no decision is.
+        await load("/#board");
+        await page.click('#summary [data-summary-filter="trouble"]');
+        await page.click("#view-graph");
+        await graphReady();
+        await drawn([]);
+        assert.equal(await page.run<number>("return window.vigileGraph.nodes('[kind = \"task\"]').length"), 4, "the open bugs, and no decision");
+        await page.click("#summary [data-clear-summary-filter]");
+        await drawn([prefixed, proposed, withdrawn, loose, apart]);
+        assert.deepEqual(page.errors, []);
+      });
+
+      it("opens a decision when its item is clicked, at an address of its own, and Back returns to the graph", async () => {
+        await page.size(1280, 900);
+        const decision = await decide({ title: "Zeta receipts are kept ten years", status: "active" }, [ids.launch!]);
+        await load("/#graph");
+        await drawn([decision]);
+        await page.run("document.getElementById('zoom-fit').click()");
+        const first = await drawing();
+        const at = await nodeAt(`decision:${decision}`);
+        await page.clickAt(at.x, at.y);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Zeta receipts are kept ten years'", "the clicked decision's panel");
+        assert.equal(await page.run("return location.hash"), `#graph/decision:${decision}`);
+        await page.run("history.back()");
+        await page.until("return document.getElementById('panel').hidden && location.hash === '#graph'", "Back closes the panel");
+        assert.deepEqual([await drawing(), await page.run<number>("return window.vigileGraph.nodes('[kind = \"decision\"]').length")], [first, 1], "the graph is as it was");
+        // The address alone opens it over the graph, and Escape leaves the graph.
+        await load(`/#graph/decision:${decision}`);
+        await page.until("return document.querySelector('.detail-title')?.textContent === 'Zeta receipts are kept ten years'", "the decision from its address");
+        await drawn([decision]);
+        await page.key("Escape");
+        await page.until("return document.getElementById('panel').hidden && location.hash === '#graph'", "the panel to close");
+        assert.deepEqual(page.errors, []);
+      });
+
+      it("has a switch that takes the decisions out of the graph, remembers it, and reads no decisions while it is off", async () => {
+        await page.size(1280, 900);
+        const decision = await decide({ title: "Zeta cart keeps items for a week", status: "active" }, [ids.launch!]);
+        const choice = () => page.run<{ seen: boolean; on: boolean; label: string; stored: string | null; legend: boolean[]; finished: string }>(
+          "const input = document.getElementById('show-decisions'); const label = input.closest('label'); return { seen: label.getBoundingClientRect().width > 0, on: input.checked, label: label.textContent.trim(), stored: localStorage.getItem('vigile.graph-decisions'), legend: [...document.querySelectorAll('#legend .of-decisions')].map((e) => e.hidden), finished: document.getElementById('hide-finished-choice').title }",
+        );
+        try {
+          await load("/#graph");
+          await drawn([decision]);
+          assert.deepEqual(await choice(), { seen: true, on: true, label: "Show decisions", stored: null, legend: [false, false], finished: "Leave out tasks that are done or cancelled, and decisions that are withdrawn" });
+          const tasks = await page.run<number>("return window.vigileGraph.nodes('[kind = \"task\"]').length");
+          // Off: no decision and no arrow from one, nothing about them in the legend, and the tasks as they were.
+          await page.click("label:has(#show-decisions)");
+          await drawn([]);
+          assert.deepEqual([await arrows(), await page.run<number>("return window.vigileGraph.nodes('[kind = \"task\"]').length")], [[], tasks]);
+          assert.deepEqual(await choice(), { seen: true, on: false, label: "Show decisions", stored: "off", legend: [true, true], finished: "Leave out tasks that are done or cancelled" });
+          assert.doesNotMatch(await page.run<string>("return document.getElementById('graph-box').getAttribute('aria-label')"), /decision/);
+          // While it is off the decisions are not read: not with a refresh, not when the page is loaded again,
+          // and not when the graph is come back to.
+          const before = asked();
+          await refreshed();
+          await load("/#graph");
+          await graphReady();
+          await drawn([]);
+          assert.deepEqual([(await choice()).on, (await choice()).stored], [false, "off"], "the choice is remembered");
+          await page.click("#view-board");
+          await page.until("return document.getElementById('board').getBoundingClientRect().height > 0", "the board");
+          await page.click("#view-graph");
+          await graphReady();
+          await page.wait(300);
+          assert.equal(asked(), before, "nothing of the decisions was asked for");
+          // On again: they are read and drawn, and that is remembered too.
+          await page.click("label:has(#show-decisions)");
+          await drawn([decision]);
+          assert.equal(asked(), before + 1);
+          assert.deepEqual(await arrows(), [`decision:${decision} > task:${ids.launch}`]);
+          await load("/#graph");
+          await drawn([decision]);
+          assert.deepEqual([(await choice()).on, (await choice()).stored, (await choice()).legend], [true, "on", [false, false]]);
+          // Where a decision is all there is to draw, switching the decisions off leaves the switch in reach,
+          // alone above a line that says why nothing is drawn.
+          await page.click("#filter");
+          await page.type("zeta cart keeps");
+          await page.until("return window.vigileGraph.nodes('[kind = \"task\"]').length === 0 && window.vigileGraph.nodes('[kind = \"decision\"]').length === 1", "the decision alone in the graph");
+          await page.click("label:has(#show-decisions)");
+          await page.until("return document.getElementById('graph-panel').classList.contains('bare') && document.getElementById('empty').textContent.includes('“Show decisions” is off')", "the switch alone, and why nothing is drawn");
+          assert.deepEqual([(await choice()).seen, (await choice()).on, await page.run("return getComputedStyle(document.getElementById('graph-box')).display === 'none' || document.querySelector('.graph-frame').getBoundingClientRect().height === 0")], [true, false, true]);
+          await page.click("label:has(#show-decisions)");
+          await page.until("return !document.getElementById('graph-panel').classList.contains('bare') && window.vigileGraph.nodes('[kind = \"decision\"]').length === 1", "the decision drawn again");
+          await page.click("#clear-filter");
+          await drawn([decision]);
+          // The board and the history read no decisions, whatever the switch says.
+          await page.click("#view-board");
+          await page.until("return document.getElementById('board').getBoundingClientRect().height > 0", "the board");
+          const elsewhere = asked();
+          await refreshed();
+          await page.click("#view-history");
+          await page.until("return !document.getElementById('history-panel').hidden", "the history");
+          await refreshed();
+          assert.equal(asked(), elsewhere, "only the graph and the Decisions view read the decisions");
+          assert.deepEqual(page.errors, []);
+        } finally {
+          await page.run("localStorage.removeItem('vigile.graph-decisions')");
+        }
+      });
+
+      it("leaves withdrawn decisions out with the finished tasks, and says when nothing is left", async () => {
+        await page.size(1280, 900);
+        const kept = await decide({ title: "Zeta refunds go to the card that paid", status: "active" }, [ids.done1!]);
+        const dropped = await decide({ title: "Finished thing was dropped", status: "withdrawn" }, [ids.done2!]);
+        await load("/#graph");
+        await drawn([kept, dropped]);
+        assert.deepEqual(await arrows(), [`decision:${dropped} > task:${ids.done2}`, `decision:${kept} > task:${ids.done1}`].sort());
+        // The withdrawn decision goes with the finished tasks. The other one stays, and stands loose: what it
+        // affects is finished, and not drawn.
+        await page.click("label:has(#hide-finished)");
+        await drawn([kept]);
+        assert.deepEqual([await arrows(), await page.run<number>("return window.vigileGraph.nodes('[state = \"done\"], [state = \"cancelled\"], [state = \"withdrawn\"]').length")], [[], 0]);
+        // Narrowed to finished tasks and a withdrawn decision, nothing is left, and the page says why.
+        await page.click("#filter");
+        await page.type("Finished thing");
+        await page.until("return !document.getElementById('graph-note').hidden", "the note");
+        assert.equal(await text("#graph-note"), "Every task here is finished, and every decision withdrawn. Untick “Hide finished tasks” to see them.");
+        await page.click("label:has(#hide-finished)");
+        await drawn([dropped]);
+        assert.deepEqual(await page.run("return [document.getElementById('graph-note').hidden, window.vigileGraph.nodes('[kind = \"task\"]').length]"), [true, 20]);
+        assert.deepEqual(page.errors, []);
+      });
+
+      it("follows the decisions with each refresh: one recorded meanwhile is drawn, one withdrawn says so where it stands, and one deleted goes", async () => {
+        await page.size(1280, 900);
+        const first = await decide({ title: "Zeta cart is saved for a week", status: "active" }, [ids.launch!]);
+        await load("/#graph");
+        await drawn([first]);
+        const opened = await drawing();
+        // A refresh that finds nothing new reads the decisions once and draws nothing.
+        const before = asked();
+        await refreshed();
+        assert.deepEqual([asked(), await drawing()], [before + 1, opened]);
+        // One recorded meanwhile is in the graph after the refresh, which is small and so is drawn again.
+        const second = await decide({ title: "Zeta payment is taken when the parcel leaves", status: "proposed" }, [ids.review!]);
+        await refreshed();
+        await drawn([first, second]);
+        assert.deepEqual(await arrows(), [`decision:${first} > task:${ids.launch}`, `decision:${second} > task:${ids.review}`].sort());
+        const again = await drawing();
+        assert.ok(again > opened, "a new drawing");
+        // One that changes state or title has the same place and the same arrows: it shows the change where it stands.
+        await amend(first, { status: "withdrawn", title: "Zeta cart was saved for a week" });
+        await refreshed();
+        await page.until(`const g = window.vigileGraph; return g.getElementById('decision:${first}').data('state') === 'withdrawn' && g.edges('[source = "decision:${first}"]').first().data('state') === 'withdrawn'`, "the withdrawn decision and its arrow");
+        assert.deepEqual([await page.run<string>(`return window.vigileGraph.getElementById('decision:${first}').data('label')`), await drawing()], [`${first} · withdrawn\nZeta cart was saved for a week`, again]);
+        // One that is deleted goes, and its arrow with it.
+        const gone = (await run("get", { kind: "decision", id: second })) as { version: number };
+        await run("delete", { kind: "decision", id: second, version: gone.version });
+        await refreshed();
+        await drawn([first]);
+        assert.deepEqual(await arrows(), [`decision:${first} > task:${ids.launch}`]);
+        // Coming back to the graph reads them again: what was recorded while the page was elsewhere is there.
+        await page.click("#view-board");
+        await page.until("return document.getElementById('board').getBoundingClientRect().height > 0", "the board");
+        const third = await decide({ title: "Zeta prices end in ninety-nine", status: "active" });
+        await page.click("#view-graph");
+        await drawn([first, third]);
+        assert.deepEqual(page.errors, []);
+      });
+
+      it("leaves nothing of the decisions in the graph when the key is refused", async () => {
+        await page.size(1280, 900);
+        const decision = await decide({ title: "Zeta private choice of courier", status: "active" }, [ids.launch!]);
+        try {
+          await load("/#graph");
+          await drawn([decision]);
+          await page.run("window.decisionsRealFetch = window.fetch; window.fetch = async (...args) => String(args[0]).endsWith('/api/list-decisions') ? new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'Decisions key was refused' } }), { status: 401, headers: { 'content-type': 'application/json' } }) : window.decisionsRealFetch(...args)");
+          await page.click("#refresh");
+          await page.until("return document.getElementById('main').hidden && Boolean(document.querySelector('#notice input'))", "the connection form after the decisions are refused");
+          assert.deepEqual(await page.run("return { graph: typeof window.vigileGraph, box: document.getElementById('graph-box').childElementCount, note: document.getElementById('graph-decisions-note').textContent, hash: location.hash }"), { graph: "undefined", box: 0, note: "", hash: "#graph" });
+          await page.run("window.fetch = window.decisionsRealFetch; document.querySelector('#notice form').requestSubmit()");
+          await drawn([decision]);
+          assert.deepEqual(page.errors, []);
+        } finally {
+          await page.run("if (window.decisionsRealFetch) window.fetch = window.decisionsRealFetch");
+        }
+      });
+
+      it("draws the graph without the decisions when they cannot be read, says so beside the switch, and draws them once they can", async () => {
+        await page.size(1280, 900);
+        const decision = await decide({ title: "Zeta parcels are insured", status: "active" }, [ids.launch!]);
+        try {
+          await load("/#board");
+          await page.run("window.decisionsRealFetch = window.fetch; window.fetch = async (...args) => String(args[0]).endsWith('/api/list-decisions') ? new Response(JSON.stringify({ error: { code: 'internal', message: 'The decisions are out for a moment.' } }), { status: 500, headers: { 'content-type': 'application/json' } }) : window.decisionsRealFetch(...args)");
+          await page.click("#view-graph");
+          await graphReady();
+          await drawn([]);
+          assert.equal(await text("#graph-decisions-note"), "The decisions could not be read, and the graph is drawn without them: The decisions are out for a moment.");
+          await layout("in the graph when the decisions could not be read");
+          // It says so also where no task is in view to draw a graph for.
+          await page.click("#filter");
+          await page.type("zeta matches no task");
+          await page.until("return document.getElementById('graph-panel').classList.contains('bare') && !document.getElementById('empty').hidden", "nothing to draw");
+          assert.deepEqual(await page.run("const note = document.getElementById('graph-decisions-note'); return [note.getBoundingClientRect().height > 0, note.textContent]"), [true, "The decisions could not be read, and the graph is drawn without them: The decisions are out for a moment."]);
+          await page.click("#clear-filter");
+          await graphReady();
+          await drawn([]);
+          await page.run("window.fetch = window.decisionsRealFetch");
+          await refreshed();
+          await drawn([decision]);
+          assert.equal(await page.run<boolean>("return document.getElementById('graph-decisions-note').hidden"), true);
+          assert.deepEqual(page.errors, []);
+        } finally {
+          await page.run("if (window.decisionsRealFetch) window.fetch = window.decisionsRealFetch");
+        }
+      });
+
+      it("has no switch and reads no decisions on an instance without them, and takes them out of the graph when the instance is started again without them", async () => {
+        await page.size(1280, 900);
+        const dir = mkdtempSync(join(tmpdir(), "vigile-browser-graph-decisions-"));
+        const file = join(dir, "config.toml");
+        initConfig(file, { name: "Shop", port: await freePort() });
+        const start = (features: string) => startService({ loaded: loadConfig(file, { VIGILE_FEATURES: features, VIGILE_BACKUP_ENABLED: "false" }), log() {}, warn() {} });
+        let instance = await start("tasks");
+        // A bounded stop may return while the data folder is still held; the next start waits for it.
+        const restart = async (features: string) => {
+          await instance.stop();
+          const data = loadConfig(file, {}).dataDir;
+          for (const until = Date.now() + 30_000; folderIsHeld(data); await new Promise((r) => setTimeout(r, 50))) if (Date.now() >= until) assert.fail(`the service did not let go of its data folder within 30 seconds of stopping: ${data}`);
+          return start(features);
+        };
+        const above = () => page.run<{ choice: boolean; legend: boolean[]; label: string }>(
+          "return { choice: document.getElementById('show-decisions-choice').getBoundingClientRect().width > 0, legend: [...document.querySelectorAll('#legend .of-decisions')].map((e) => e.hidden), label: document.getElementById('graph-box').getAttribute('aria-label') }",
+        );
+        const without = { choice: false, legend: [true, true], label: "Graph of tasks and what they wait for. The board view lists the same tasks as text." };
+        try {
+          const cart = (await instance.engine.execute("create_task", "agent1", { title: "Cart", description: "d" })) as { id: string };
+          const before = asked();
+          await page.open(`${instance.urls.base}/#graph`);
+          await graphReady();
+          await refreshed();
+          assert.deepEqual([await above(), asked()], [without, before], "no switch, nothing in the legend, and no decision asked for");
+          // Started again with decisions, the switch is there, and a decision is drawn.
+          instance = await restart("tasks,decisions");
+          const decision = (await instance.engine.execute("create_decision", "agent1", { title: "Prices include tax", description: "d", status: "active" })) as { id: string };
+          await instance.engine.execute("add_link", "agent1", { from: `decision:${decision.id}`, type: "affects", to: cart.id });
+          await page.click("#refresh");
+          await drawn([decision.id]);
+          assert.deepEqual([(await above()).choice, (await above()).legend, await arrows()], [true, [false, false], [`decision:${decision.id} > task:${cart.id}`]]);
+          // Started again without them, a refresh takes the decision out of the graph, and the switch with it.
+          instance = await restart("tasks");
+          await page.click("#refresh");
+          await drawn([]);
+          await page.until("return document.getElementById('show-decisions-choice').hidden", "the switch to go");
+          assert.equal(await page.run<number>("return window.vigileGraph.nodes('[kind = \"task\"]').length"), 1);
+          const after = asked();
+          await refreshed();
+          assert.deepEqual([await above(), asked()], [without, after]);
+          assert.deepEqual(page.errors, []);
+        } finally {
+          await page.open("about:blank");
+          await instance.stop();
+          rmSync(dir, { recursive: true, force: true });
+        }
+      });
+    });
   });
 
   browserSuite("themes", () => {
@@ -9903,6 +10281,39 @@ describe("the page in a browser", { skip: browser ? false : "no Chromium found; 
       } finally {
         await page.run("localStorage.removeItem('vigile.auto-refresh')");
         await takeBack(undo);
+      }
+    });
+
+    it("keeps a large graph when a decision is recorded, withdrawn or deleted under it, says what it does not show, and draws the decision when asked", async () => {
+      await page.size(1280, 900);
+      const affected = firsts.MID![0]!;
+      let recorded: string | null = null;
+      const decision = () => `window.vigileGraph.getElementById('decision:${recorded}')`;
+      try {
+        const first = await drawMid();
+        // A decision that affects a task of the project is recorded. It has no place in the drawing, and is counted.
+        recorded = ((await plan("create_decision", { title: "Prices include tax", description: "d", status: "active" })) as { id: string }).id;
+        await plan("add_link", { from: `decision:${recorded}`, type: "affects", to: affected });
+        await says("1 item and 1 arrow are new and not drawn");
+        assert.equal(await button(), "Draw it again");
+        assert.deepEqual(await drawing(), { number: first, settled: true, items: 400 }, "the drawing that was there is there still");
+        // Asked for, the graph is drawn again, with the decision and its arrow.
+        await page.click("#graph-draw");
+        await settled(401);
+        assert.deepEqual([(await drawing())!.number, await line(), await page.run<number>(`return window.vigileGraph.edges('[source = "decision:${recorded}"][target = "task:${affected}"]').length`)], [first + 1, null, 1]);
+        // Withdrawn, it says so where it stands: the same drawing, and nothing to say about it.
+        await plan("update_decision", { id: recorded, version: (await plan("get", { kind: "decision", id: recorded })).version, status: "withdrawn" });
+        await page.until(`return ${decision()}.data('state') === 'withdrawn'`, "the withdrawn decision in the graph");
+        assert.deepEqual([await page.run<string>(`return ${decision()}.data('label')`), (await drawing())!.number, await line()], [`${recorded} · withdrawn\nPrices include tax`, first + 1, null]);
+        // Deleted, it is greyed out with its arrow, as a task that is gone is.
+        await plan("delete", { kind: "decision", id: recorded, version: (await plan("get", { kind: "decision", id: recorded })).version });
+        await says("1 item and 1 arrow are no longer there and greyed out");
+        assert.deepEqual(await page.run(`return [${decision()}.hasClass('gone'), ${decision()}.data('label'), window.vigileGraph.edges('[source = "decision:${recorded}"]').first().hasClass('gone')]`), [true, `${recorded} · no longer here`, true]);
+        assert.deepEqual(await drawing(), { number: first + 1, settled: true, items: 401 });
+        assert.deepEqual(page.errors, []);
+      } finally {
+        await page.run("localStorage.removeItem('vigile.auto-refresh')");
+        if (recorded) await large.engine.execute("delete", "admin", { kind: "decision", id: recorded, version: (await plan("get", { kind: "decision", id: recorded })).version, permanent: true });
       }
     });
 

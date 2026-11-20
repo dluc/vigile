@@ -1,6 +1,7 @@
 /**
  * The graph view. Containment is nesting: a project holds its tasks, a group holds its steps.
- * Dependencies are arrows, drawn in the order the work has to happen. Layout and drawing are done by
+ * Dependencies are arrows, drawn in the order the work has to happen. A decision stands outside the boxes, with
+ * an arrow to each thing it affects. Layout and drawing are done by
  * Cytoscape.js with the ELK layered layout, both served by this service so the page needs no internet.
  * The layout is worked out in a worker, off the page's own thread: for a large plan it takes many seconds,
  * and the page must go on answering meanwhile.
@@ -30,8 +31,11 @@ export function stateOf(task) {
  * With `collapsed`, a group is one node that stands for everything inside it, and an arrow to or from a task
  * inside is drawn to or from the group. That is the high-level view. Without it, groups are boxes around
  * their tasks.
+ *
+ * Each of `decisions` is a node of its own kind, in no box, with an arrow to every task and project it affects
+ * that is drawn. One that affects nothing drawn stands loose.
  */
-export function buildElements(tasks, projects, { collapsed = false } = {}) {
+export function buildElements(tasks, projects, { collapsed = false, decisions = [] } = {}) {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const projectByRef = new Map(projects.map((p) => [projectRef(p), p]));
 
@@ -98,16 +102,16 @@ export function buildElements(tasks, projects, { collapsed = false } = {}) {
     return false;
   };
   const edges = new Map();
-  const connect = (source, target, kind) => {
+  const connect = (source, target, kind, state) => {
     if (source === target || isInside(source, target) || isInside(target, source)) return;
-    const key = `${source}|${target}|${kind === "contains" ? "c" : "d"}`;
+    const key = `${source}|${target}|${kind === "contains" ? "c" : kind === "affects" ? "a" : "d"}`;
     const existing = edges.get(key);
     // Several dependencies can fold into one arrow between two groups: it is unmet if any of them is.
     if (existing) {
       if (kind === "open") existing.data.kind = "open";
       return;
     }
-    edges.set(key, { data: { id: `edge:${key}`, source, target, kind } });
+    edges.set(key, { data: { id: `edge:${key}`, source, target, kind, ...(state ? { state } : {}) } });
   };
   for (const task of tasks) {
     const target = nodeId(shown(task.id));
@@ -126,6 +130,28 @@ export function buildElements(tasks, projects, { collapsed = false } = {}) {
       if (!other || other === drawnParent.get(target)) continue;
       if (projectByRef.has(ref)) usedProjects.add(ref);
       connect(other, target, "contains");
+    }
+  }
+  // A decision is an item in no box. Its arrow to a task inside a collapsed group goes to the group, as a
+  // dependency's does, and carries the decision's state: that of a withdrawn decision is subdued with it.
+  for (const decision of decisions) {
+    const source = `decision:${decision.id}`;
+    nodes.push({
+      data: {
+        id: source,
+        ref: decision.id,
+        kind: "decision",
+        label: `${decision.id} · ${decision.status}\n${short(decision.title, 64)}`,
+        state: decision.status,
+        unbroken: /\S{20,}/.test(decision.title) ? 1 : 0,
+      },
+    });
+    for (const ref of decision.affects) {
+      if (byId.has(ref)) connect(source, nodeId(shown(ref)), "affects", decision.status);
+      else if (projectByRef.has(ref)) {
+        usedProjects.add(ref);
+        connect(source, projectId(ref), "affects", decision.status);
+      }
     }
   }
 
@@ -290,7 +316,9 @@ function layoutFailed(error) {
  * Sets apart, in each box, the items that no arrow touches. Left among the others they would all be stacked in
  * one tall column, because the layout orders items by what they wait for and these wait for nothing. Here they
  * become a shelf, packed in rows under the items that are linked. The shelf and the linked part are boxes of
- * their own that are not drawn.
+ * their own that are not drawn. The decisions that affect nothing drawn are in no box, and would be one tall
+ * column for the same reason: they get a shelf of their own, under everything else, which is then one part
+ * above it as the linked items of a box are.
  */
 export function arrange({ nodes, edges }) {
   const linked = new Set(edges.flatMap((edge) => [edge.data.source, edge.data.target]));
@@ -301,16 +329,29 @@ export function arrange({ nodes, edges }) {
   const shelved = (box) => (loose.get(box) ?? 0) >= 2;
   /** The boxes that hold something an arrow touches, or another box. */
   const flowing = new Set(nodes.filter((node) => node.data.parent && !isLoose(node)).map((node) => node.data.parent));
+  const isLooseDecision = (node) => node.data.kind === "decision" && !linked.has(node.data.id);
+  const decisionsShelved = nodes.filter(isLooseDecision).length >= 2;
   const arranged = [];
   for (const node of nodes) {
     const box = node.data.parent;
-    arranged.push(shelved(box) ? { data: { ...node.data, parent: `${isLoose(node) ? "shelf" : "flow"}:${box}` } } : node);
+    if (decisionsShelved && !box) arranged.push({ data: { ...node.data, parent: isLooseDecision(node) ? DECISION_SHELF : PLAN } });
+    else arranged.push(shelved(box) ? { data: { ...node.data, parent: `${isLoose(node) ? "shelf" : "flow"}:${box}` } } : node);
     if (!shelved(node.data.id)) continue;
     if (flowing.has(node.data.id)) arranged.push({ data: { id: `flow:${node.data.id}`, kind: "flow", parent: node.data.id } });
     arranged.push({ data: { id: `shelf:${node.data.id}`, kind: "shelf", parent: node.data.id } });
   }
+  if (decisionsShelved) {
+    if (arranged.some((node) => node.data.parent === PLAN)) arranged.push({ data: { id: PLAN, kind: "flow" } });
+    arranged.push({ data: { id: DECISION_SHELF, kind: "shelf" } });
+  }
   return { nodes: arranged, edges };
 }
+/** The shelf of the decisions that affect nothing drawn, and the part above it that holds everything else. */
+const DECISION_SHELF = "shelf:decisions";
+const PLAN = "flow:plan";
+
+/** The outline of a decision: a box pointed at both ends, which no task has. */
+const DECISION_SHAPE = "-1 0 -0.93 -1 0.93 -1 1 0 0.93 1 -0.93 1";
 
 /**
  * How each state is drawn: the names of the page's colours for the border and the inside of a task's box.
@@ -367,6 +408,11 @@ function stylesheet(c) {
     { selector: 'node[state = "done"], node[state = "cancelled"]', style: { color: c.muted } },
     { selector: "node[trouble = 1]", style: { "border-color": c.bug, "border-width": 4, "border-style": "double", "background-color": c["bug-soft"] } },
     { selector: "node[problem = 1]", style: { "border-color": c.stop, "border-style": "dashed" } },
+    // A decision has no colour of a task's state: its outline is the colour of the text, dashed while it is only
+    // proposed, and its label says which state it is in. A withdrawn one is subdued.
+    { selector: 'node[kind = "decision"]', style: { shape: "polygon", "shape-polygon-points": DECISION_SHAPE, "border-color": c.text, "background-color": c.surface, "text-max-width": 176 } },
+    { selector: 'node[kind = "decision"][state = "proposed"]', style: { "border-style": "dashed" } },
+    { selector: 'node[kind = "decision"][state = "withdrawn"]', style: { "border-color": c.idle, "background-color": c["idle-soft"], color: c.muted, opacity: 0.7 } },
     {
       selector: ":parent",
       style: {
@@ -396,6 +442,8 @@ function stylesheet(c) {
     { selector: 'edge[kind = "open"]', style: { "line-color": c.wait, "target-arrow-color": c.wait, width: 2 } },
     { selector: 'edge[kind = "met"]', style: { "line-color": c.go, "target-arrow-color": c.go, opacity: 0.55 } },
     { selector: 'edge[kind = "contains"]', style: { "line-style": "dashed", "target-arrow-shape": "none", opacity: 0.7 } },
+    { selector: 'edge[kind = "affects"]', style: { "line-color": c.text, "target-arrow-color": c.text, "line-style": "dotted", "target-arrow-shape": "vee", opacity: 0.75 } },
+    { selector: 'edge[kind = "affects"][state = "withdrawn"]', style: { "line-color": c.idle, "target-arrow-color": c.idle, opacity: 0.5 } },
     { selector: ".faded", style: { opacity: 0.15 } },
     { selector: "edge.lit", style: { width: 3, opacity: 1 } },
     // What is no longer in the plan where a kept drawing has it: see `bringUpToDate`. It comes last, so that it
@@ -481,12 +529,12 @@ function whatNow(large, onScreen, size) {
  * `open(kind, id)` is called when a node is clicked, `placed()` when the layout of the drawing has arrived, and
  * `failed(error)` when it came to nothing. Answers nothing when the graph was taken away meanwhile.
  */
-export async function renderGraph(root, { tasks, projects, collapsed }, { open, placed, failed, large = "draw" }) {
+export async function renderGraph(root, { tasks, projects, decisions, collapsed }, { open, placed, failed, large = "draw" }) {
   const asked = cleared;
   const cytoscape = await loadLibraries();
   if (asked !== cleared) return null;
   told = { placed, failed };
-  const built = buildElements(tasks, projects, { collapsed });
+  const built = buildElements(tasks, projects, { collapsed, decisions });
   const colours = palette();
   const size = { items: built.nodes.length, arrows: built.edges.length };
   const current = cy && cy.container().parentElement === root;
@@ -535,7 +583,7 @@ export async function renderGraph(root, { tasks, projects, collapsed }, { open, 
     boxSelectionEnabled: false,
     autoungrabify: true,
     // The library draws nothing until the layout has arrived, and listens for it from here on.
-    layout: layoutFor(root),
+    layout: layoutFor(root, elements.nodes.some((node) => node.data.id === DECISION_SHELF)),
   }));
   // What was drawn, as the plan has it: each item with the box it is in, and each arrow.
   cy.scratch("base", { nodes: new Map(built.nodes.map(({ data }) => [data.id, data.parent ?? null])), edges: new Set(built.edges.map(({ data }) => data.id)) });
@@ -629,8 +677,8 @@ function compare(base, built) {
  *   and problem mark;
  * - an item that is no longer there is greyed out and says so. It may be deleted, or finished and hidden, or no
  *   longer match the filter, or sit in another box or inside a group by now, or its box may have been moved;
- * - an arrow that is still in the plan between two such items shows whether it still holds work back; one that
- *   is not is greyed out;
+ * - an arrow that is still in the plan between two such items shows whether it still holds work back, or the
+ *   state of the decision it comes from; one that is not is greyed out;
  * - what is new in the plan has no place in the drawing, and is only counted.
  * Each time, the drawing is compared with the plan as a whole, so changes that come one upon the other, and
  * changes that are taken back, leave nothing behind. Only what changed is written: each item written is styled
@@ -651,13 +699,16 @@ function bringUpToDate(graph, { base, nodes, edges, there, holds }) {
   }
   for (const id of base.edges) {
     const item = graph.getElementById(id);
-    if (holds(id)) write(item, { kind: edges.get(id).kind });
+    if (holds(id)) {
+      const { id: same, source, target, ...data } = edges.get(id);
+      write(item, data);
+    }
     mark(item, !holds(id));
   }
 }
 
 /** What the layout is asked for: tasks in the order the work has to happen, from left to right, in their boxes. */
-function layoutFor(root) {
+function layoutFor(root, shelf) {
   return {
     name: SPARING,
     // The view is chosen when the layout has arrived, by `settle` or `putBack`.
@@ -675,6 +726,8 @@ function layoutFor(root) {
       "elk.spacing.componentComponent": 28,
       "elk.padding": "[top=24,left=24,bottom=24,right=24]",
       "elk.aspectRatio": Math.max(0.6, root.clientWidth / roomFor(root)),
+      // The shelf of the decisions is kept under the rest, as a box with a shelf keeps its shelf.
+      ...(shelf ? { "elk.layered.crossingMinimization.semiInteractive": "true" } : {}),
     },
     // Spacing is not passed down from one box to the boxes inside it, so each box is told.
     nodeLayoutOptions: (node) => {

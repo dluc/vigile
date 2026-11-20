@@ -358,8 +358,11 @@ the task appears in `list_next_tasks`.
 - **Board.** Tasks in columns by state: in progress, next, in review, waiting
   for dependencies, paused, draft, done, cancelled.
 - **Graph.** Projects and groups as boxes around their tasks, and an arrow from
-  each task to the tasks that wait for it. Drag to move it; zoom with the wheel
-  or the buttons.
+  each task to the tasks that wait for it. On an instance that has decisions,
+  each decision in view is drawn too, in a shape of its own that says its
+  state, with a dotted arrow to every task, group and project it affects; the
+  "Show decisions" switch above the graph takes them away. Drag to move it;
+  zoom with the wheel or the buttons.
 - **History.** Retained events from across the plan, newest first. Each row says
   what changed, when, who did it and which item it affected. Open a project or
   task from its row. Created and completed events are labeled clearly, and a
@@ -496,12 +499,13 @@ The gear button in the header opens the settings, which the browser remembers:
 | System light/dark | The page is light or dark as your system says. Off, a "Dark mode" switch appears and you choose | on |
 | Theme | Vigile, Dado, Jeev or Gito | Vigile |
 
-Two more switches sit above the graph, because they change what it shows:
+Three more switches sit above the graph, because they change what it shows:
 
 | Switch | Does | Starts |
 |---|---|---|
 | Collapse groups | Shows each group as one item with its progress | on |
-| Hide finished tasks | Leaves out tasks that are done or cancelled | off |
+| Hide finished tasks | Leaves out tasks that are done or cancelled, and decisions that are withdrawn | off |
+| Show decisions | Draws the decisions in view, each with an arrow to what it affects. Only on an instance that has decisions; the choice is remembered | on |
 
 The projects at the top fold into one row, and the button with four corners in
 the header folds away everything above the board or the graph, so that it gets
