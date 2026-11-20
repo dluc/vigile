@@ -106,13 +106,15 @@
     <div id="graph-panel" hidden>
       <div class="graph-tools">
         <label class="switch" title="Show each group as one item, for the high-level view"><input id="collapse-groups" type="checkbox" role="switch" checked><span class="track" aria-hidden="true"></span><span>Collapse groups</span></label>
-        <label class="switch" title="Leave out tasks that are done or cancelled"><input id="hide-finished" type="checkbox" role="switch"><span class="track" aria-hidden="true"></span><span>Hide finished tasks</span></label>
+        <label id="hide-finished-choice" class="switch" title="Leave out tasks that are done or cancelled"><input id="hide-finished" type="checkbox" role="switch"><span class="track" aria-hidden="true"></span><span>Hide finished tasks</span></label>
+        <label id="show-decisions-choice" class="switch" title="Draw the decisions in view, each with an arrow to what it affects" hidden><input id="show-decisions" type="checkbox" role="switch" checked><span class="track" aria-hidden="true"></span><span>Show decisions</span></label>
         <span class="zoom" role="group" aria-label="Zoom">
           <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
           <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
           <button id="zoom-fit" class="wide" type="button">Fit</button>
           <button id="graph-full" class="wide" type="button" aria-pressed="false" title="Give the graph the whole screen">Full screen</button>
         </span>
+        <span id="graph-decisions-note" class="graph-decisions-note" role="status" hidden></span>
       </div>
       <ul id="legend" class="legend" aria-label="What the colours and lines mean">
         <li><i class="swatch trouble"></i>bug, issue or incident</li>
@@ -120,6 +122,8 @@
         <li><i class="line open"></i>must finish first</li>
         <li><i class="line met"></i>already finished</li>
         <li><i class="line contains"></i>also contains</li>
+        <li class="of-decisions" hidden><svg class="shape decision" viewBox="0 0 24 15" width="24" height="15" aria-hidden="true"><polygon points="1.5,7.5 4,1.5 20,1.5 22.5,7.5 20,13.5 4,13.5"/></svg>decision</li>
+        <li class="of-decisions" hidden><i class="line affects"></i>affects</li>
       </ul>
       <div class="graph-frame">
         <p id="graph-status" class="graph-status" role="status" tabindex="-1" hidden><span id="graph-status-text"></span><button id="graph-draw" type="button" hidden></button></p>
