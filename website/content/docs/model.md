@@ -54,7 +54,7 @@ A decision has a `title`, the decision as one statement; a `description`, what i
 
 [`create_decision`](/docs/operations/create-decision/) takes `proposed` or `active` and has no default. [`update_decision`](/docs/operations/update-decision/) moves a decision between the three in any direction. Nothing else changes its status: no link, and no change to another item.
 
-A decision is in no group, and nothing depends on it. The project named when it is created gives its ID a prefix, and nothing more. What it affects is said by "affects" links, below.
+A decision is in no group, and nothing depends on it. The project named when it is created gives its ID a prefix, and nothing more. What it affects is said by "affects" links, below; in a list, and in an answer about it, a decision names them under `affects`, as a task names what holds it under `contained_in`.
 
 ## Types of task
 

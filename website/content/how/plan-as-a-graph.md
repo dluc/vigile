@@ -26,7 +26,7 @@ A team that writes its decisions in a file has to remember to read the file. In 
 - **Vigile stores and retrieves; it draws no conclusion.** No link is added by itself. A decision's state changes only when someone changes it: finishing or cancelling the work it affects leaves it as it was. A decision holds no work back, whatever its state.
 - **What it said before is in its history.** Each amendment and each change of state is recorded with who made it and when, and an amended text with what it was before.
 
-People read decisions in [the register](/docs/web-page/#decisions) of the page, and in the panel of the work they affect.
+People read decisions in [their own view](/docs/web-page/#decisions) of the page, and in the panel of the work they affect.
 
 ## Links
 
