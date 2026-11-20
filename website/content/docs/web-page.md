@@ -49,16 +49,19 @@ The selection and the zoom each have an [address](#addresses), so a reload, Back
 
 Projects and groups are drawn as boxes around their tasks, with an arrow from each task to the tasks that wait for it. Drag to move it; zoom with the wheel or the buttons. The graph's box reaches the bottom of the window, and "Full screen" gives it the whole screen; Escape brings the page back.
 
-Two switches sit above the graph, because they change what it shows:
+Three switches sit above the graph, because they change what it shows:
 
 | Switch | Does | Starts |
 |---|---|---|
 | Collapse groups | Shows each group as one item with its progress | on |
-| Hide finished tasks | Leaves out tasks that are done or cancelled | off |
+| Hide finished tasks | Leaves out tasks that are done or cancelled, and decisions that are withdrawn | off |
+| Show decisions | Draws the decisions in view, each with an arrow to what it affects | on |
+
+A decision is drawn as a six-sided box, pointed to the left and to the right, with its ID and state above its title: a proposed one with a dashed outline, a withdrawn one in grey. A dotted arrow runs from it to each task or project it affects, or to the group that stands for the task while groups are collapsed. Decisions stand left of what they affect. Two or more that affect nothing in the drawing are set in rows under it; a single one stays in the column with the others. Choosing one opens it in the panel. "Show decisions" is remembered in the browser; an instance without decisions has no such switch.
 
 The graph is laid out in the background, so the page stays usable while a large plan is worked out. A graph of more than 300 items is not drawn by itself: the page says how many items and arrows it has and draws it when you press "Draw the graph". A large graph that is on screen is not laid out again whenever the plan changes: what is still in the plan goes on showing its present state, what is gone is greyed out, and the page says how many items are new and offers "Draw it again".
 
-The graph shows the selected project, the project or group that was zoomed into and a chosen count as the board does, and follows the typed filter once the typing pauses.
+The graph shows the selected project, the project or group that was zoomed into and a chosen count as the board does, and follows the typed filter once the typing pauses. Decisions follow the project, the group and the filter as they do in [their own view](#decisions); a chosen count narrows the graph to tasks of one sort, and no decision is drawn with it.
 
 ## The panel {#the-panel}
 
@@ -104,7 +107,7 @@ The view reads the decisions when it is come to and again with every refresh of 
 
 {{picture decision-panel | A task open in the panel on the board. Its links start with "is affected by": the two decisions that affect the task, each with its ID, its title and its state, active. Below them the group and the project the task is in, what it depends on, what needs it and who has it.}}
 
-A decision is not a card on the board or a node in the graph. Outside its own view it is met where the work is: the panel of a task or a project lists the decisions that affect it under "is affected by", first among its links. Following one opens the decision in the panel, with its state, its text, its reasons, what it affects and its status timeline, and a way back to the task. [History](#history) lists the changes made to decisions among the others, each marked "Decision".
+A decision is not a card on the board. Outside its own view it is drawn in [the graph](#the-graph), and met where the work is: the panel of a task or a project lists the decisions that affect it under "is affected by", first among its links. Following one opens the decision in the panel, with its state, its text, its reasons, what it affects and its status timeline, and a way back to the task. [History](#history) lists the changes made to decisions among the others, each marked "Decision".
 
 When an instance is [set up for decisions alone](/docs/configuration/#features), there is no board: the page opens on a plain list of the decisions, at `/decisions.html`, where choosing one shows it below the list. Set up for tasks alone, the page has no "Decisions".
 
@@ -131,7 +134,7 @@ The views, a selected or zoomed project, a zoomed group, the filters of History 
 
 Bookmark an address or share it; the browser's Back and Forward return to the view, selection, zoom or item before and after.
 
-Not part of an address: the text typed in the board's filter, a chosen count, the two switches above the graph, the folded row of projects and collapsed columns.
+Not part of an address: the text typed in the board's filter, a chosen count, the switches above the graph, the folded row of projects and collapsed columns.
 
 ## Staying up to date
 
